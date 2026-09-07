@@ -71,7 +71,7 @@ https://github.com/user-attachments/assets/2fb17e1b-e6a1-487a-8240-e44c93f56bab
 
 ## 2. 购买与准备硬件
 
-购买咨询：[利尔达官方淘宝店](https://lierda.taobao.com/index.htm)（请向客服确认 NT26F6D0 开发套件及所需配件）。
+购买链接：[利尔达 NT26F6D0 开发套件（淘宝）](https://item.taobao.com/item.htm?ft=t&id=1055493780611&skuId=6093790444060)。
 
 本工程适配 **NT26F6D0 / F6D_A**，搭配 **SSD1306 OLED、三按键、ES8311 音频电路、麦克风和扬声器**。准备可上网的 4G SIM 卡、天线及 USB 数据线；使用其他硬件时需核对引脚与音频配置。
 
