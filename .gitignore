@@ -1,0 +1,15 @@
+# Build outputs and the compiler extracted on first build.
+/gccout/
+/out/
+/tools/toolchain/gcc/
+
+# Publish only the complete firmware package.
+/firmware/*
+!/firmware/L_CT4IT00_YP00W_01_V04_NT26F6D0_01.binpkg
+
+# Local diagnostics and editor state.
+/.codex*/
+/.vscode/
+*.log
+Thumbs.db
+Desktop.ini
