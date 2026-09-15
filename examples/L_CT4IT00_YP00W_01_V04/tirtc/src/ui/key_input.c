@@ -20,6 +20,7 @@
 #include "liot_log.h"
 #include "liot_os.h"
 #include "ui_controller.h"
+#include "key_input.h"
 
 #define KEY0_GPIO              L_GPIO_20
 #define KEY0_MODEM_PIN         5
@@ -31,6 +32,15 @@
 #define KEY_DEBOUNCE_MS        80U
 
 static volatile uint32_t s_key_last_tick[KEY_COUNT];
+#ifdef HWDEMO_GROUP_ROOM_EN
+static volatile bool s_key_hardware_ready;
+
+bool demo_key_back_is_pressed(void)
+{
+    return s_key_hardware_ready &&
+           Liot_WakeupPadGetLevel(KEY2_WAKEUP_PAD) == L_IO_LOW;
+}
+#endif
 
 static bool key_debounce_accept(uint8_t key_index)
 {
@@ -155,6 +165,9 @@ void demo_key_task(void *argv)
     (void)argv;
 
     ret = key_hardware_init();
+#ifdef HWDEMO_GROUP_ROOM_EN
+    s_key_hardware_ready = ret == 0;
+#endif
     liot_trace("[KEY] init ret=%d; KEY0=NEXT KEY1=OK KEY2=BACK debounce=%ums\r\n",
                ret, (unsigned int)KEY_DEBOUNCE_MS);
 

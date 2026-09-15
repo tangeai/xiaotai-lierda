@@ -28,14 +28,15 @@ HWDEMO_AI_CHAT_EN      ?= y
 HWDEMO_WECHAT_EN       ?= y
 HWDEMO_DEV_CHAT_EN     ?= y
 HWDEMO_LIVE_TALK_EN    ?= y
+HWDEMO_GROUP_ROOM_EN   ?= y
+TIRTC_GROUP_BACK_HOLD_MS ?= 2000
 
 # Shared by every call type.  This must be configured before TiRtcInit().
 TIRTC_MAX_SEND_BUFFER_BYTES ?= 131072
 
-# Keep the TiRTC library at its maximum diagnostic level while call-failure
-# recovery is being verified.  Transport logging/statistics stay restrained so
-# a 115200-baud debug UART does not unnecessarily delay media work.
-TIRTC_LIBRARY_LOG_LEVEL   ?= 15
+# Set SDK and transport log levels to 3; disable verbose statistics.
+# Application liot_trace logs (AI-CALL, WX, DEV, etc.) are unchanged.
+TIRTC_LIBRARY_LOG_LEVEL   ?= 3
 TIRTC_TRANSPORT_LOG_LEVEL ?= 3
 TIRTC_TRANSPORT_STATS_EN  ?= 0
 

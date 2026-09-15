@@ -23,6 +23,9 @@ typedef enum
     DEMO_UI_FEATURE_AI_CHAT = 0,
     DEMO_UI_FEATURE_WECHAT,
     DEMO_UI_FEATURE_DEV_CHAT,
+#ifdef HWDEMO_GROUP_ROOM_EN
+    DEMO_UI_FEATURE_GROUP_ROOM,
+#endif
 } demo_ui_feature_e;
 
 int demo_ui_init(void);

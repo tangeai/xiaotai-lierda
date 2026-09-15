@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "cJSON.h"
+#include "json_guard.h"
 #include "mbedtls/base64.h"
 #include "mbedtls/md.h"
 #include "mbedtls/sha256.h"
@@ -1476,7 +1477,7 @@ static int binding_discover_services(void)
         return BIND_ERR_DISCOVERY_HTTP;
     }
 
-    root = cJSON_Parse(response);
+    root = demo_json_parse(response);
     if (root == NULL ||
         binding_copy_json_string(root, "device-srv",
                                  s_services.device_server,
@@ -1817,7 +1818,7 @@ int demo_binding_fetch_ai_access(demo_binding_ai_access_t *out)
         goto cleanup;
     }
 
-    root = cJSON_Parse(response);
+    root = demo_json_parse(response);
     business_code = (root != NULL)
                         ? cJSON_GetObjectItemCaseSensitive(root, "code")
                         : NULL;
@@ -1966,7 +1967,7 @@ static int binding_report_device(bool signed_request)
         goto cleanup;
     }
 
-    root = cJSON_Parse(response);
+    root = demo_json_parse(response);
     business_code = (root != NULL)
                         ? cJSON_GetObjectItemCaseSensitive(root, "code")
                         : NULL;
@@ -2055,7 +2056,7 @@ static int binding_verify_server_binding(char *mqtt_token_out,
         goto cleanup;
     }
 
-    root = cJSON_Parse(response);
+    root = demo_json_parse(response);
     business_code = (root != NULL)
                         ? cJSON_GetObjectItemCaseSensitive(root, "code")
                         : NULL;
@@ -2206,7 +2207,7 @@ static void binding_mqtt_incoming_cb(liot_mqtt_client_t *client,
     liot_trace("[BIND-MQTT] command received bytes=%u\r\n",
                (unsigned int)payload_len);
 
-    root = cJSON_ParseWithLength((const char *)payload, payload_len);
+    root = demo_json_parse_with_length((const char *)payload, payload_len);
     type = (root != NULL)
                ? cJSON_GetObjectItemCaseSensitive(root, "type")
                : NULL;
@@ -2502,6 +2503,7 @@ static int binding_send_grant_ack(void)
 static int binding_wait_for_grant(uint32_t deadline)
 {
     liot_mqtt_client_option options;
+    const char *log_broker;
     int ret;
 
     /* A previous asynchronous deinit must finish before these globals are
@@ -2556,9 +2558,17 @@ static int binding_wait_for_grant(uint32_t deadline)
     options.delivery_cnt = 3;
     options.ping_timeout = 5;
 
+    /* Log the actual discovery endpoint, never URL credentials or queries. */
+    log_broker = (strncmp(s_services.mqtt_url, "mqtt://", 7U) == 0 &&
+                  strpbrk(s_services.mqtt_url + 7U, "/@?#\r\n") == NULL)
+                     ? s_services.mqtt_url : "<broker URL redacted>";
+    liot_trace("[BIND-MQTT] connecting broker=%s cid=%d source=mqtt-srv\r\n",
+               log_broker, BIND_PDP_CID);
     ret = liot_mqtt_connect(&s_mqtt_client, s_services.mqtt_url,
                             NULL, NULL, &options,
                             binding_mqtt_exception_cb);
+    liot_trace("[BIND-MQTT] connect submit ret=%d "
+               "(0=accepted,-2=queued; wait for connect status)\r\n", ret);
     if (ret != LIOT_MQTTCLIENT_SUCCESS &&
         ret != LIOT_MQTTCLIENT_WOUNDBLOCK)
     {
@@ -2567,9 +2577,12 @@ static int binding_wait_for_grant(uint32_t deadline)
     }
     if (binding_wait_mqtt_connected(deadline) != 0)
     {
+        liot_trace("[BIND-MQTT] connect wait failed broker=%s\r\n",
+                   log_broker);
         (void)binding_mqtt_cleanup();
         return BIND_ERR_MQTT_CONNECT;
     }
+    liot_trace("[BIND-MQTT] connected broker=%s\r\n", log_broker);
 
     ret = liot_mqtt_sub_unsub(&s_mqtt_client, s_cmd_topic, 1,
                               NULL, NULL, 1);
@@ -2590,6 +2603,8 @@ static int binding_wait_for_grant(uint32_t deadline)
     /* Do not expose the code until the device can actually receive grant. */
     binding_snapshot_set(DEMO_BIND_WAIT_GRANT, s_report.code,
                          binding_seconds_remaining(deadline), BIND_ERR_NONE);
+    liot_trace("[BIND-MQTT] online broker=%s; cmd subscribed\r\n",
+               log_broker);
     liot_trace("[BIND] temporary MQTT online; waiting for auth_grant\r\n");
     while (binding_deadline_pending(deadline))
     {

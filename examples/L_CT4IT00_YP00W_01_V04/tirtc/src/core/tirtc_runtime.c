@@ -176,16 +176,79 @@ typedef struct
     TIRTCCONNECTCALLBACK callback;
     void *user_data;
     bool token_present;
+    bool recover_failed_handle;
     char remote[DEMO_TIRTC_CONNECT_TEXT_BYTES];
     char token[DEMO_TIRTC_CONNECT_TOKEN_BYTES];
 } runtime_connect_context_t;
 
 static runtime_connection_state_t s_connection;
 static runtime_connect_context_t s_connect_context;
+/* The affected SDK hides the handle on failed DEV connects.  Keep the
+ * synchronous submit window separate from callback completion: the RTC
+ * worker can report failure before TiRtcConnect has returned. */
+static struct
+{
+    liot_task_t task;
+    uint32_t request_generation;
+    bool callback_completed;
+} s_dev_connect_submit;
 /* A runtime recovery deliberately does not wait for a feature task to release
  * its logical owner: the feature may itself be waiting for SDK teardown.  The
  * retired generation makes that late release idempotent after restart. */
 static uint32_t s_retired_session_generation[DEMO_TIRTC_OWNER_COUNT];
+
+static bool runtime_dev_connect_needs_cleanup(void)
+{
+    const char *build = TiRtcGetBuildInfo();
+
+    /* Both audited archives hide the failed handle without freeing it.
+     * Keep this narrow: an SDK that fixes ownership must not use recovery. */
+    return build != NULL &&
+           ((strstr(build, "v2.4.0-7f41aae1") != NULL &&
+             strstr(build, "7750ab42") != NULL) ||
+            (strstr(build, "v2.5.0-87c3c290") != NULL &&
+             strstr(build, "f72f5d3c") != NULL));
+}
+
+extern void __real_tgtrp_connection_set_on_error(
+    tgtrp_connection connection,
+    void (*callback)(tgtrp_connection, void *, int), void *context);
+
+void __wrap_tgtrp_connection_set_on_error(
+    tgtrp_connection connection,
+    void (*callback)(tgtrp_connection, void *, int), void *context)
+{
+    liot_task_t task = NULL;
+
+    /* In this exact archive, _tirtc_create_conn registers its TiRTC handle as
+     * the error context.  Capture only this DEV request on its submit task;
+     * unrelated incoming/WHIP registrations must pass through untouched. */
+    if (connection != NULL && callback != NULL && context != NULL &&
+        liot_rtos_task_get_current_ref(&task) == LIOT_OSI_SUCCESS &&
+        task != NULL)
+    {
+        liot_rtos_enter_critical();
+        if (task == s_dev_connect_submit.task &&
+            s_dev_connect_submit.request_generation != 0U &&
+            s_connect_context.pending &&
+            s_connect_context.recover_failed_handle &&
+            s_connect_context.kind == RUNTIME_CONNECT_DEVICE &&
+            s_connect_context.owner == DEMO_TIRTC_OWNER_DEV_CHAT &&
+            s_connection.connect_callback_pending &&
+            s_connection.pending_request_generation ==
+                s_dev_connect_submit.request_generation &&
+            s_connect_context.request_generation ==
+                s_dev_connect_submit.request_generation &&
+            s_connection.pending_generation ==
+                s_connect_context.session_generation &&
+            s_connection.pending_handle == NULL)
+        {
+            s_connection.pending_handle = (tirtc_conn_t)context;
+        }
+        liot_rtos_exit_critical();
+    }
+    __real_tgtrp_connection_set_on_error(connection, callback, context);
+}
 
 /*
  * The supplied target archive creates one high-priority worker named
@@ -197,7 +260,7 @@ static uint32_t s_retired_session_generation[DEMO_TIRTC_OWNER_COUNT];
  * application log stuck at AI CONNECTING.
  *
  * Keep the supplied archive intact and enlarge only that connection worker to
- * a 16 KiB effective FreeRTOS stack.  The wrapper also records task creation
+ * a 32 KiB effective FreeRTOS stack.  The wrapper also records task creation
  * before and after the SDK call, which makes any remaining platform failure
  * unambiguous without enabling the archive's incompatible logger.
  */
@@ -632,6 +695,11 @@ static const demo_tirtc_listener_t *runtime_owner_feature_snapshot(
         case DEMO_TIRTC_OWNER_DEV_CHAT:
             feature = DEMO_TIRTC_FEATURE_DEV_CHAT;
             break;
+#ifdef HWDEMO_GROUP_ROOM_EN
+        case DEMO_TIRTC_OWNER_GROUP_ROOM:
+            feature = DEMO_TIRTC_FEATURE_GROUP_ROOM;
+            break;
+#endif
         default:
             return NULL;
     }
@@ -800,6 +868,7 @@ static void runtime_connect_context_clear_locked(void)
     s_connect_context.callback = NULL;
     s_connect_context.user_data = NULL;
     s_connect_context.token_present = false;
+    s_connect_context.recover_failed_handle = false;
 }
 
 static void runtime_pending_clear_locked(void)
@@ -951,6 +1020,14 @@ static void runtime_managed_connect_result(int error, tirtc_conn_t hconn,
         {
             callback_error = s_connection.pending_error;
         }
+        if (callback_error != 0 && hconn == NULL &&
+            context->recover_failed_handle &&
+            !s_connection.pending_handle_released)
+        {
+            /* The public failure callback still receives NULL.  Only the
+             * adapter retains this hidden handle for its normal async close. */
+            hconn = s_connection.pending_handle;
+        }
         if (callback_error == 0 && hconn == NULL)
         {
             callback_error = TIRTC_E_INVALID_HANDLE;
@@ -1025,8 +1102,17 @@ static void runtime_managed_connect_result(int error, tirtc_conn_t hconn,
         s_connect_context.pending &&
         s_connect_context.request_generation == request_generation)
     {
-        runtime_pending_clear_locked();
-        runtime_connect_context_clear_locked();
+        if (s_dev_connect_submit.request_generation == request_generation)
+        {
+            /* Keep admission, borrowed strings and teardown gated until the
+             * synchronous SDK submit stack has also returned. */
+            s_dev_connect_submit.callback_completed = true;
+        }
+        else
+        {
+            runtime_pending_clear_locked();
+            runtime_connect_context_clear_locked();
+        }
         callback_completed = true;
     }
     liot_rtos_exit_critical();
@@ -1053,6 +1139,9 @@ static void runtime_process_managed_disconnect(void)
     liot_rtos_enter_critical();
     if (s_connection.closing != NULL &&
         !s_connection.disconnect_submitted && s_connection.users == 0U &&
+        (s_connection.closing_owner != DEMO_TIRTC_OWNER_DEV_CHAT ||
+         (!s_connection.connect_callback_pending &&
+          s_dev_connect_submit.request_generation == 0U)) &&
         (s_connection.disconnect_retry_at == 0U ||
          !runtime_deadline_pending(s_connection.disconnect_retry_at)))
     {
@@ -1556,7 +1645,7 @@ static void runtime_on_conn_accepted(tirtc_conn_t hconn)
         accepted = incoming->on_conn_accepted(hconn);
         if (accepted == 0)
         {
-            owner = DEMO_TIRTC_FEATURE_COUNT + 1U;
+            owner = DEMO_TIRTC_OWNER_LIVE;
         }
     }
     liot_trace("[TIRTC] incoming connection handle=%p owner=%u result=%s\r\n",
@@ -2428,6 +2517,7 @@ static int runtime_connect_submit(runtime_connect_kind_e kind,
     size_t remote_length;
     size_t token_length = 0U;
     uint32_t request_generation;
+    liot_task_t capture_task = NULL;
     int ret;
 
     if ((kind != RUNTIME_CONNECT_DEVICE && kind != RUNTIME_CONNECT_WHIP) ||
@@ -2447,6 +2537,14 @@ static int runtime_connect_submit(runtime_connect_kind_e kind,
         token_length >= sizeof(s_connect_context.token))
     {
         return TIRTC_E_INVALID_PARAMETER;
+    }
+    if (kind == RUNTIME_CONNECT_DEVICE &&
+        owner == DEMO_TIRTC_OWNER_DEV_CHAT &&
+        runtime_dev_connect_needs_cleanup() &&
+        (liot_rtos_task_get_current_ref(&capture_task) != LIOT_OSI_SUCCESS ||
+         capture_task == NULL))
+    {
+        return TIRTC_E_INTERNAL_ERROR;
     }
 
     liot_rtos_enter_critical();
@@ -2492,6 +2590,13 @@ static int runtime_connect_submit(runtime_connect_kind_e kind,
     s_connect_context.callback = callback;
     s_connect_context.user_data = user_data;
     s_connect_context.token_present = token != NULL;
+    s_connect_context.recover_failed_handle = capture_task != NULL;
+    if (capture_task != NULL)
+    {
+        s_dev_connect_submit.task = capture_task;
+        s_dev_connect_submit.request_generation = request_generation;
+        s_dev_connect_submit.callback_completed = false;
+    }
     memcpy(s_connect_context.remote, remote, remote_length + 1U);
     if (token != NULL)
     {
@@ -2517,6 +2622,22 @@ static int runtime_connect_submit(runtime_connect_kind_e kind,
                                s_connect_context.token,
                                runtime_managed_connect_result,
                                &s_connect_context);
+    }
+    if (capture_task != NULL)
+    {
+        liot_rtos_enter_critical();
+        if (s_dev_connect_submit.request_generation == request_generation)
+        {
+            if (s_dev_connect_submit.callback_completed &&
+                s_connection.pending_request_generation == request_generation)
+            {
+                runtime_pending_clear_locked();
+                runtime_connect_context_clear_locked();
+            }
+            memset(&s_dev_connect_submit, 0, sizeof(s_dev_connect_submit));
+        }
+        liot_rtos_exit_critical();
+        runtime_signal();
     }
     if (ret != 0)
     {

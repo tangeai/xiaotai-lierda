@@ -16,10 +16,17 @@
 #ifndef TIRTC_APP_KEY_INPUT_H
 #define TIRTC_APP_KEY_INPUT_H
 
+#include <stdbool.h>
+
 /**
  * @brief Keypad demo task entry
  * @param[in] argv  Task argument (unused)
  */
 void demo_key_task(void *argv);
+
+#ifdef HWDEMO_GROUP_ROOM_EN
+/* Read only from task context. False also covers unavailable keypad hardware. */
+bool demo_key_back_is_pressed(void);
+#endif
 
 #endif /* TIRTC_APP_KEY_INPUT_H */

@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "cJSON.h"
+#include "json_guard.h"
 #include "liot_log.h"
 #include "liot_mqtt_client.h"
 #include "liot_os.h"
@@ -579,7 +580,7 @@ static void formal_incoming_cb(liot_mqtt_client_t *client,
         kind = DEMO_FORMAL_MQTT_NOTIFY;
     }
 
-    root = cJSON_ParseWithLength((const char *)payload, payload_len);
+    root = demo_json_parse_with_length((const char *)payload, payload_len);
     type = (root != NULL)
                ? cJSON_GetObjectItemCaseSensitive(root, "type")
                : NULL;
@@ -591,6 +592,14 @@ static void formal_incoming_cb(liot_mqtt_client_t *client,
 
     channel = cJSON_GetObjectItemCaseSensitive(root, "channel");
     business_payload = cJSON_GetObjectItemCaseSensitive(root, "payload");
+#ifdef HWDEMO_GROUP_ROOM_EN
+    /* Room assignment hints use top-level metadata in the server protocol. */
+    if (strcmp(type->valuestring, "room_assignment_changed") == 0 &&
+        !cJSON_IsObject(business_payload))
+    {
+        business_payload = root;
+    }
+#endif
     liot_trace("[FORMAL-MQTT] message type=%s channel=%s payload=%u\r\n",
                type->valuestring,
                cJSON_IsString(channel) && channel->valuestring != NULL ?
@@ -857,6 +866,7 @@ int demo_formal_mqtt_connect(const char *mqtt_url,
                              const char *device_id,
                              const char *mqtt_token)
 {
+    const char *log_broker;
     size_t id_len;
     size_t token_len;
     int cleanup_ret;
@@ -951,17 +961,26 @@ int demo_formal_mqtt_connect(const char *mqtt_url,
     s_options.delivery_cnt = 3;
     s_options.ping_timeout = 5;
 
-    liot_trace("[FORMAL-MQTT] connecting client_len=%u token_len=%u\r\n",
+    /* Keep authentication fields private while identifying the real broker. */
+    log_broker = (strncmp(mqtt_url, "mqtt://", 7U) == 0 &&
+                  strpbrk(mqtt_url + 7U, "/@?#\r\n") == NULL)
+                     ? mqtt_url : "<broker URL redacted>";
+    liot_trace("[FORMAL-MQTT] connecting broker=%s cid=%d "
+               "client_len=%u token_len=%u\r\n",
+               log_broker, FORMAL_MQTT_PDP_CID,
                (unsigned int)strlen(s_client_id), (unsigned int)token_len);
     ret = liot_mqtt_connect(s_client, mqtt_url, NULL, NULL,
                             &s_options, formal_exception_cb);
+    liot_trace("[FORMAL-MQTT] connect submit ret=%d "
+               "(0=accepted,-2=queued; wait for connect status)\r\n", ret);
     if ((ret != LIOT_MQTTCLIENT_SUCCESS &&
          ret != LIOT_MQTTCLIENT_WOUNDBLOCK) ||
         formal_wait_connected() != 0 ||
         formal_subscribe(s_cmd_topic) != 0 ||
         formal_subscribe(s_notify_topic) != 0)
     {
-        liot_trace("[FORMAL-MQTT] connect/subscribe failed ret=%d\r\n", ret);
+        liot_trace("[FORMAL-MQTT] connect/subscribe failed ret=%d "
+                   "broker=%s\r\n", ret, log_broker);
         goto fail;
     }
 
@@ -972,7 +991,8 @@ int demo_formal_mqtt_connect(const char *mqtt_url,
     s_accept_incoming = true;
     s_lifecycle = FORMAL_LIFECYCLE_ACTIVE;
     liot_rtos_exit_critical();
-    liot_trace("[FORMAL-MQTT] online; cmd+notify subscribed\r\n");
+    liot_trace("[FORMAL-MQTT] online; cmd+notify subscribed broker=%s\r\n",
+               log_broker);
     liot_rtos_mutex_unlock(s_lifecycle_mutex);
     return 0;
 

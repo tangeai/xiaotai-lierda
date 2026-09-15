@@ -25,6 +25,7 @@
 #include <string.h>
 
 #include "cJSON.h"
+#include "json_guard.h"
 #include "audio_device.h"
 #ifdef HWDEMO_AI_CHAT_EN
 #include "ai_chat.h"
@@ -36,6 +37,9 @@
 #include "platform_intercom.h"
 #endif
 #include "tirtc_runtime.h"
+#ifdef HWDEMO_GROUP_ROOM_EN
+#include "group_intercom.h"
+#endif
 #ifdef HWDEMO_WECHAT_EN
 #include "wechat_call.h"
 #endif
@@ -101,6 +105,9 @@
 #define DEV_IDLE_WAIT_MS                    50U
 #define DEV_PREBUFFER_PACKETS                3U
 #define DEV_PREBUFFER_TIMEOUT_MS            80U
+#ifdef HWDEMO_GROUP_ROOM_EN
+#define DEV_GROUP_HANDOFF_TIMEOUT_MS     30000U
+#endif
 
 #define DEV_ERR_INIT                     (-5001)
 #define DEV_ERR_SERVICE                  (-5002)
@@ -117,6 +124,7 @@
 typedef struct
 {
     char device_id[DEV_ID_MAX];
+    char name[DEV_NAME_MAX];
     char display[DEV_DISPLAY_MAX];
     bool online;
 } dev_contact_t;
@@ -140,6 +148,9 @@ typedef enum
 typedef struct
 {
     dev_mqtt_event_type_e type;
+#ifdef HWDEMO_GROUP_ROOM_EN
+    uint32_t received_ms;
+#endif
     dev_call_type_e call_type;
     char room_id[DEV_ROOM_MAX];
     char peer_id[DEV_ID_MAX];
@@ -229,13 +240,25 @@ static volatile uint8_t s_speaker_level =
 static volatile uint8_t s_mic_level = DEMO_AI_AUDIO_DEFAULT_MIC_LEVEL;
 
 static dev_contact_t s_contacts[DEV_CONTACT_MAX];
+/* Keep an AI target independent of subsequent contact-list refreshes. */
+static dev_contact_t s_request_contact;
+static bool s_request_contact_valid;
 static uint8_t s_contact_count;
 static uint8_t s_selected_contact;
 static uint32_t s_contacts_revision;
+static bool s_contacts_refreshing;
+static uint32_t s_call_refresh_requested;
+static uint32_t s_call_refresh_completed;
+static int s_call_refresh_result;
 static char s_display_name[DEV_DISPLAY_MAX] = "DEV";
 
 static bool s_caller;
 static bool s_expect_incoming;
+/* Worker-owned history, unlike s_conn/expect which callbacks may clear.
+ * A submitted/unresolved caller room may still deliver a reverse P2P. Once
+ * the matching room is confirmed and media starts, only real SDK/audio
+ * teardown is required; do not impose another fixed 10-second cooldown. */
+static bool s_late_incoming_possible;
 static char s_room_id[DEV_ROOM_MAX];
 static char s_peer_id[DEV_ID_MAX];
 static char s_peer_name[DEV_NAME_MAX];
@@ -245,6 +268,15 @@ static volatile uint32_t s_room_cancel_generation;
 static uint32_t s_incoming_generation;
 static uint32_t s_session_sequence;
 static uint32_t s_completed_sequence;
+#ifdef HWDEMO_GROUP_ROOM_EN
+/* The normal session fields retain the invitation, without a TiRTC claim
+ * until ROOM has drained. Its generation/deadline never restart at handoff. */
+static bool s_group_pending;
+static uint32_t s_group_ticket;
+static uint32_t s_group_wait_deadline_ms;
+static char s_group_recent_room[DEV_ROOM_MAX];
+static uint32_t s_group_recent_until;
+#endif
 static uint32_t s_deadline_ms;
 static uint32_t s_error_deadline_ms;
 static uint32_t s_contact_retry_at;
@@ -664,7 +696,7 @@ static bool dev_transport_ready(void)
 
 static int dev_business_code(const char *response)
 {
-    cJSON *root = cJSON_Parse(response);
+    cJSON *root = demo_json_parse(response);
     const cJSON *code = root != NULL ?
                             cJSON_GetObjectItemCaseSensitive(root, "code") :
                             NULL;
@@ -854,7 +886,7 @@ static int dev_fetch_contacts(void)
     {
         return DEV_ERR_CONTACTS;
     }
-    root = cJSON_Parse(s_http_response);
+    root = demo_json_parse(s_http_response);
     code = root != NULL ? cJSON_GetObjectItemCaseSensitive(root, "code") :
                           NULL;
     data = root != NULL ? cJSON_GetObjectItemCaseSensitive(root, "data") :
@@ -907,6 +939,7 @@ static int dev_fetch_contacts(void)
         }
         dev_make_display(preferred, contact->device_id, count,
                          contact->display);
+        memcpy(contact->name, preferred, sizeof(contact->name));
         online = cJSON_GetObjectItemCaseSensitive(item, "online");
         contact->online = cJSON_IsTrue(online);
         ++count;
@@ -934,12 +967,70 @@ static int dev_fetch_contacts(void)
     {
         memcpy(s_display_name, "NO DEVICE", sizeof("NO DEVICE"));
     }
-    liot_rtos_exit_critical();
     s_contacts_ready = true;
+    liot_rtos_exit_critical();
     liot_trace("[DEV] contacts ready count=%u revision=%u\r\n",
                (unsigned int)count,
                (unsigned int)s_contacts_revision);
     return 0;
+}
+
+/* Worker-only refresh. Consume intent only when I/O really starts; a new
+ * update during I/O remains pending. Keep the old array for OLED/manual use,
+ * but never present a failed refresh as a fresh AI contact snapshot. */
+static void dev_refresh_contacts_now(void)
+{
+    uint32_t call_ticket;
+    int ret;
+
+    liot_rtos_enter_critical();
+    s_request_refresh = false;
+    s_contacts_refreshing = true;
+    call_ticket = s_call_refresh_requested != s_call_refresh_completed ?
+                      s_call_refresh_requested : 0U;
+    /* Already accepted calls may retain the previous valid snapshot.
+     * New AI lookups are gated by refreshing until this attempt settles. */
+    liot_rtos_exit_critical();
+    ret = dev_fetch_contacts();
+    liot_rtos_enter_critical();
+    s_contacts_refreshing = false;
+    /* An AI request arriving during this HTTP needs the next attempt.
+     * Ordinary retries must not turn a completed failed ticket into success. */
+    if (call_ticket != 0U)
+    {
+        s_call_refresh_completed = call_ticket;
+        s_call_refresh_result = ret;
+    }
+    if (ret != 0)
+    {
+        s_contacts_ready = false;
+        s_request_refresh = true;
+        s_contact_retry_at = liot_rtos_get_running_time() +
+                             DEV_CONTACT_RETRY_MS;
+        if (s_contact_retry_at == 0U) s_contact_retry_at = 1U;
+    }
+    else
+    {
+        s_contact_retry_at = 0U;
+    }
+    liot_rtos_exit_critical();
+    if (call_ticket != 0U)
+    {
+        liot_trace("[DEV-CACHE] call refresh ticket=%u result=%d\r\n",
+                   (unsigned int)call_ticket, ret);
+    }
+    if (ret != 0)
+    {
+        dev_set_state(DEMO_DEV_CHAT_ERROR, ret);
+        s_error_deadline_ms = liot_rtos_get_running_time() +
+                              DEV_ERROR_VISIBLE_MS;
+        liot_trace("[DEV-CACHE] refresh failed ret=%d retry_ms=%u\r\n",
+                   ret, (unsigned int)DEV_CONTACT_RETRY_MS);
+    }
+    else
+    {
+        dev_set_state(DEMO_DEV_CHAT_READY, 0);
+    }
 }
 
 static int dev_audio_slot_acquire(tirtc_conn_t connection,
@@ -1101,6 +1192,9 @@ static void dev_formal_mqtt_handler(
     if (strcmp(type, "call_incoming") == 0)
     {
         event.type = DEV_MQTT_INCOMING;
+#ifdef HWDEMO_GROUP_ROOM_EN
+        event.received_ms = liot_rtos_get_running_time();
+#endif
         memset(call_type, 0, sizeof(call_type));
         valid = payload != NULL &&
                 dev_json_copy(payload, "room_id", event.room_id,
@@ -1657,6 +1751,7 @@ static void dev_finish_session(int result,
     tirtc_conn_t connection;
     char room_id[DEV_ROOM_MAX];
     bool caller;
+    bool keep_late_incoming_guard;
     bool tirtc_claimed;
     uint32_t tirtc_generation;
     bool connect_inflight = false;
@@ -1700,10 +1795,23 @@ static void dev_finish_session(int result,
     s_conn = NULL;
     s_expect_incoming = false;
     caller = s_caller;
+    keep_late_incoming_guard = caller && s_late_incoming_possible;
     tirtc_claimed = s_tirtc_claimed;
     tirtc_generation = s_tirtc_generation;
     memcpy(room_id, s_room_id, sizeof(room_id));
+#ifdef HWDEMO_GROUP_ROOM_EN
+    if (s_group_ticket != 0U)
+    {
+        memcpy(s_group_recent_room, s_room_id, sizeof(s_group_recent_room));
+        s_group_recent_until = liot_rtos_get_running_time() +
+                               DEV_ROOM_TOMBSTONE_MS;
+    }
+    s_group_pending = false;
+    s_group_wait_deadline_ms = 0U;
+    /* The reservation survives until connection/audio teardown is idle. */
+#endif
     s_request_call = false;
+    s_request_contact_valid = false;
     s_request_call_sequence = 0U;
     s_request_hangup = false;
     s_request_conn_error = false;
@@ -1768,13 +1876,13 @@ static void dev_finish_session(int result,
     }
     (void)dev_wait_audio_producers();
     dev_drain_audio();
-    dev_tirtc_begin_release(caller);
+    liot_trace("[DEV] teardown late_peer_guard_ms=%u\r\n",
+               keep_late_incoming_guard ?
+                   (unsigned int)DEV_LATE_INCOMING_GUARD_MS : 0U);
+    dev_tirtc_begin_release(keep_late_incoming_guard);
     (void)dev_tirtc_try_release();
-    if (caller && s_state == DEMO_DEV_CHAT_STOPPING)
-    {
-        s_reject_incoming_until = liot_rtos_get_running_time() +
-                                  DEV_LATE_INCOMING_GUARD_MS;
-    }
+    s_reject_incoming_until = keep_late_incoming_guard ?
+        liot_rtos_get_running_time() + DEV_LATE_INCOMING_GUARD_MS : 0U;
     ++s_generation;
     if (s_generation == 0U)
     {
@@ -1786,6 +1894,7 @@ static void dev_finish_session(int result,
     dev_secure_zero(s_confirm_room, sizeof(s_confirm_room));
     dev_secure_zero(s_existing_room_hint, sizeof(s_existing_room_hint));
     s_caller = false;
+    s_late_incoming_possible = false;
     s_deadline_ms = 0U;
     dev_flush_signal_queue();
     dev_mark_session_complete();
@@ -1864,6 +1973,7 @@ static int dev_start_audio(void)
     s_downlink_reject_logged = false;
     s_playback_error_logged = false;
     s_existing_answered_caller = false;
+    s_late_incoming_possible = false;
     dev_set_state(DEMO_DEV_CHAT_IN_CALL, 0);
     liot_trace("[DEV] media started bidirectional G711A/8k/mono/20ms "
                "stream=10 (no AEC)\r\n");
@@ -2092,6 +2202,9 @@ static void dev_begin_session(bool caller, const char *peer_id,
     dev_secure_zero(s_confirm_room, sizeof(s_confirm_room));
     s_caller = caller;
     s_expect_incoming = caller;
+    /* Recovered caller rooms are unresolved until P2P+room confirmation.
+     * A newly initiated call overrides this before its first HTTP submit. */
+    s_late_incoming_possible = caller;
     s_conn = NULL;
     s_request_conn_error = false;
     s_request_conn_error_code = 0;
@@ -2153,13 +2266,22 @@ static bool dev_recovery_owner_safe(bool recovery_inflight)
     {
         safe = !s_connect_contexts[i].pending;
     }
+#ifdef HWDEMO_GROUP_ROOM_EN
+    /* GROUP allows real MQTT calls, but cold-recovery polling must not
+     * advertise DEV as busy and suspend the listening room. */
+    safe = safe && !demo_group_intercom_is_enabled() &&
+           demo_group_intercom_is_idle() && !demo_group_intercom_has_call();
+#endif
     liot_rtos_exit_critical();
     return safe && dev_other_features_idle();
 }
 
 static bool dev_recovery_safe(void)
 {
-    return dev_recovery_owner_safe(false);
+    /* A pending UI entry already closes HOME/DEV admission even though the
+     * target AI/WX worker has not started yet. Do not steal that idle window
+     * for background HTTP and keep the user's feature waiting again. */
+    return s_home_allowed && dev_recovery_owner_safe(false);
 }
 
 /* Recover the call-server room exactly as the official minimal runtime does.
@@ -2185,8 +2307,15 @@ static int dev_recover_room(void)
     memset(role, 0, sizeof(role));
     memset(caller, 0, sizeof(caller));
     memset(call_type, 0, sizeof(call_type));
+    /* GROUP may enter after the worker's preflight check. Recheck before
+     * publishing recovery_inflight, under the same critical section. */
     liot_rtos_enter_critical();
-    if (s_recovery_inflight)
+    if (!s_home_allowed || s_recovery_inflight
+#ifdef HWDEMO_GROUP_ROOM_EN
+        || demo_group_intercom_is_enabled() ||
+           !demo_group_intercom_is_idle() || demo_group_intercom_has_call()
+#endif
+       )
     {
         liot_rtos_exit_critical();
         return 0;
@@ -2199,7 +2328,7 @@ static int dev_recover_room(void)
     {
         goto done;
     }
-    root = cJSON_Parse(s_http_response);
+    root = demo_json_parse(s_http_response);
     code = root != NULL ?
                cJSON_GetObjectItemCaseSensitive(root, "code") : NULL;
     data = root != NULL ?
@@ -2389,7 +2518,7 @@ static int dev_recover_existing_room(void)
         dev_existing_room_retry(ret);
         return ret;
     }
-    root = cJSON_Parse(s_http_response);
+    root = demo_json_parse(s_http_response);
     code = root != NULL ?
                cJSON_GetObjectItemCaseSensitive(root, "code") : NULL;
     data = root != NULL ?
@@ -2540,6 +2669,7 @@ static int dev_recover_existing_room(void)
     s_active_connect_context = NULL;
     s_connect_attempt = 0U;
     s_caller = false;
+    s_late_incoming_possible = false;
     memcpy(s_room_id, room, sizeof(s_room_id));
     (void)snprintf(s_peer_id, sizeof(s_peer_id), "%s", caller);
     (void)snprintf(s_peer_name, sizeof(s_peer_name), "%s", caller);
@@ -2601,15 +2731,24 @@ static int dev_start_outgoing_call(void)
     liot_rtos_enter_critical();
     if (s_request_hangup)
     {
+        s_request_contact_valid = false;
         liot_rtos_exit_critical();
         return 0;
     }
-    if (s_contact_count == 0U || s_selected_contact >= s_contact_count)
+    if (s_request_contact_valid)
+    {
+        contact = s_request_contact;
+        s_request_contact_valid = false;
+    }
+    else if (s_contact_count == 0U || s_selected_contact >= s_contact_count)
     {
         liot_rtos_exit_critical();
         return DEV_ERR_NO_CONTACT;
     }
-    contact = s_contacts[s_selected_contact];
+    else
+    {
+        contact = s_contacts[s_selected_contact];
+    }
     liot_rtos_exit_critical();
 
     ret = dev_tirtc_claim();
@@ -2627,6 +2766,7 @@ static int dev_start_outgoing_call(void)
         return ret;
     }
     dev_begin_session(true, contact.device_id, contact.display);
+    s_late_incoming_possible = false;
     dev_set_state(DEMO_DEV_CHAT_DIALING, 0);
     /* KEY2 may have arrived while the worker was still preparing in READY.
      * Settle that local cancellation before submitting a cloud call. */
@@ -2667,6 +2807,9 @@ static int dev_start_outgoing_call(void)
         dev_finish_session(DEV_ERR_CALL, DEV_PLATFORM_NONE, false);
         return DEV_ERR_CALL;
     }
+    /* From this point a transport error does not prove the server failed to
+     * create/notify a room. Keep the late-peer guard for uncertain results. */
+    s_late_incoming_possible = true;
     ret = dev_http(DEMO_BIND_HTTP_POST, "/v1/call/request", body);
     cJSON_free(body);
     if (ret != 0)
@@ -2674,7 +2817,7 @@ static int dev_start_outgoing_call(void)
         dev_finish_session(DEV_ERR_CALL, DEV_PLATFORM_NONE, false);
         return DEV_ERR_CALL;
     }
-    response_root = cJSON_Parse(s_http_response);
+    response_root = demo_json_parse(s_http_response);
     code = response_root != NULL ?
                cJSON_GetObjectItemCaseSensitive(response_root, "code") :
                NULL;
@@ -2818,7 +2961,7 @@ static int dev_accept_incoming(void)
         dev_finish_session(DEV_ERR_CONNECT, DEV_PLATFORM_HANGUP, false);
         return DEV_ERR_CONNECT;
     }
-    response_root = cJSON_Parse(s_http_response);
+    response_root = demo_json_parse(s_http_response);
     code = response_root != NULL ?
                cJSON_GetObjectItemCaseSensitive(response_root, "code") :
                NULL;
@@ -2953,6 +3096,64 @@ static void dev_process_mqtt(void)
                 liot_trace("[DEV] duplicate incoming room ignored\r\n");
                 continue;
             }
+#ifdef HWDEMO_GROUP_ROOM_EN
+            if (s_group_recent_room[0] != '\0' &&
+                strcmp(event.room_id, s_group_recent_room) == 0 &&
+                dev_deadline_pending(s_group_recent_until))
+            {
+                liot_trace("[DEV] late ROOM-handoff invitation ignored\r\n");
+                continue;
+            }
+            liot_rtos_enter_critical();
+            local_ready = s_state == DEMO_DEV_CHAT_READY &&
+                          !s_request_call && !s_call_starting &&
+                          !s_request_hangup && !s_tirtc_claimed &&
+                          !s_existing_room_recovery && !s_recovery_inflight &&
+                          s_group_ticket == 0U &&
+                          dev_connect_lifecycle_idle_locked();
+            liot_rtos_exit_critical();
+            if (local_ready && dev_other_features_idle())
+            {
+                uint32_t ticket = 0U;
+                uint32_t received = event.received_ms;
+                int reserved;
+
+                if (demo_group_intercom_is_enabled() &&
+                    !dev_deadline_pending(received + DEV_INCOMING_TIMEOUT_MS))
+                {
+                    (void)dev_room_action("/v1/call/reject",
+                                          event.room_id, "decline");
+                    continue;
+                }
+                reserved = demo_group_intercom_reserve_call(
+                    DEMO_GROUP_CALL_DEVICE, &ticket);
+                if (reserved < 0)
+                {
+                    (void)dev_room_action("/v1/call/reject",
+                                          event.room_id, "busy");
+                    continue;
+                }
+                if (reserved > 0)
+                {
+                    dev_begin_session(false, event.peer_id, event.peer_name);
+                    memcpy(s_room_id, event.room_id, sizeof(s_room_id));
+                    ++s_incoming_generation;
+                    if (s_incoming_generation == 0U) ++s_incoming_generation;
+                    liot_rtos_enter_critical();
+                    s_group_ticket = ticket;
+                    s_group_pending = true;
+                    s_group_wait_deadline_ms = liot_rtos_get_running_time() +
+                                               DEV_GROUP_HANDOFF_TIMEOUT_MS;
+                    s_deadline_ms = received + DEV_INCOMING_TIMEOUT_MS;
+                    s_request_answer_generation = 0U;
+                    liot_rtos_exit_critical();
+                    dev_set_state(DEMO_DEV_CHAT_RINGING, 0);
+                    liot_trace("[DEV] ROOM handoff pending generation=%u\r\n",
+                               (unsigned int)s_incoming_generation);
+                    continue;
+                }
+            }
+#endif
             other_idle = dev_other_features_idle();
             if (!s_home_allowed || s_request_call ||
                 s_state != DEMO_DEV_CHAT_READY || !other_idle ||
@@ -3036,7 +3237,7 @@ static bool dev_parse_confirm(const dev_signal_event_t *event)
     {
         return false;
     }
-    root = cJSON_Parse(event->payload);
+    root = demo_json_parse(event->payload);
     valid = root != NULL &&
             dev_json_copy(root, "room_id", s_confirm_room,
                           sizeof(s_confirm_room), true) == 0;
@@ -3221,6 +3422,9 @@ static void dev_process_control(void)
         s_call_starting = true;
     }
     if (s_request_answer_generation != 0U &&
+#ifdef HWDEMO_GROUP_ROOM_EN
+        !s_group_pending &&
+#endif
         state == DEMO_DEV_CHAT_RINGING)
     {
         answer_generation = s_request_answer_generation;
@@ -3241,10 +3445,13 @@ static void dev_process_control(void)
         s_request_conn_error = false;
         s_request_conn_error_code = 0;
     }
-    if (s_request_refresh && state == DEMO_DEV_CHAT_READY)
+    /* Return the old TiRTC owner before starting another contacts HTTP. */
+    if (s_request_refresh && state == DEMO_DEV_CHAT_READY &&
+        !s_tirtc_release_pending &&
+        (s_contact_retry_at == 0U ||
+         !dev_deadline_pending(s_contact_retry_at)))
     {
         refresh = true;
-        s_request_refresh = false;
     }
     liot_rtos_exit_critical();
 
@@ -3276,6 +3483,17 @@ static void dev_process_control(void)
     {
         if (answer_generation == s_incoming_generation)
         {
+#ifdef HWDEMO_GROUP_ROOM_EN
+            if (s_group_ticket != 0U &&
+                (!dev_deadline_pending(s_deadline_ms) ||
+                 s_room_cancel_generation == s_generation))
+            {
+                dev_finish_session(0,
+                    s_room_cancel_generation == s_generation ?
+                        DEV_PLATFORM_NONE : DEV_PLATFORM_REJECT, false);
+                return;
+            }
+#endif
             (void)dev_accept_incoming();
         }
         return;
@@ -3296,19 +3514,7 @@ static void dev_process_control(void)
     }
     if (refresh)
     {
-        int ret = dev_fetch_contacts();
-        if (ret != 0)
-        {
-            dev_set_state(DEMO_DEV_CHAT_ERROR, ret);
-            s_error_deadline_ms = liot_rtos_get_running_time() +
-                                  DEV_ERROR_VISIBLE_MS;
-            s_contact_retry_at = liot_rtos_get_running_time() +
-                                 DEV_CONTACT_RETRY_MS;
-        }
-        else
-        {
-            dev_set_state(DEMO_DEV_CHAT_READY, 0);
-        }
+        dev_refresh_contacts_now();
     }
 }
 
@@ -3389,6 +3595,72 @@ static void dev_process_timeouts(void)
     }
 }
 
+#ifdef HWDEMO_GROUP_ROOM_EN
+static void dev_group_release_if_idle(void)
+{
+    uint32_t ticket = 0U;
+
+    liot_rtos_enter_critical();
+    if (s_group_ticket != 0U && !s_group_pending &&
+        !dev_state_has_session(s_state) && !s_request_call &&
+        !s_call_starting && !s_request_hangup &&
+        s_request_answer_generation == 0U && !s_existing_room_recovery &&
+        !s_recovery_inflight && !s_tirtc_claimed &&
+        !s_tirtc_release_pending && dev_connect_lifecycle_idle_locked() &&
+        !dev_deadline_pending(s_reject_incoming_until))
+    {
+        ticket = s_group_ticket;
+        s_group_ticket = 0U;
+    }
+    liot_rtos_exit_critical();
+    if (ticket != 0U)
+    {
+        demo_group_intercom_release_call(DEMO_GROUP_CALL_DEVICE, ticket);
+    }
+}
+
+static void dev_group_process_pending(void)
+{
+    int ret;
+
+    if (s_group_ticket != 0U && dev_state_has_session(s_state) &&
+        s_room_cancel_generation == s_generation)
+    {
+        dev_finish_session(0, DEV_PLATFORM_NONE, false);
+        return;
+    }
+    if (!s_group_pending || s_state != DEMO_DEV_CHAT_RINGING ||
+        s_request_hangup)
+    {
+        return;
+    }
+    if (!dev_deadline_pending(s_deadline_ms) ||
+        !dev_deadline_pending(s_group_wait_deadline_ms))
+    {
+        dev_finish_session(DEV_ERR_TIMEOUT, DEV_PLATFORM_REJECT, false);
+        return;
+    }
+    if (!demo_group_intercom_call_ready(DEMO_GROUP_CALL_DEVICE,
+                                        s_group_ticket) ||
+        !dev_other_features_idle() || !dev_connect_lifecycle_idle())
+    {
+        return;
+    }
+    /* Unlike normal DEV admission, the ROOM path claims only now. The
+     * invitation is still ringing and the original timeout keeps running. */
+    ret = dev_tirtc_claim();
+    if (ret != 0)
+    {
+        return;
+    }
+    liot_rtos_enter_critical();
+    s_group_pending = false;
+    s_group_wait_deadline_ms = 0U;
+    liot_rtos_exit_critical();
+    liot_trace("[DEV] ROOM handoff drained; incoming ready\r\n");
+}
+#endif
+
 void demo_dev_chat_task(void *argv)
 {
     liot_task_t room_action_handle = NULL;
@@ -3450,6 +3722,9 @@ void demo_dev_chat_task(void *argv)
     while (1)
     {
         (void)dev_tirtc_try_release();
+#ifdef HWDEMO_GROUP_ROOM_EN
+        dev_group_release_if_idle();
+#endif
         if (!dev_state_has_session(s_state))
         {
             /* Complete cleanup of a callback that crossed the bounded
@@ -3499,6 +3774,9 @@ void demo_dev_chat_task(void *argv)
 
         dev_process_mqtt();
         dev_process_signals();
+#ifdef HWDEMO_GROUP_ROOM_EN
+        dev_group_process_pending();
+#endif
         dev_process_control();
         dev_process_timeouts();
 
@@ -3601,8 +3879,8 @@ void demo_dev_chat_mark_unavailable(void)
 void demo_dev_chat_enter(void)
 {
     liot_rtos_enter_critical();
-    if (s_state == DEMO_DEV_CHAT_READY ||
-        s_state == DEMO_DEV_CHAT_ERROR)
+    if ((s_state == DEMO_DEV_CHAT_READY ||
+         s_state == DEMO_DEV_CHAT_ERROR) && !s_contacts_refreshing)
     {
         s_request_refresh = true;
     }
@@ -3614,6 +3892,7 @@ void demo_dev_chat_leave(void)
 {
     liot_rtos_enter_critical();
     s_request_call = false;
+    s_request_contact_valid = false;
     if (!s_call_starting)
     {
         s_request_call_sequence = 0U;
@@ -3656,8 +3935,121 @@ uint32_t demo_dev_chat_call_selected(void)
             ++s_session_sequence;
         }
         s_request_call_sequence = s_session_sequence;
+        s_request_contact_valid = false;
         s_request_call = true;
         sequence = s_request_call_sequence;
+    }
+    liot_rtos_exit_critical();
+    if (sequence != 0U)
+    {
+        dev_signal();
+    }
+    return sequence;
+}
+
+int demo_dev_chat_find_contact(const char *target, char *device_id,
+                                size_t capacity, bool *online,
+                                uint32_t refresh_ticket)
+{
+    uint8_t i;
+    uint8_t matched = 0U;
+    int matches = 0;
+
+    if (target == NULL || target[0] == '\0' || device_id == NULL ||
+        capacity == 0U || online == NULL || refresh_ticket == 0U)
+    {
+        return -1;
+    }
+    device_id[0] = '\0';
+    *online = false;
+    liot_rtos_enter_critical();
+    if (refresh_ticket != s_call_refresh_requested || s_event_sem == NULL ||
+        (s_state != DEMO_DEV_CHAT_READY &&
+         s_state != DEMO_DEV_CHAT_SYNCING) ||
+        (s_call_refresh_completed == refresh_ticket &&
+         s_call_refresh_result != 0))
+    {
+        liot_rtos_exit_critical();
+        return -1;
+    }
+    if (s_call_refresh_completed != refresh_ticket ||
+        s_contacts_refreshing || s_request_refresh ||
+        s_state == DEMO_DEV_CHAT_SYNCING)
+    {
+        liot_rtos_exit_critical();
+        return -2;
+    }
+    if (!s_contacts_ready)
+    {
+        liot_rtos_exit_critical();
+        return -1;
+    }
+    for (i = 0U; i < s_contact_count; ++i)
+    {
+        if (strcmp(target, s_contacts[i].device_id) == 0 ||
+            (s_contacts[i].name[0] != '\0' &&
+             strcmp(target, s_contacts[i].name) == 0))
+        {
+            matched = i;
+            ++matches;
+        }
+    }
+    if (matches == 1)
+    {
+        size_t length = strlen(s_contacts[matched].device_id);
+
+        if (length >= capacity)
+        {
+            matches = -1;
+        }
+        else
+        {
+            memcpy(device_id, s_contacts[matched].device_id, length + 1U);
+            *online = s_contacts[matched].online;
+        }
+    }
+    liot_rtos_exit_critical();
+    return matches;
+}
+
+uint32_t demo_dev_chat_call_device(const char *device_id)
+{
+    uint8_t i;
+    uint8_t matched = 0U;
+    uint8_t matches = 0U;
+    uint32_t sequence = 0U;
+
+    if (device_id == NULL || device_id[0] == '\0')
+    {
+        return 0U;
+    }
+    liot_rtos_enter_critical();
+    if (s_state == DEMO_DEV_CHAT_READY && s_contacts_ready &&
+        !s_request_call && !s_call_starting && !s_tirtc_claimed &&
+        !s_request_hangup && demo_tirtc_is_ready() &&
+        dev_connect_lifecycle_idle_locked())
+    {
+        for (i = 0U; i < s_contact_count; ++i)
+        {
+            if (strcmp(device_id, s_contacts[i].device_id) == 0)
+            {
+                matched = i;
+                ++matches;
+            }
+        }
+        if (matches == 1U && s_contacts[matched].online)
+        {
+            s_request_contact = s_contacts[matched];
+            s_request_contact_valid = true;
+            ++s_session_sequence;
+            if (s_session_sequence == 0U)
+            {
+                ++s_session_sequence;
+            }
+            s_request_call_sequence = s_session_sequence;
+            s_request_call = true;
+            sequence = s_request_call_sequence;
+        }
     }
     liot_rtos_exit_critical();
     if (sequence != 0U)
@@ -3692,6 +4084,7 @@ void demo_dev_chat_hangup(void)
 {
     liot_rtos_enter_critical();
     s_request_call = false;
+    s_request_contact_valid = false;
     if (!s_call_starting)
     {
         s_request_call_sequence = 0U;
@@ -3709,8 +4102,46 @@ void demo_dev_chat_hangup(void)
 
 void demo_dev_chat_refresh_contacts(void)
 {
-    s_request_refresh = true;
+    liot_rtos_enter_critical();
+    /* Ordinary hints coalesce with in-flight I/O. MQTT dirty events keep
+     * their direct pending flag so updates received during I/O are retained. */
+    if (!s_contacts_refreshing)
+    {
+        s_request_refresh = true;
+    }
+    liot_rtos_exit_critical();
     dev_signal();
+}
+
+uint32_t demo_dev_chat_refresh_contacts_for_call(void)
+{
+    uint32_t ticket = 0U;
+
+    liot_rtos_enter_critical();
+    if (s_event_sem != NULL && !s_request_call && !s_call_starting &&
+        !s_request_hangup &&
+        (s_state == DEMO_DEV_CHAT_READY ||
+         (s_state == DEMO_DEV_CHAT_SYNCING && s_contacts_refreshing)) &&
+        (s_contact_retry_at == 0U ||
+         !dev_deadline_pending(s_contact_retry_at)))
+    {
+        do
+        {
+            ++s_call_refresh_requested;
+        } while (s_call_refresh_requested == 0U ||
+                 s_call_refresh_requested == s_call_refresh_completed);
+        ticket = s_call_refresh_requested;
+        /* Unlike ordinary hints, a call must not join older in-flight I/O. */
+        s_request_refresh = true;
+    }
+    liot_rtos_exit_critical();
+    if (ticket != 0U)
+    {
+        liot_trace("[DEV-CACHE] call refresh requested ticket=%u\r\n",
+                   (unsigned int)ticket);
+        dev_signal();
+    }
+    return ticket;
 }
 
 void demo_dev_chat_get_snapshot(demo_dev_chat_snapshot_t *out)
@@ -3734,6 +4165,9 @@ void demo_dev_chat_get_snapshot(demo_dev_chat_snapshot_t *out)
     out->rx_dropped = s_rx_dropped;
     out->tx_dropped = s_tx_dropped;
     memcpy(out->display_name, s_display_name, sizeof(out->display_name));
+#ifdef HWDEMO_GROUP_ROOM_EN
+    out->group_pending = s_group_pending;
+#endif
     liot_rtos_exit_critical();
 }
 
@@ -3756,6 +4190,9 @@ bool demo_dev_chat_is_idle(void)
 
     liot_rtos_enter_critical();
     idle = !dev_state_has_session(s_state) && !s_request_call &&
+#ifdef HWDEMO_GROUP_ROOM_EN
+           !s_group_pending && s_group_ticket == 0U &&
+#endif
            !s_call_starting &&
            !s_existing_room_recovery &&
            !s_recovery_inflight &&

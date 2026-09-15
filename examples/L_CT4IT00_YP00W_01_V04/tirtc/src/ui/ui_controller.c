@@ -40,11 +40,22 @@
 #ifdef HWDEMO_LIVE_TALK_EN
 #include "platform_intercom.h"
 #endif
+#ifdef HWDEMO_GROUP_ROOM_EN
+#include "group_intercom.h"
+#include "key_input.h"
+#ifndef TIRTC_GROUP_BACK_HOLD_MS
+#define TIRTC_GROUP_BACK_HOLD_MS 2000U
+#endif
+#define UI_GROUP_POLL_MS 50U
+#define UI_GROUP_RELEASE_MS 80U
+#endif
 #include "ui_controller.h"
 
 #define UI_QUEUE_DEPTH          16U
 #define UI_WAIT_MS              500U
 #define UI_AUDIO_HANDOFF_MS    6000U
+#define UI_ENTRY_TIMEOUT_MS   30000U
+#define UI_ENTRY_POLL_MS         50U
 #define UI_MAIN_ITEM_COUNT      4U
 #define UI_MAIN_AI_INDEX        0U
 #define UI_SETTINGS_ITEM_COUNT  4U
@@ -56,7 +67,27 @@ typedef enum
     UI_PAGE_WECHAT,
     UI_PAGE_DEV_CHAT,
     UI_PAGE_SETTINGS,
+#ifdef HWDEMO_GROUP_ROOM_EN
+    UI_PAGE_GROUP_ROOM,
+#endif
 } ui_page_e;
+
+#ifdef HWDEMO_GROUP_ROOM_EN
+/* Capture the physical key's page/intent before it waits in the UI queue. */
+typedef struct
+{
+    demo_ui_key_e key;
+    ui_page_e page;
+    uint32_t epoch;
+    uint32_t pressed_ms;
+    bool home_hold_allowed;
+    uint32_t group_generation;
+    uint8_t group_action; /* 0=none, 1=toggle microphone, 2=retry */
+    bool back_hold_consumed;
+} ui_key_event_t;
+#else
+typedef demo_ui_key_e ui_key_event_t;
+#endif
 
 /*
  * Startup is a small gate in front of the normal page state machine.  This
@@ -99,8 +130,58 @@ static uint8_t s_settings_selected;
 static uint8_t s_speaker_level = 8U;
 static uint8_t s_mic_level = 10U;
 static bool s_dirty = true;
+/* HOME entry is an intent, not an audio owner. Keep taking keys while the
+ * previous worker tears down (unresolved DEV calls may retain a 10-second guard).
+ * The existing incoming-answer and AI-to-call handoffs keep their own budget. */
+static bool s_entry_pending;
+static bool s_entry_failed;
+static ui_page_e s_entry_page;
+static uint32_t s_entry_deadline;
+#ifdef HWDEMO_GROUP_ROOM_EN
+static volatile uint32_t s_key_epoch = 1U;
+static volatile bool s_home_hold_allowed;
+static volatile uint32_t s_last_back_pressed_ms;
+static volatile uint32_t s_group_key_generation;
+static volatile uint8_t s_group_key_action;
+static bool s_group_hold_pending;
+static uint32_t s_group_hold_epoch;
+static uint32_t s_group_hold_started;
+static volatile bool s_group_hold_consumed;
+static bool s_group_release_seen;
+static uint32_t s_group_release_started;
+static bool s_group_exiting;
+static bool s_group_return_after_call;
+
+static void ui_invalidate_key_context(void)
+{
+    liot_rtos_enter_critical();
+    ++s_key_epoch;
+    if (s_key_epoch == 0U)
+    {
+        ++s_key_epoch;
+    }
+    s_home_hold_allowed = false;
+    s_group_key_action = 0U;
+    liot_rtos_exit_critical();
+    s_group_hold_pending = false;
+}
+#endif
+
+static void ui_set_page(ui_page_e page)
+{
+    if (s_page != page)
+    {
+#ifdef HWDEMO_GROUP_ROOM_EN
+        ui_invalidate_key_context();
+#endif
+        s_page = page;
+    }
+}
 #ifdef HWDEMO_AI_CHAT_EN
 static uint32_t s_ai_request_id;
+static demo_ai_call_request_t s_ai_handoff;
+static uint32_t s_ai_handoff_deadline;
+static bool s_ai_call_failed;
 #endif
 #ifdef HWDEMO_WECHAT_EN
 static uint32_t s_wx_page_session;
@@ -139,7 +220,7 @@ int demo_ui_init(void)
         return 0;
     }
 
-    if (liot_rtos_queue_create(&s_ui_queue, sizeof(demo_ui_key_e),
+    if (liot_rtos_queue_create(&s_ui_queue, sizeof(ui_key_event_t),
                                UI_QUEUE_DEPTH) != LIOT_OSI_SUCCESS)
     {
         liot_trace("[UI] key queue create failed\r\n");
@@ -166,7 +247,26 @@ void demo_ui_post_key_from_isr(demo_ui_key_e key)
 {
     if (s_ui_accept_keys && s_ui_queue != NULL && key <= DEMO_UI_KEY_BACK)
     {
+#ifdef HWDEMO_GROUP_ROOM_EN
+        ui_key_event_t event;
+
+        event.key = key;
+        event.page = s_page;
+        event.epoch = s_key_epoch;
+        event.pressed_ms = liot_rtos_get_running_time();
+        event.home_hold_allowed = key == DEMO_UI_KEY_BACK && s_home_hold_allowed;
+        event.group_generation = s_group_key_generation;
+        event.group_action = s_group_key_action;
+        event.back_hold_consumed = s_group_hold_consumed;
+        if (key == DEMO_UI_KEY_BACK)
+        {
+            s_last_back_pressed_ms = event.pressed_ms;
+        }
+        liot_rtos_queue_release_isr(s_ui_queue, sizeof(event),
+                                    (uint8 *)&event);
+#else
         liot_rtos_queue_release_isr(s_ui_queue, sizeof(key), (uint8 *)&key);
+#endif
     }
 }
 
@@ -177,6 +277,8 @@ static void ui_notify_feature(demo_ui_feature_e feature, bool entering)
 #ifdef HWDEMO_AI_CHAT_EN
     if (feature == DEMO_UI_FEATURE_AI_CHAT)
     {
+        memset(&s_ai_handoff, 0, sizeof(s_ai_handoff));
+        s_ai_call_failed = false;
         if (entering)
         {
             s_ai_request_id = demo_ai_chat_start();
@@ -226,10 +328,18 @@ static void ui_notify_feature(demo_ui_feature_e feature, bool entering)
 
 static void ui_sync_live_policy(void)
 {
+    ui_page_e policy_page = s_entry_pending ? s_entry_page : s_page;
     bool ai_idle = true;
     bool wechat_idle = true;
     bool dev_idle = true;
     bool feature_audio_idle;
+#ifdef HWDEMO_GROUP_ROOM_EN
+    bool group_idle = demo_group_intercom_is_idle();
+    bool group_page = policy_page == UI_PAGE_GROUP_ROOM &&
+                      !s_group_exiting &&
+                      demo_group_intercom_is_enabled();
+    bool home_hold_allowed;
+#endif
 #ifdef HWDEMO_WECHAT_EN
     bool wechat_signal_ready;
 #endif
@@ -248,9 +358,17 @@ static void ui_sync_live_policy(void)
      * browsing the idle WX page.  Other feature pages still reject them so
      * microphone/speaker ownership remains unambiguous. */
     wechat_signal_ready = s_startup_state == UI_STARTUP_READY &&
-                          (s_page == UI_PAGE_HOME ||
-                           s_page == UI_PAGE_WECHAT) &&
+                          (policy_page == UI_PAGE_HOME ||
+                           policy_page == UI_PAGE_WECHAT
+#ifdef HWDEMO_GROUP_ROOM_EN
+                           || group_page
+#endif
+                          ) &&
                           ai_idle && dev_idle;
+#ifdef HWDEMO_GROUP_ROOM_EN
+    wechat_signal_ready = wechat_signal_ready &&
+        (group_idle || group_page || demo_group_intercom_has_call());
+#endif
     demo_wechat_set_home_allowed(wechat_signal_ready);
 #endif
 #ifdef HWDEMO_DEV_CHAT_EN
@@ -258,16 +376,39 @@ static void ui_sync_live_policy(void)
      * A call still owns the same single ES8311/TiRTC connection budget. */
     demo_dev_chat_set_home_allowed(
         s_startup_state == UI_STARTUP_READY &&
-        (s_page == UI_PAGE_HOME || s_page == UI_PAGE_DEV_CHAT) &&
+        (policy_page == UI_PAGE_HOME || policy_page == UI_PAGE_DEV_CHAT
+#ifdef HWDEMO_GROUP_ROOM_EN
+         || group_page
+#endif
+        ) &&
+#ifdef HWDEMO_GROUP_ROOM_EN
+        (group_idle || group_page || demo_group_intercom_has_call()) &&
+#endif
         ai_idle && wechat_idle);
 #endif
     feature_audio_idle = ai_idle && wechat_idle && dev_idle;
+#ifdef HWDEMO_GROUP_ROOM_EN
+    demo_group_intercom_set_foreground_allowed(
+        s_startup_state == UI_STARTUP_READY && group_page &&
+        feature_audio_idle && !demo_group_intercom_has_call());
+    home_hold_allowed = s_startup_state == UI_STARTUP_READY &&
+        s_page == UI_PAGE_HOME && !s_entry_pending && !s_entry_failed &&
+        feature_audio_idle && group_idle &&
+        !demo_group_intercom_is_enabled() && !demo_group_intercom_has_call();
+    if (!home_hold_allowed && s_home_hold_allowed)
+    {
+        ui_invalidate_key_context();
+    }
+    s_home_hold_allowed = home_hold_allowed;
+    feature_audio_idle = feature_audio_idle && group_idle &&
+                         !demo_group_intercom_is_enabled();
+#endif
 #ifdef HWDEMO_LIVE_TALK_EN
     /* Platform LIVE may own the microphone/speaker only on the fully ready
      * HOME page.  Every other page closes an existing passive session and
      * rejects new incoming connections. */
     demo_live_talk_set_home_allowed(
-        s_startup_state == UI_STARTUP_READY && s_page == UI_PAGE_HOME &&
+        s_startup_state == UI_STARTUP_READY && policy_page == UI_PAGE_HOME &&
         feature_audio_idle);
 #endif
 }
@@ -285,6 +426,7 @@ static uint32_t ui_handoff_remaining(uint32_t deadline)
  * must wait for the previous owner before starting the next one.  An incoming
  * WX ring is the one exception: keep that signaling session while waiting for
  * AI/LIVE to release their media ownership before answering it. */
+#if defined(HWDEMO_WECHAT_EN) || defined(HWDEMO_DEV_CHAT_EN)
 static bool ui_wait_audio_released(bool keep_wechat_ring,
                                    bool keep_dev_ring)
 {
@@ -302,6 +444,9 @@ static bool ui_wait_audio_released(bool keep_wechat_ring,
         idle = true;
 #ifdef HWDEMO_AI_CHAT_EN
         idle = idle && demo_ai_chat_is_idle();
+#endif
+#ifdef HWDEMO_GROUP_ROOM_EN
+        idle = idle && demo_group_intercom_is_idle();
 #endif
 #ifdef HWDEMO_WECHAT_EN
         if (!keep_wechat_ring)
@@ -346,6 +491,107 @@ static bool ui_wait_audio_released(bool keep_wechat_ring,
 #endif
     return true;
 }
+#endif
+
+static void ui_cancel_entry(void)
+{
+    if (s_entry_pending || s_entry_failed)
+    {
+#ifdef HWDEMO_GROUP_ROOM_EN
+        ui_invalidate_key_context();
+#endif
+        liot_trace("[UI] entry cancelled page=%d\r\n", (int)s_entry_page);
+        s_entry_pending = false;
+        s_entry_failed = false;
+        s_dirty = true;
+    }
+}
+
+/* Read-only probes: never sleep or wait for a worker from the UI task. */
+static bool ui_entry_audio_idle(void)
+{
+    bool idle = true;
+#ifdef HWDEMO_GROUP_ROOM_EN
+    idle = idle && demo_group_intercom_is_idle();
+#endif
+#ifdef HWDEMO_AI_CHAT_EN
+    idle = idle && demo_ai_chat_is_idle();
+#endif
+#ifdef HWDEMO_WECHAT_EN
+    idle = idle && demo_wechat_is_idle();
+#endif
+#ifdef HWDEMO_DEV_CHAT_EN
+    idle = idle && demo_dev_chat_is_idle();
+#endif
+#ifdef HWDEMO_LIVE_TALK_EN
+    idle = idle && demo_live_talk_wait_idle(0U);
+#endif
+#ifdef HWDEMO_TIRTC_EN
+    idle = idle && demo_tirtc_wait_connections_idle(0U);
+#endif
+    return idle;
+}
+
+static void ui_process_entry(void)
+{
+    if (!s_entry_pending)
+    {
+        return;
+    }
+    if (s_startup_state != UI_STARTUP_READY || s_page != UI_PAGE_HOME)
+    {
+        ui_cancel_entry();
+        return;
+    }
+    if (!ui_entry_audio_idle())
+    {
+        if (ui_handoff_remaining(s_entry_deadline) == 0U)
+        {
+            s_entry_pending = false;
+            s_entry_failed = true;
+            ui_sync_live_policy();
+            s_dirty = true;
+            liot_trace("[UI] entry timeout page=%d; resources still busy\r\n",
+                       (int)s_entry_page);
+        }
+        return;
+    }
+
+    /* Publish the page before reopening admission, then start exactly once.
+     * Never send LEAVE on cancellation: this feature has not started yet. */
+    s_entry_pending = false;
+    s_entry_failed = false;
+    ui_set_page(s_entry_page);
+    ui_sync_live_policy();
+    if (s_page != UI_PAGE_SETTINGS)
+    {
+        ui_notify_feature(
+            (demo_ui_feature_e)(s_page - UI_PAGE_AI_CHAT), true);
+    }
+    s_dirty = true;
+    liot_trace("[UI] entry ready page=%d\r\n", (int)s_page);
+}
+
+#if defined(HWDEMO_WECHAT_EN) || defined(HWDEMO_DEV_CHAT_EN)
+static void ui_finish_call_page(void)
+{
+#ifdef HWDEMO_GROUP_ROOM_EN
+    if (s_group_return_after_call && demo_group_intercom_is_enabled())
+    {
+        ui_set_page(UI_PAGE_GROUP_ROOM);
+    }
+    else
+#endif
+    {
+        ui_set_page(UI_PAGE_HOME);
+    }
+#ifdef HWDEMO_GROUP_ROOM_EN
+    s_group_return_after_call = false;
+#endif
+    ui_sync_live_policy();
+    s_dirty = true;
+}
+#endif
 
 #ifdef HWDEMO_WECHAT_EN
 static void ui_wx_open_incoming_page(const demo_wechat_snapshot_t *wx)
@@ -354,9 +600,16 @@ static void ui_wx_open_incoming_page(const demo_wechat_snapshot_t *wx)
     {
         return;
     }
+    ui_cancel_entry();
+#ifdef HWDEMO_GROUP_ROOM_EN
+    if (s_page == UI_PAGE_GROUP_ROOM)
+    {
+        s_group_return_after_call = demo_group_intercom_is_enabled();
+    }
+#endif
     if (s_page != UI_PAGE_WECHAT)
     {
-        s_page = UI_PAGE_WECHAT;
+        ui_set_page(UI_PAGE_WECHAT);
         ui_sync_live_policy();
     }
     s_wx_page_session = wx->session_sequence;
@@ -386,7 +639,13 @@ static bool ui_wx_handle_ringing_key(demo_ui_key_e key,
     }
 
     ui_sync_live_policy();
-    if (ui_wait_audio_released(true, false) &&
+    if (
+#ifdef HWDEMO_GROUP_ROOM_EN
+        (wx->group_pending || demo_group_intercom_has_call() ||
+         ui_wait_audio_released(true, false)) &&
+#else
+        ui_wait_audio_released(true, false) &&
+#endif
         demo_wechat_answer(wx->incoming_generation))
     {
         s_wx_page_session = wx->session_sequence;
@@ -410,9 +669,16 @@ static void ui_dev_open_incoming_page(const demo_dev_chat_snapshot_t *dev)
     {
         return;
     }
+    ui_cancel_entry();
+#ifdef HWDEMO_GROUP_ROOM_EN
+    if (s_page == UI_PAGE_GROUP_ROOM)
+    {
+        s_group_return_after_call = demo_group_intercom_is_enabled();
+    }
+#endif
     if (s_page != UI_PAGE_DEV_CHAT)
     {
-        s_page = UI_PAGE_DEV_CHAT;
+        ui_set_page(UI_PAGE_DEV_CHAT);
         ui_sync_live_policy();
     }
     s_dev_page_session = dev->session_sequence;
@@ -440,7 +706,13 @@ static bool ui_dev_handle_ringing_key(demo_ui_key_e key,
     if (key == DEMO_UI_KEY_CONFIRM)
     {
         ui_sync_live_policy();
-        if (ui_wait_audio_released(false, true) &&
+        if (
+#ifdef HWDEMO_GROUP_ROOM_EN
+            (dev->group_pending || demo_group_intercom_has_call() ||
+             ui_wait_audio_released(false, true)) &&
+#else
+            ui_wait_audio_released(false, true) &&
+#endif
             demo_dev_chat_answer(dev->incoming_generation))
         {
             s_dev_page_session = dev->session_sequence;
@@ -472,20 +744,44 @@ static void ui_update_startup_state(void)
 #endif
 
 #ifdef HWDEMO_BINDING_EN
-    if (next == UI_STARTUP_READY)
+    if (next == UI_STARTUP_READY
+#ifdef HWDEMO_GROUP_ROOM_EN
+        || demo_group_intercom_is_enabled()
+#endif
+       )
     {
         demo_binding_snapshot_t binding;
 
         demo_binding_get_snapshot(&binding);
-        if (binding.state != DEMO_BIND_BOUND)
+        if (next == UI_STARTUP_READY && binding.state != DEMO_BIND_BOUND)
         {
             next = UI_STARTUP_WAIT_BINDING;
         }
+#ifdef HWDEMO_GROUP_ROOM_EN
+        /* MQTT reconnect also passes through VERIFYING/ERROR. Only an
+         * actual unbind/new binding flow cancels the user's ROOM intent.
+         * Observe every snapshot: VERIFYING -> RESTARTING keeps the same
+         * UI startup state and must still terminate the old room session. */
+        if (demo_group_intercom_is_enabled() &&
+            (binding.state == DEMO_BIND_RESTARTING ||
+             binding.state == DEMO_BIND_REPORTING ||
+             binding.state == DEMO_BIND_WAIT_GRANT))
+        {
+            s_group_exiting = true;
+            ui_invalidate_key_context();
+            demo_group_intercom_exit();
+            s_dirty = true;
+        }
+#endif
     }
 #endif
 
     if (next != s_startup_state)
     {
+        ui_cancel_entry();
+#ifdef HWDEMO_GROUP_ROOM_EN
+        ui_invalidate_key_context();
+#endif
         liot_trace("[UI] startup state %d -> %d\r\n",
                    (int)s_startup_state, (int)next);
         if (s_startup_state == UI_STARTUP_READY &&
@@ -495,14 +791,25 @@ static void ui_update_startup_state(void)
                 (demo_ui_feature_e)(s_page - UI_PAGE_AI_CHAT), false);
         }
         s_startup_state = next;
-        s_page = UI_PAGE_HOME;
+#ifdef HWDEMO_GROUP_ROOM_EN
+        if ((s_page == UI_PAGE_GROUP_ROOM || s_group_return_after_call) &&
+            (demo_group_intercom_is_enabled() || s_group_exiting))
+        {
+            s_group_return_after_call = false;
+            ui_set_page(UI_PAGE_GROUP_ROOM);
+        }
+        else
+#endif
+        {
+            ui_set_page(UI_PAGE_HOME);
+        }
         ui_sync_live_policy();
         s_dirty = true;
         if (next == UI_STARTUP_READY)
         {
             liot_trace("[UI] network and binding ready -> MENU\r\n");
 #ifdef HWDEMO_AI_CHAT_EN
-            if (s_main_selected == UI_MAIN_AI_INDEX)
+            if (s_page == UI_PAGE_HOME && s_main_selected == UI_MAIN_AI_INDEX)
             {
                 demo_ai_chat_prepare();
             }
@@ -510,6 +817,215 @@ static void ui_update_startup_state(void)
         }
     }
 }
+
+#ifdef HWDEMO_GROUP_ROOM_EN
+static void ui_process_group(void)
+{
+    static demo_group_snapshot_t previous;
+    demo_group_snapshot_t group;
+    uint32_t now = liot_rtos_get_running_time();
+    bool back_down = demo_key_back_is_pressed();
+
+    /* The entering press belongs to HOME until it has stably released. */
+    if (s_group_hold_consumed)
+    {
+        if (back_down)
+        {
+            s_group_release_seen = false;
+        }
+        else if (!s_group_release_seen)
+        {
+            s_group_release_seen = true;
+            s_group_release_started = now;
+        }
+        else if ((uint32_t)(now - s_group_release_started) >=
+                 UI_GROUP_RELEASE_MS)
+        {
+            s_group_hold_consumed = false;
+            s_group_release_seen = false;
+        }
+    }
+    if (s_group_hold_pending)
+    {
+        if (!back_down || s_group_hold_epoch != s_key_epoch ||
+            s_group_hold_started != s_last_back_pressed_ms ||
+            !s_home_hold_allowed || s_page != UI_PAGE_HOME)
+        {
+            s_group_hold_pending = false;
+        }
+        else if ((uint32_t)(now - s_group_hold_started) >=
+                 TIRTC_GROUP_BACK_HOLD_MS)
+        {
+            s_group_hold_pending = false;
+            s_group_hold_consumed = true;
+            s_group_release_seen = false;
+            s_group_exiting = false;
+            s_group_return_after_call = false;
+            ui_set_page(UI_PAGE_GROUP_ROOM);
+            /* Close LIVE before publishing the new room-enter intent. */
+            ui_sync_live_policy();
+            demo_group_intercom_set_audio_levels(s_speaker_level, s_mic_level);
+            demo_group_intercom_enter();
+            ui_sync_live_policy();
+            s_dirty = true;
+            liot_trace("[UI] GROUP long BACK enter\r\n");
+        }
+    }
+    demo_group_intercom_get_snapshot(&group);
+    s_group_key_generation = group.generation;
+    s_group_key_action = 0U;
+    if (s_page == UI_PAGE_GROUP_ROOM && !s_group_exiting &&
+        s_startup_state == UI_STARTUP_READY &&
+        !demo_group_intercom_has_call())
+    {
+        if (group.state == DEMO_GROUP_LISTENING ||
+            group.state == DEMO_GROUP_MIC_ON)
+        {
+            s_group_key_action = 1U;
+        }
+        else if (group.state == DEMO_GROUP_NO_ROOM ||
+                 group.state == DEMO_GROUP_ERROR)
+        {
+            s_group_key_action = 2U;
+        }
+    }
+    if (s_page == UI_PAGE_GROUP_ROOM &&
+        (group.state != previous.state || group.error != previous.error ||
+         group.mic_on != previous.mic_on || group.enabled != previous.enabled ||
+         strcmp(group.room_code, previous.room_code) != 0))
+    {
+        s_dirty = true;
+    }
+    previous = group;
+    if (s_page == UI_PAGE_GROUP_ROOM && s_group_exiting &&
+        demo_group_intercom_is_idle())
+    {
+        s_group_exiting = false;
+        s_group_return_after_call = false;
+        ui_set_page(UI_PAGE_HOME);
+        ui_sync_live_policy();
+        s_dirty = true;
+        liot_trace("[UI] GROUP released -> MENU\r\n");
+    }
+}
+#endif
+
+#ifdef HWDEMO_AI_CHAT_EN
+/* Stay on AI with inbound/LIVE admission closed until teardown completes.
+ * Poll rather than blocking the UI so KEY2 and network loss can cancel. */
+static void ui_process_ai_call(void)
+{
+    bool idle;
+    bool accepted = false;
+    demo_ai_chat_snapshot_t ai;
+
+    if (s_page != UI_PAGE_AI_CHAT || s_ai_request_id == 0U)
+    {
+        s_ai_handoff.route = DEMO_AI_CALL_NONE;
+        return;
+    }
+    if (s_ai_handoff.route == DEMO_AI_CALL_NONE)
+    {
+        if (!demo_ai_chat_take_call_request(s_ai_request_id, &s_ai_handoff))
+        {
+            return;
+        }
+        s_ai_handoff_deadline = liot_rtos_get_running_time() +
+                                 UI_AUDIO_HANDOFF_MS;
+        demo_ai_chat_stop();
+        s_dirty = true;
+        liot_trace("[AI-CALL] handoff begin request=%u route=%u\r\n",
+                   (unsigned int)s_ai_request_id,
+                   (unsigned int)s_ai_handoff.route);
+    }
+    ui_update_startup_state();
+    if (s_startup_state != UI_STARTUP_READY || s_page != UI_PAGE_AI_CHAT)
+    {
+        s_ai_handoff.route = DEMO_AI_CALL_NONE;
+        return;
+    }
+    demo_ai_chat_get_snapshot(&ai);
+    if (ai.state == DEMO_AI_CHAT_ERROR)
+    {
+        goto failed;
+    }
+    idle = demo_ai_chat_is_idle();
+#ifdef HWDEMO_WECHAT_EN
+    idle = idle && demo_wechat_is_idle();
+#endif
+#ifdef HWDEMO_DEV_CHAT_EN
+    idle = idle && demo_dev_chat_is_idle();
+    if (idle && s_ai_handoff.route == DEMO_AI_CALL_DEVICE)
+    {
+        demo_dev_chat_snapshot_t dev;
+
+        demo_dev_chat_get_snapshot(&dev);
+        /* A background contact refresh is not an audio owner. Only this
+         * targeted handoff waits for it, within the existing deadline. */
+        idle = dev.state != DEMO_DEV_CHAT_SYNCING;
+    }
+#endif
+#ifdef HWDEMO_LIVE_TALK_EN
+    idle = idle && demo_live_talk_wait_idle(0U);
+#endif
+#ifdef HWDEMO_TIRTC_EN
+    idle = idle && demo_tirtc_wait_connections_idle(0U);
+#endif
+    if (!idle)
+    {
+        if (ui_handoff_remaining(s_ai_handoff_deadline) == 0U)
+        {
+            goto failed;
+        }
+        return;
+    }
+    /* Reserve the exact contact before enter() requests a list refresh.
+     * No HOME transition may expose LIVE or an unrelated incoming call. */
+#ifdef HWDEMO_WECHAT_EN
+    if (s_ai_handoff.route == DEMO_AI_CALL_WECHAT)
+    {
+        accepted = demo_wechat_call_contact(s_ai_handoff.target_id);
+        if (accepted)
+        {
+            s_wx_page_session = 0U;
+            ui_set_page(UI_PAGE_WECHAT);
+            demo_wechat_enter();
+        }
+    }
+#endif
+#ifdef HWDEMO_DEV_CHAT_EN
+    if (s_ai_handoff.route == DEMO_AI_CALL_DEVICE)
+    {
+        uint32_t sequence = demo_dev_chat_call_device(s_ai_handoff.target_id);
+
+        accepted = sequence != 0U;
+        if (accepted)
+        {
+            s_dev_page_session = sequence;
+            ui_set_page(UI_PAGE_DEV_CHAT);
+            demo_dev_chat_enter();
+        }
+    }
+#endif
+    if (!accepted)
+    {
+        goto failed;
+    }
+    liot_trace("[AI-CALL] handoff submitted route=%u\r\n",
+               (unsigned int)s_ai_handoff.route);
+    s_ai_handoff.route = DEMO_AI_CALL_NONE;
+    s_ai_request_id = 0U;
+    ui_sync_live_policy();
+    s_dirty = true;
+    return;
+failed:
+    liot_trace("[AI-CALL] handoff failed: cleanup timeout or target unavailable\r\n");
+    s_ai_handoff.route = DEMO_AI_CALL_NONE;
+    s_ai_request_id = 0U;
+    s_ai_call_failed = true;
+    s_dirty = true;
+}
+#endif
 
 static void ui_apply_audio_setting(void)
 {
@@ -525,13 +1041,85 @@ static void ui_apply_audio_setting(void)
 #ifdef HWDEMO_DEV_CHAT_EN
     demo_dev_chat_set_audio_levels(s_speaker_level, s_mic_level);
 #endif
+#ifdef HWDEMO_GROUP_ROOM_EN
+    demo_group_intercom_set_audio_levels(s_speaker_level, s_mic_level);
+#endif
     liot_trace("[UI] audio levels speaker=%u mic=%u\r\n",
                (unsigned int)s_speaker_level,
                (unsigned int)s_mic_level);
 }
 
-static void ui_handle_key(demo_ui_key_e key)
+static void ui_handle_key(demo_ui_key_e key, uint32_t group_generation)
 {
+#ifndef HWDEMO_GROUP_ROOM_EN
+    (void)group_generation;
+#endif
+#ifdef HWDEMO_GROUP_ROOM_EN
+    if (s_group_hold_pending && key != DEMO_UI_KEY_BACK)
+    {
+        ui_invalidate_key_context();
+    }
+    if (s_page == UI_PAGE_GROUP_ROOM)
+    {
+        demo_group_snapshot_t group;
+
+        /* An old ROOM key cannot accept a newly arrived, unseen phone call. */
+#ifdef HWDEMO_WECHAT_EN
+        demo_wechat_snapshot_t wx;
+        demo_wechat_get_snapshot(&wx);
+        if (wx.state == DEMO_WECHAT_RINGING)
+        {
+            ui_wx_open_incoming_page(&wx);
+            return;
+        }
+#endif
+#ifdef HWDEMO_DEV_CHAT_EN
+        {
+            demo_dev_chat_snapshot_t dev;
+            demo_dev_chat_get_snapshot(&dev);
+            if (dev.state == DEMO_DEV_CHAT_RINGING)
+            {
+                ui_dev_open_incoming_page(&dev);
+                return;
+            }
+        }
+#endif
+        if (key == DEMO_UI_KEY_BACK)
+        {
+            if (!s_group_exiting)
+            {
+                s_group_exiting = true;
+                s_group_return_after_call = false;
+                ui_invalidate_key_context();
+                demo_group_intercom_exit();
+                ui_sync_live_policy();
+                s_dirty = true;
+            }
+            return;
+        }
+        if (s_group_exiting || s_startup_state != UI_STARTUP_READY ||
+            demo_group_intercom_has_call())
+        {
+            return;
+        }
+        demo_group_intercom_get_snapshot(&group);
+        if (key == DEMO_UI_KEY_CONFIRM)
+        {
+            if (group.state == DEMO_GROUP_LISTENING ||
+                group.state == DEMO_GROUP_MIC_ON)
+            {
+                (void)demo_group_intercom_toggle_mic_for_generation(
+                    group_generation);
+            }
+            else if (group.state == DEMO_GROUP_NO_ROOM ||
+                     group.state == DEMO_GROUP_ERROR)
+            {
+                demo_group_intercom_retry();
+            }
+        }
+        return;
+    }
+#endif
     if (s_startup_state != UI_STARTUP_READY)
     {
 #ifdef HWDEMO_BINDING_EN
@@ -570,6 +1158,12 @@ static void ui_handle_key(demo_ui_key_e key)
             }
         }
 #endif
+        if (s_entry_pending && key == DEMO_UI_KEY_CONFIRM)
+        {
+            /* Do not extend the deadline or enqueue duplicate starts. */
+            return;
+        }
+        ui_cancel_entry();
         if (key == DEMO_UI_KEY_NEXT)
         {
             s_main_selected =
@@ -592,20 +1186,16 @@ static void ui_handle_key(demo_ui_key_e key)
                 demo_ai_chat_prepare();
             }
 #endif
-            s_page = (ui_page_e)(UI_PAGE_AI_CHAT + s_main_selected);
+            s_entry_page = (ui_page_e)(UI_PAGE_AI_CHAT + s_main_selected);
+            s_entry_deadline = liot_rtos_get_running_time() +
+                               UI_ENTRY_TIMEOUT_MS;
+#ifdef HWDEMO_GROUP_ROOM_EN
+            ui_invalidate_key_context();
+#endif
+            s_entry_pending = true;
             ui_sync_live_policy();
-            if (!ui_wait_audio_released(false, false))
-            {
-                s_page = UI_PAGE_HOME;
-                ui_sync_live_policy();
-                s_dirty = true;
-                return;
-            }
-            if (s_page != UI_PAGE_SETTINGS)
-            {
-                ui_notify_feature(
-                    (demo_ui_feature_e)(s_page - UI_PAGE_AI_CHAT), true);
-            }
+            liot_trace("[UI] entry waiting page=%d timeout_ms=%u\r\n",
+                       (int)s_entry_page, (unsigned int)UI_ENTRY_TIMEOUT_MS);
         }
     }
 #ifdef HWDEMO_WECHAT_EN
@@ -644,8 +1234,7 @@ static void ui_handle_key(demo_ui_key_e key)
             {
                 demo_wechat_leave();
                 s_wx_page_session = 0U;
-                s_page = UI_PAGE_HOME;
-                ui_sync_live_policy();
+                ui_finish_call_page();
             }
         }
     }
@@ -689,8 +1278,7 @@ static void ui_handle_key(demo_ui_key_e key)
             {
                 demo_dev_chat_leave();
                 s_dev_page_session = 0U;
-                s_page = UI_PAGE_HOME;
-                ui_sync_live_policy();
+                ui_finish_call_page();
             }
         }
     }
@@ -738,7 +1326,7 @@ static void ui_handle_key(demo_ui_key_e key)
         }
         else if (key == DEMO_UI_KEY_BACK)
         {
-            s_page = UI_PAGE_HOME;
+            ui_set_page(UI_PAGE_HOME);
             ui_sync_live_policy();
         }
     }
@@ -750,7 +1338,7 @@ static void ui_handle_key(demo_ui_key_e key)
 
         ui_notify_feature(
             (demo_ui_feature_e)(s_page - UI_PAGE_AI_CHAT), false);
-        s_page = UI_PAGE_HOME;
+        ui_set_page(UI_PAGE_HOME);
         ui_sync_live_policy();
 #ifdef HWDEMO_AI_CHAT_EN
         if (prepare_ai && s_main_selected == UI_MAIN_AI_INDEX)
@@ -765,6 +1353,52 @@ static void ui_handle_key(demo_ui_key_e key)
                (unsigned int)s_main_selected,
                (unsigned int)s_settings_selected);
 }
+
+#ifdef HWDEMO_GROUP_ROOM_EN
+static void ui_process_key_event(const ui_key_event_t *event)
+{
+    if (event->key == DEMO_UI_KEY_BACK &&
+        (event->back_hold_consumed || s_group_hold_consumed))
+    {
+        return;
+    }
+    if ((event->page == UI_PAGE_GROUP_ROOM || s_page == UI_PAGE_GROUP_ROOM ||
+         s_group_return_after_call || event->home_hold_allowed) &&
+        (event->epoch != s_key_epoch || event->page != s_page))
+    {
+        return;
+    }
+    if (event->key == DEMO_UI_KEY_BACK && event->home_hold_allowed &&
+        event->page == UI_PAGE_HOME && s_home_hold_allowed)
+    {
+        if (event->pressed_ms == s_last_back_pressed_ms &&
+            demo_key_back_is_pressed())
+        {
+            s_group_hold_pending = true;
+            s_group_hold_epoch = event->epoch;
+            s_group_hold_started = event->pressed_ms;
+        }
+        return;
+    }
+    if (s_page == UI_PAGE_GROUP_ROOM && event->key == DEMO_UI_KEY_CONFIRM)
+    {
+        demo_group_snapshot_t group;
+
+        demo_group_intercom_get_snapshot(&group);
+        if (event->group_generation != group.generation ||
+            (event->group_action == 1U &&
+             group.state != DEMO_GROUP_LISTENING &&
+             group.state != DEMO_GROUP_MIC_ON) ||
+            (event->group_action == 2U &&
+             group.state != DEMO_GROUP_NO_ROOM &&
+             group.state != DEMO_GROUP_ERROR) || event->group_action == 0U)
+        {
+            return;
+        }
+    }
+    ui_handle_key(event->key, event->group_generation);
+}
+#endif
 
 static void ui_draw_network_startup(void)
 {
@@ -954,6 +1588,71 @@ static void ui_draw_feature(void)
 {
     uint8_t index = (uint8_t)(s_page - UI_PAGE_AI_CHAT);
 
+#ifdef HWDEMO_GROUP_ROOM_EN
+    if (s_page == UI_PAGE_GROUP_ROOM)
+    {
+        demo_group_snapshot_t group;
+        const char *status = "READY";
+        const char *footer = "K2 BACK";
+        char title[20];
+        char error[20];
+
+        demo_group_intercom_get_snapshot(&group);
+        switch (group.state)
+        {
+        case DEMO_GROUP_SYNCING: status = "SYNCING"; break;
+        case DEMO_GROUP_NO_ROOM:
+            status = group.error == 40400 ? "ROOM CLOSED" : "NO ROOM";
+            footer = "K1 RETRY K2 BACK";
+            break;
+        case DEMO_GROUP_WAIT_RESOURCE: status = "WAIT AUDIO"; break;
+        case DEMO_GROUP_CONNECTING: status = "CONNECTING"; break;
+        case DEMO_GROUP_JOINING: status = "JOINING"; break;
+        case DEMO_GROUP_LISTENING:
+            status = "LISTENING";
+            footer = "K1 MIC K2 EXIT";
+            break;
+        case DEMO_GROUP_MIC_ON:
+            status = "MIC ON";
+            footer = "K1 MUTE K2 EXIT";
+            break;
+        case DEMO_GROUP_SUSPENDING: status = "SUSPENDING"; break;
+        case DEMO_GROUP_SUSPENDED: status = "SUSPENDED"; break;
+        case DEMO_GROUP_RECONNECTING: status = "RECONNECTING"; break;
+        case DEMO_GROUP_STOPPING: status = "STOPPING"; break;
+        case DEMO_GROUP_ERROR:
+            snprintf(error, sizeof(error), "ERR %d", group.error);
+            status = group.error == 40400 ? "ROOM CLOSED" : error;
+            footer = "K1 RETRY K2 EXIT";
+            break;
+        case DEMO_GROUP_IDLE:
+        default:
+            break;
+        }
+        if (s_group_exiting)
+        {
+            status = "STOPPING";
+            footer = "";
+        }
+        if (group.room_code[0] != '\0')
+        {
+            snprintf(title, sizeof(title), "ROOM %.6s", group.room_code);
+        }
+        else
+        {
+            snprintf(title, sizeof(title), "GROUP ROOM");
+        }
+        demo_oled_draw_text_centered(5, title, 1);
+        demo_oled_draw_text_centered(25, status, 1);
+        if (group.state == DEMO_GROUP_NO_ROOM && !s_group_exiting)
+        {
+            demo_oled_draw_text_centered(38, "SET ON WEB", 1);
+        }
+        demo_oled_draw_text_centered(53, footer, 1);
+        return;
+    }
+#endif
+
 #ifdef HWDEMO_AI_CHAT_EN
     if (s_page == UI_PAGE_AI_CHAT)
     {
@@ -995,6 +1694,15 @@ static void ui_draw_feature(void)
             break;
         }
 
+        if (s_ai_call_failed)
+        {
+            status = "CALL ERR";
+        }
+        else if (s_ai_handoff.route != DEMO_AI_CALL_NONE)
+        {
+            status = s_ai_handoff.route == DEMO_AI_CALL_WECHAT ?
+                         "CALL WX" : "CALL DEV";
+        }
         demo_oled_draw_text_centered(8, "AI CHAT", 2);
         demo_oled_draw_text_centered(36, status, 1);
         demo_oled_draw_text_centered(50, "KEY2 BACK", 1);
@@ -1044,6 +1752,9 @@ static void ui_draw_feature(void)
             break;
         case DEMO_WECHAT_RINGING:
             status = "INCOMING";
+#ifdef HWDEMO_GROUP_ROOM_EN
+            if (wx.group_pending) status = "WAIT AUDIO";
+#endif
             footer = "K1 ANS K2 END";
             break;
         case DEMO_WECHAT_DIALING:
@@ -1125,6 +1836,9 @@ static void ui_draw_feature(void)
             break;
         case DEMO_DEV_CHAT_RINGING:
             status = "INCOMING";
+#ifdef HWDEMO_GROUP_ROOM_EN
+            if (dev.group_pending) status = "WAIT AUDIO";
+#endif
             footer = "K1 ANSWER K2 END";
             break;
         case DEMO_DEV_CHAT_DIALING:
@@ -1181,6 +1895,17 @@ static void ui_render(void)
     {
         ui_draw_binding_startup();
     }
+    else if (s_page == UI_PAGE_HOME && (s_entry_pending || s_entry_failed))
+    {
+        uint8_t index = (uint8_t)(s_entry_page - UI_PAGE_AI_CHAT);
+
+        demo_oled_draw_text_centered(8,
+            index < 3U ? s_feature_titles[index] : "SETTINGS", 2);
+        demo_oled_draw_text_centered(36,
+            s_entry_failed ? "AUDIO BUSY" : "WAIT AUDIO", 1);
+        demo_oled_draw_text_centered(50,
+            s_entry_failed ? "K1 RETRY K2 BACK" : "K0 NEXT K2 BACK", 1);
+    }
     else if (s_page == UI_PAGE_HOME)
     {
         ui_draw_home();
@@ -1198,7 +1923,7 @@ static void ui_render(void)
 
 void demo_ui_task(void *argv)
 {
-    demo_ui_key_e key;
+    ui_key_event_t key;
 #ifdef HWDEMO_NET_TIME_EN
     demo_net_state_e previous_net_state = (demo_net_state_e)-1;
     bool previous_data_ready = false;
@@ -1251,9 +1976,23 @@ void demo_ui_task(void *argv)
     while (1)
     {
         if (liot_rtos_queue_wait(s_ui_queue, (uint8 *)&key, sizeof(key),
-                                 UI_WAIT_MS) == LIOT_OSI_SUCCESS)
+#ifdef HWDEMO_GROUP_ROOM_EN
+                                 (s_entry_pending || s_group_hold_pending ||
+                                  s_group_hold_consumed ||
+                                  s_page == UI_PAGE_GROUP_ROOM ||
+                                  s_group_return_after_call) ?
+                                     UI_GROUP_POLL_MS : UI_WAIT_MS
+#else
+                                 s_entry_pending ? UI_ENTRY_POLL_MS :
+                                                   UI_WAIT_MS
+#endif
+                                ) == LIOT_OSI_SUCCESS)
         {
-            ui_handle_key(key);
+#ifdef HWDEMO_GROUP_ROOM_EN
+            ui_process_key_event(&key);
+#else
+            ui_handle_key(key, 0U);
+#endif
         }
 
 #ifdef HWDEMO_NET_TIME_EN
@@ -1290,6 +2029,7 @@ void demo_ui_task(void *argv)
 #endif
 
 #ifdef HWDEMO_AI_CHAT_EN
+        ui_process_ai_call();
         demo_ai_chat_get_snapshot(&ai);
         if (ai.state != previous_ai.state || ai.error != previous_ai.error ||
             ai.rx_dropped != previous_ai.rx_dropped ||
@@ -1304,13 +2044,14 @@ void demo_ui_task(void *argv)
             }
         }
         if (s_page == UI_PAGE_AI_CHAT && s_ai_request_id != 0U &&
+            s_ai_handoff.route == DEMO_AI_CALL_NONE &&
             ai.completed_request_id == s_ai_request_id &&
             ai.completed_result == 0)
         {
             liot_trace("[UI] AI request=%u complete -> MENU\r\n",
                        (unsigned int)s_ai_request_id);
             s_ai_request_id = 0U;
-            s_page = UI_PAGE_HOME;
+            ui_set_page(UI_PAGE_HOME);
             ui_sync_live_policy();
             if (s_main_selected == UI_MAIN_AI_INDEX)
             {
@@ -1324,7 +2065,11 @@ void demo_ui_task(void *argv)
         demo_wechat_get_snapshot(&wx);
         if (wx.state == DEMO_WECHAT_RINGING &&
             wx.incoming_generation != previous_wx.incoming_generation &&
-            (s_page == UI_PAGE_HOME || s_page == UI_PAGE_WECHAT))
+            (s_page == UI_PAGE_HOME || s_page == UI_PAGE_WECHAT
+#ifdef HWDEMO_GROUP_ROOM_EN
+             || s_page == UI_PAGE_GROUP_ROOM
+#endif
+            ))
         {
             ui_wx_open_incoming_page(&wx);
             liot_trace("[UI] WX incoming page generation=%u session=%u\r\n",
@@ -1339,6 +2084,9 @@ void demo_ui_task(void *argv)
             wx.incoming_generation != previous_wx.incoming_generation ||
             wx.session_sequence != previous_wx.session_sequence ||
             wx.completed_sequence != previous_wx.completed_sequence ||
+#ifdef HWDEMO_GROUP_ROOM_EN
+            wx.group_pending != previous_wx.group_pending ||
+#endif
             strcmp(wx.display_name, previous_wx.display_name) != 0)
         {
             previous_wx = wx;
@@ -1367,8 +2115,7 @@ void demo_ui_task(void *argv)
                 liot_trace("[UI] WX session=%u complete -> MENU\r\n",
                            (unsigned int)s_wx_page_session);
                 s_wx_page_session = 0U;
-                s_page = UI_PAGE_HOME;
-                ui_sync_live_policy();
+                ui_finish_call_page();
                 s_dirty = true;
             }
         }
@@ -1378,7 +2125,11 @@ void demo_ui_task(void *argv)
         demo_dev_chat_get_snapshot(&dev);
         if (dev.state == DEMO_DEV_CHAT_RINGING &&
             dev.incoming_generation != previous_dev.incoming_generation &&
-            (s_page == UI_PAGE_HOME || s_page == UI_PAGE_DEV_CHAT))
+            (s_page == UI_PAGE_HOME || s_page == UI_PAGE_DEV_CHAT
+#ifdef HWDEMO_GROUP_ROOM_EN
+             || s_page == UI_PAGE_GROUP_ROOM
+#endif
+            ))
         {
             ui_dev_open_incoming_page(&dev);
             liot_trace("[UI] DEV incoming page generation=%u session=%u\r\n",
@@ -1394,7 +2145,8 @@ void demo_ui_task(void *argv)
             /* A caller room can be recovered after reboot without a key
              * event.  Surface that restored session instead of leaving an
              * active microphone/connection hidden behind the HOME page. */
-            s_page = UI_PAGE_DEV_CHAT;
+            ui_cancel_entry();
+            ui_set_page(UI_PAGE_DEV_CHAT);
             s_dev_page_session = dev.session_sequence;
             ui_sync_live_policy();
             s_dirty = true;
@@ -1410,6 +2162,9 @@ void demo_ui_task(void *argv)
             dev.incoming_generation != previous_dev.incoming_generation ||
             dev.session_sequence != previous_dev.session_sequence ||
             dev.completed_sequence != previous_dev.completed_sequence ||
+#ifdef HWDEMO_GROUP_ROOM_EN
+            dev.group_pending != previous_dev.group_pending ||
+#endif
             dev.rx_dropped != previous_dev.rx_dropped ||
             dev.tx_dropped != previous_dev.tx_dropped ||
             strcmp(dev.display_name, previous_dev.display_name) != 0)
@@ -1440,15 +2195,18 @@ void demo_ui_task(void *argv)
                 liot_trace("[UI] DEV session=%u complete -> MENU\r\n",
                            (unsigned int)s_dev_page_session);
                 s_dev_page_session = 0U;
-                s_page = UI_PAGE_HOME;
-                ui_sync_live_policy();
+                ui_finish_call_page();
                 s_dirty = true;
             }
         }
 #endif
 
         ui_update_startup_state();
+        ui_process_entry();
         ui_sync_live_policy();
+#ifdef HWDEMO_GROUP_ROOM_EN
+        ui_process_group();
+#endif
 
         if (s_dirty)
         {

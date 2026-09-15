@@ -199,6 +199,15 @@ function devNoDevice() {
   return canvas;
 }
 
+function groupState(status, footer, roomCode = "123456", hint = "") {
+  const canvas = createCanvas();
+  drawCentered(canvas, 5, roomCode ? `ROOM ${roomCode}` : "GROUP ROOM", 1);
+  drawCentered(canvas, 25, status, 1);
+  if (hint) drawCentered(canvas, 38, hint, 1);
+  drawCentered(canvas, 53, footer, 1);
+  return canvas;
+}
+
 function uiReady() {
   const canvas = createCanvas();
   drawCentered(canvas, 26, "UI READY", 1);
@@ -253,6 +262,10 @@ const screens = [
   ["oled-24-ai-error.svg", "AI 错误", ai("ERR -1001")],
   ["oled-25-wx-error.svg", "WX 错误", wxState("ERR -3007")],
   ["oled-26-dev-error.svg", "DEV 错误", devState("ERR -5009", "K2 BACK")],
+  ["oled-27-group-listening.svg", "GROUP 收听", groupState("LISTENING", "K1 MIC K2 EXIT")],
+  ["oled-28-group-mic-on.svg", "GROUP 开麦", groupState("MIC ON", "K1 MUTE K2 EXIT")],
+  ["oled-29-group-no-room.svg", "GROUP 无房间", groupState("NO ROOM", "K1 RETRY K2 BACK", "", "SET ON WEB")],
+  ["oled-30-group-error.svg", "GROUP 错误", groupState("ERR -6101", "K1 RETRY K2 EXIT")],
 ];
 
 fs.mkdirSync(OUT_DIR, { recursive: true });

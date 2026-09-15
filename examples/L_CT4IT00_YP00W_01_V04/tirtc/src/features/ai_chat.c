@@ -24,9 +24,16 @@
 #include <string.h>
 
 #include "cJSON.h"
+#include "json_guard.h"
 #include "audio_device.h"
 #include "opus_codec.h"
 #include "device_binding.h"
+#ifdef HWDEMO_WECHAT_EN
+#include "wechat_call.h"
+#endif
+#ifdef HWDEMO_DEV_CHAT_EN
+#include "device_call.h"
+#endif
 #include "tirtc_runtime.h"
 #include "liot_log.h"
 #include "liot_os.h"
@@ -39,6 +46,7 @@
 #define AI_SDK_BEARER_SAFE_MAX         600U
 #define AI_CONNECT_TIMEOUT_MS          30000U
 #define AI_ACCESS_PREFETCH_TTL_MS      15000U
+#define AI_CALL_LOOKUP_TIMEOUT_MS      12000U
 #define AI_START_RESPONSE_TIMEOUT_MS   15000U
 #define AI_END_FLUSH_TIMEOUT_MS         100U
 #define AI_DISCONNECT_SETTLE_MS        5000U
@@ -56,6 +64,8 @@
 #define AI_UNWANTED_QUEUE_DEPTH        4U
 #define AI_WHIP_CONTEXT_COUNT          4U
 #define AI_COMMAND_MAX_BYTES           1024U
+#define AI_DIAG_DETAIL_LIMIT           16U
+#define AI_DIAG_REPORT_MS              1000U
 #define AI_DECODE_MAX_SAMPLES          1920U
 #define AI_PLAY_BATCH_SAMPLES          2560U
 
@@ -91,6 +101,31 @@ typedef struct
     char payload[AI_COMMAND_MAX_BYTES + 1U];
 } ai_command_message_t;
 
+typedef enum
+{
+    AI_DIAG_RECEIVED = 0,
+    AI_DIAG_QUEUED,
+    AI_DIAG_BAD_CONNECTION,
+    AI_DIAG_BAD_COMMAND,
+    AI_DIAG_BAD_DATA,
+    AI_DIAG_TOO_LARGE,
+    AI_DIAG_NO_SLOT,
+    AI_DIAG_QUEUE_FAILED,
+    AI_DIAG_EVENT_COUNT
+} ai_diag_event_e;
+
+typedef struct
+{
+    uint32_t count[AI_DIAG_EVENT_COUNT];
+    uint32_t last_drop_command;
+    uint32_t last_drop_length;
+    uint32_t handled;
+    uint32_t parsed;
+    uint32_t actions;
+    uint32_t unknown;
+    uint32_t quiet;
+} ai_command_diag_t;
+
 typedef struct
 {
     uint32_t generation;
@@ -113,6 +148,12 @@ static bool s_audio_pool_used[AI_AUDIO_QUEUE_DEPTH];
 static ai_command_message_t s_command_pool[AI_COMMAND_QUEUE_DEPTH];
 static bool s_command_pool_used[AI_COMMAND_QUEUE_DEPTH];
 static volatile uint32_t s_callback_producers;
+/* Callback writes only fixed counters under the existing control lock.
+ * Parsing, formatting and serial output remain in the AI worker. */
+static ai_command_diag_t s_command_diag;
+static uint32_t s_diag_details;
+static uint32_t s_diag_report_ms;
+static uint32_t s_diag_reported_drops;
 
 static volatile demo_ai_chat_state_e s_state = DEMO_AI_CHAT_IDLE;
 static volatile int s_error;
@@ -122,6 +163,27 @@ static volatile uint32_t s_running_request_id;
 static volatile uint32_t s_idle_ack_sequence;
 static volatile uint32_t s_completed_request_id;
 static volatile int s_completed_result;
+/* One bounded handoff, not a new task/queue. Protected by the control lock. */
+static demo_ai_call_request_t s_call_request;
+static bool s_call_pending;
+static bool s_call_committed;
+static char s_call_rpc_id[96];
+/* Only the AI worker owns this lookup. UI cancellation changes the existing
+ * request sequence; late HTTP completion can never revive a cancelled call.
+ * Copy strings, not cJSON/pool pointers, before returning from the handler. */
+static struct
+{
+    bool pending;
+    bool use_wx;
+    bool use_dev;
+    uint32_t request_id;
+    uint32_t generation;
+    uint32_t started_ms;
+    uint32_t wx_ticket;
+    uint32_t dev_ticket;
+    char rpc_id[sizeof(s_call_rpc_id)];
+    char target[257];
+} s_call_lookup;
 static volatile bool s_prepare_requested;
 static volatile bool s_levels_dirty = true;
 static volatile uint8_t s_speaker_level = 8U;
@@ -174,6 +236,144 @@ static __attribute__((aligned(16))) int16_t
     s_decode_pcm[AI_DECODE_MAX_SAMPLES];
 static __attribute__((aligned(16))) int16_t
     s_play_pcm[AI_PLAY_BATCH_SAMPLES];
+
+/* Only protocol/role/session labels are logged, never raw JSON or contacts. */
+static const char *ai_diag_text(const char *value, char *out, size_t capacity)
+{
+    size_t i = 0U;
+
+    if (capacity == 0U)
+    {
+        return "";
+    }
+    if (value == NULL)
+    {
+        value = "<missing>";
+    }
+    while (i + 1U < capacity && value[i] != '\0')
+    {
+        unsigned char ch = (unsigned char)value[i];
+        out[i] = ch >= 0x20U && ch <= 0x7eU ? (char)ch : '_';
+        ++i;
+    }
+    if (value[i] != '\0' && i > 0U)
+    {
+        out[i - 1U] = '~';
+    }
+    out[i] = '\0';
+    return out;
+}
+
+static void ai_diag_record(ai_diag_event_e event, uint32_t cmdw,
+                           uint32_t length)
+{
+    liot_rtos_enter_critical();
+    s_command_diag.count[event]++;
+    if (event >= AI_DIAG_BAD_CONNECTION)
+    {
+        s_command_diag.last_drop_command = cmdw;
+        s_command_diag.last_drop_length = length;
+    }
+    liot_rtos_exit_critical();
+}
+
+static void ai_diag_reset(void)
+{
+    liot_rtos_enter_critical();
+    memset(&s_command_diag, 0, sizeof(s_command_diag));
+    liot_rtos_exit_critical();
+    s_diag_details = 0U;
+    s_diag_report_ms = 0U;
+    s_diag_reported_drops = 0U;
+}
+
+static void ai_diag_report(bool final)
+{
+    ai_command_diag_t diag;
+    uint32_t drops = 0U;
+    uint32_t now = liot_rtos_get_running_time();
+    unsigned int i;
+
+    liot_rtos_enter_critical();
+    diag = s_command_diag;
+    liot_rtos_exit_critical();
+    for (i = AI_DIAG_BAD_CONNECTION; i < AI_DIAG_EVENT_COUNT; ++i)
+    {
+        drops += diag.count[i];
+    }
+    if (!final && (drops == s_diag_reported_drops ||
+        (uint32_t)(now - s_diag_report_ms) < AI_DIAG_REPORT_MS))
+    {
+        return;
+    }
+    s_diag_reported_drops = drops;
+    s_diag_report_ms = now;
+    liot_trace("[AI-CMD] drops req=%u conn=%u cmd=%u data=%u oversize=%u "
+               "pool=%u queue=%u last_cmd=0x%08x last_bytes=%u\r\n",
+               (unsigned int)s_running_request_id,
+               (unsigned int)diag.count[AI_DIAG_BAD_CONNECTION],
+               (unsigned int)diag.count[AI_DIAG_BAD_COMMAND],
+               (unsigned int)diag.count[AI_DIAG_BAD_DATA],
+               (unsigned int)diag.count[AI_DIAG_TOO_LARGE],
+               (unsigned int)diag.count[AI_DIAG_NO_SLOT],
+               (unsigned int)diag.count[AI_DIAG_QUEUE_FAILED],
+               (unsigned int)diag.last_drop_command,
+               (unsigned int)diag.last_drop_length);
+    if (final)
+    {
+        liot_trace("[AI-CMD] summary req=%u received=%u queued=%u handled=%u "
+                   "parsed=%u actions=%u unknown=%u quiet=%u remote_end=%u\r\n",
+                   (unsigned int)s_running_request_id,
+                   (unsigned int)diag.count[AI_DIAG_RECEIVED],
+                   (unsigned int)diag.count[AI_DIAG_QUEUED],
+                   (unsigned int)diag.handled, (unsigned int)diag.parsed,
+                   (unsigned int)diag.actions, (unsigned int)diag.unknown,
+                   (unsigned int)diag.quiet, s_remote_ended ? 1U : 0U);
+    }
+}
+
+static void ai_diag_command(const ai_command_message_t *message,
+                            const cJSON *root)
+{
+    const cJSON *method = cJSON_GetObjectItemCaseSensitive(root, "method");
+    const cJSON *id = cJSON_GetObjectItemCaseSensitive(root, "id");
+    const cJSON *params = cJSON_GetObjectItemCaseSensitive(root, "params");
+    const cJSON *data = cJSON_GetObjectItemCaseSensitive(params, "data");
+    const char *name = cJSON_IsString(method) ? method->valuestring : NULL;
+    char text[49];
+    bool important = name == NULL || strcmp(name, "device_action") == 0 ||
+                                      strcmp(name, "end_session") == 0;
+
+    s_command_diag.parsed++;
+    if (!important && (strcmp(name, "caption") == 0 ||
+        strcmp(name, "round_start") == 0 || strcmp(name, "round_end") == 0 ||
+        s_diag_details >= AI_DIAG_DETAIL_LIMIT))
+    {
+        s_command_diag.quiet++;
+        return;
+    }
+    if (!important)
+    {
+        ++s_diag_details;
+    }
+    liot_trace("[AI-CMD] rx req=%u cmd=0x%08x bytes=%u method=%s "
+               "id_type=%d id_len=%u params_type=%d data_type=%d state=%u\r\n",
+               (unsigned int)s_running_request_id, (unsigned int)message->cmdw,
+               (unsigned int)message->length, ai_diag_text(name, text, sizeof(text)),
+               id != NULL ? (id->type & 0xff) : 0,
+               (unsigned int)(cJSON_IsString(id) && id->valuestring != NULL ?
+                              strlen(id->valuestring) : 0U),
+               params != NULL ? (params->type & 0xff) : 0,
+               data != NULL ? (data->type & 0xff) : 0, (unsigned int)s_state);
+    if (name != NULL && strcmp(name, "forward") == 0)
+    {
+        const cJSON *event = cJSON_GetObjectItemCaseSensitive(params, "event_type");
+
+        liot_trace("[AI-CMD] forward event=%s (not a device_action)\r\n",
+                   ai_diag_text(cJSON_IsString(event) ? event->valuestring : NULL,
+                                text, sizeof(text)));
+    }
+}
 
 static void ai_signal(void)
 {
@@ -733,15 +933,22 @@ static void ai_on_command(tirtc_conn_t hconn, uint32_t cmdw,
     uint8_t slot;
     int acquired;
 
+    ai_diag_record(AI_DIAG_RECEIVED, cmdw, length);
     if (hconn != s_conn || cmdw != AI_CMD_WORD || data == NULL ||
         length == 0U || length > AI_COMMAND_MAX_BYTES)
     {
+        ai_diag_event_e reason = hconn != s_conn ? AI_DIAG_BAD_CONNECTION :
+            cmdw != AI_CMD_WORD ? AI_DIAG_BAD_COMMAND :
+            data == NULL || length == 0U ? AI_DIAG_BAD_DATA : AI_DIAG_TOO_LARGE;
+
+        ai_diag_record(reason, cmdw, length);
         return;
     }
 
     acquired = ai_command_slot_acquire(hconn);
     if (acquired < 0)
     {
+        ai_diag_record(AI_DIAG_NO_SLOT, cmdw, length);
         s_rx_dropped++;
         return;
     }
@@ -755,11 +962,13 @@ static void ai_on_command(tirtc_conn_t hconn, uint32_t cmdw,
         liot_rtos_queue_release(s_command_queue, sizeof(slot), &slot,
                                 LIOT_NO_WAIT) != LIOT_OSI_SUCCESS)
     {
+        ai_diag_record(AI_DIAG_QUEUE_FAILED, cmdw, length);
         ai_command_slot_release(slot);
         ai_callback_producer_done();
         s_rx_dropped++;
         return;
     }
+    ai_diag_record(AI_DIAG_QUEUED, cmdw, length);
     ai_callback_producer_done();
     ai_signal();
 }
@@ -929,6 +1138,606 @@ static int ai_json_audio_validate_optional(const cJSON *result,
            cJSON_IsNumber(channels) && channels->valueint == 1 ? 1 : -1;
 }
 
+static bool ai_call_reply(const char *id, bool ok, const char *status,
+                          const char *message, demo_ai_call_route_e route)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON *body;
+    cJSON *details;
+    char *json = NULL;
+    size_t length = 0U;
+    int ret = -1;
+
+    if (root == NULL ||
+        cJSON_AddStringToObject(root, "jsonrpc", "2.0") == NULL ||
+        cJSON_AddStringToObject(root, "id", id) == NULL)
+    {
+        goto done;
+    }
+    body = cJSON_AddObjectToObject(root, ok ? "result" : "error");
+    if (body == NULL ||
+        cJSON_AddStringToObject(body, "message", message) == NULL)
+    {
+        goto done;
+    }
+    details = body;
+    if (!ok)
+    {
+        if (cJSON_AddNumberToObject(body, "code", -32000) == NULL)
+        {
+            goto done;
+        }
+        details = cJSON_AddObjectToObject(body, "data");
+    }
+    if (details == NULL ||
+        cJSON_AddBoolToObject(details, "ok", ok) == NULL ||
+        cJSON_AddStringToObject(details, "status", status) == NULL)
+    {
+        goto done;
+    }
+    if (ok &&
+        (cJSON_AddStringToObject(body, "contact_type",
+            route == DEMO_AI_CALL_WECHAT ? "wechat" : "device") == NULL ||
+         cJSON_AddStringToObject(body, "call_type", "audio") == NULL))
+    {
+        goto done;
+    }
+    json = cJSON_PrintUnformatted(root);
+    if (json != NULL)
+    {
+        length = strlen(json);
+        if (length > 0U && length <= AI_COMMAND_MAX_BYTES)
+        {
+            ret = demo_tirtc_send_command(DEMO_TIRTC_OWNER_AI,
+                s_tirtc_session_generation, AI_CMD_WORD, json,
+                (uint32_t)length);
+        }
+    }
+done:
+    cJSON_free(json);
+    cJSON_Delete(root);
+    /* The bundled SDK counts the 32-bit command word as well as the JSON.
+     * Only a complete accepted response permits the UI handoff. */
+    liot_trace("[AI-CALL] response status=%s ok=%u send=%d bytes=%u\r\n",
+               status, ok ? 1U : 0U, ret, (unsigned int)length);
+    return length > 0U && ret == (int)(length + sizeof(uint32_t));
+}
+
+static const char *ai_call_string(const cJSON *object, const char *key)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(object, key);
+
+    return cJSON_IsString(item) ? item->valuestring : NULL;
+}
+
+/* Accept the voice-call envelopes/aliases used by xiaotai-esp32 P4/S3.
+ * Keep an explicitly supplied canonical field authoritative, including an
+ * invalid value: a lower-priority alias must not silently change the callee. */
+static const cJSON *ai_call_payload(const cJSON *params, const char **key)
+{
+    static const char *const names[] = {
+        "data", "arguments", "args", "input", "payload", "parameters"
+    };
+    size_t i;
+
+    for (i = 0U; i < sizeof(names) / sizeof(names[0]); ++i)
+    {
+        const cJSON *item = cJSON_GetObjectItemCaseSensitive(params, names[i]);
+        if ((i == 0U && item != NULL) || cJSON_IsObject(item))
+        {
+            *key = names[i];
+            return item;
+        }
+    }
+    *key = "params";
+    return params;
+}
+
+static const cJSON *ai_call_field(const cJSON *params, const cJSON *data,
+                                  const char *action,
+                                  const char *const *names, size_t count,
+                                  const char **key)
+{
+    size_t i;
+
+    for (i = 0U; i < count; ++i)
+    {
+        const cJSON *item = cJSON_GetObjectItemCaseSensitive(data, names[i]);
+        if (item == NULL && data != params)
+        {
+            item = cJSON_GetObjectItemCaseSensitive(params, names[i]);
+        }
+        /* params.name may already identify the tool. Do not let it hide
+         * a lower-priority contact alias (remark, callee, nickname, ...). */
+        if (strcmp(names[i], "name") == 0 && cJSON_IsString(item) &&
+            item->valuestring == action &&
+            item == cJSON_GetObjectItemCaseSensitive(params, "name"))
+        {
+            continue;
+        }
+        if (item != NULL)
+        {
+            *key = names[i];
+            return item;
+        }
+    }
+    *key = "<missing>";
+    return NULL;
+}
+
+static const char *ai_call_action(const cJSON *params, const cJSON *data)
+{
+    static const char *const names[] = {"action", "name", "tool", "function"};
+    size_t i;
+    const char *action;
+
+    if (cJSON_GetObjectItemCaseSensitive(params, "action") != NULL)
+    {
+        return ai_call_string(params, "action");
+    }
+    for (i = 1U; i < sizeof(names) / sizeof(names[0]); ++i)
+    {
+        action = ai_call_string(params, names[i]);
+        if (action != NULL && action[0] != '\0')
+        {
+            return action;
+        }
+    }
+    for (i = 0U; i < sizeof(names) / sizeof(names[0]); ++i)
+    {
+        /* payload.name is a contact name, not the tool/action name. */
+        if (i == 1U)
+        {
+            continue;
+        }
+        action = ai_call_string(data, names[i]);
+        if (action != NULL && action[0] != '\0')
+        {
+            return action;
+        }
+    }
+    return NULL;
+}
+
+static bool ai_call_ascii_equal(const char *left, const char *right)
+{
+    if (left == NULL || right == NULL)
+    {
+        return false;
+    }
+    while (*left != '\0' && *right != '\0')
+    {
+        unsigned char a = (unsigned char)*left++;
+        unsigned char b = (unsigned char)*right++;
+        if (a >= 'A' && a <= 'Z') a += 'a' - 'A';
+        if (b >= 'A' && b <= 'Z') b += 'a' - 'A';
+        if (a != b) return false;
+    }
+    return *left == *right;
+}
+
+static demo_ai_call_route_e ai_call_route(const char *type)
+{
+    if (ai_call_ascii_equal(type, "wechat") ||
+        ai_call_ascii_equal(type, "wechat_voip") ||
+        ai_call_ascii_equal(type, "wx") || ai_call_ascii_equal(type, "voip") ||
+        ai_call_ascii_equal(type, "微信") || ai_call_ascii_equal(type, "微信联系人"))
+    {
+        return DEMO_AI_CALL_WECHAT;
+    }
+    if (ai_call_ascii_equal(type, "device") ||
+        ai_call_ascii_equal(type, "device_call") ||
+        ai_call_ascii_equal(type, "tirtc") || ai_call_ascii_equal(type, "设备") ||
+        ai_call_ascii_equal(type, "设备联系人"))
+    {
+        return DEMO_AI_CALL_DEVICE;
+    }
+    return DEMO_AI_CALL_NONE;
+}
+
+/* HTTP stays in the WX/DEV workers. This poll only reads the correlated
+ * result, so capture/playback and KEY2 remain responsive while it is pending. */
+static void ai_poll_call_lookup(void)
+{
+    demo_ai_call_request_t request = {0};
+    char wx_id[sizeof(request.target_id)] = {0};
+    char dev_id[sizeof(request.target_id)] = {0};
+    const char *status;
+    const char *message;
+    uint32_t elapsed;
+    int wx_matches = 0;
+    int dev_matches = 0;
+    bool online = false;
+    bool published = false;
+
+    if (!s_call_lookup.pending)
+    {
+        return;
+    }
+    if (!ai_request_is_active() || s_remote_ended ||
+        s_conn_error_pending || s_disconnected_pending || s_call_committed ||
+        s_call_lookup.request_id != s_running_request_id ||
+        s_call_lookup.generation != s_generation ||
+        (s_state != DEMO_AI_CHAT_LISTENING &&
+         s_state != DEMO_AI_CHAT_SPEAKING))
+    {
+        liot_trace("[AI-CALL] lookup discarded req=%u (cancelled/stale/ended)\r\n",
+                   (unsigned int)s_call_lookup.request_id);
+        s_call_lookup.pending = false;
+        return;
+    }
+    elapsed = liot_rtos_get_running_time() - s_call_lookup.started_ms;
+    if (elapsed >= AI_CALL_LOOKUP_TIMEOUT_MS)
+    {
+        status = "contacts_timeout";
+        message = "联系人查询超时，暂时无法确认联系人状态，请稍后重试";
+        goto rejected;
+    }
+#ifdef HWDEMO_WECHAT_EN
+    if (s_call_lookup.use_wx)
+    {
+        wx_matches = demo_wechat_find_contact(s_call_lookup.target, wx_id,
+            sizeof(wx_id), s_call_lookup.wx_ticket);
+    }
+#endif
+#ifdef HWDEMO_DEV_CHAT_EN
+    if (s_call_lookup.use_dev)
+    {
+        dev_matches = demo_dev_chat_find_contact(s_call_lookup.target, dev_id,
+            sizeof(dev_id), &online, s_call_lookup.dev_ticket);
+    }
+#endif
+    /* A failed list is not evidence of absence, and must not hide a possible
+     * same-name contact in the other list. Never fall back to the old cache. */
+    if (wx_matches == -1 || dev_matches == -1)
+    {
+        status = "contacts_unavailable";
+        message = "联系人查询暂不可用，不能判断联系人不存在或离线，请稍后重试";
+        goto rejected;
+    }
+    if (wx_matches == -2 || dev_matches == -2)
+    {
+        return;
+    }
+    liot_trace("[AI-CALL] fresh match req=%u elapsed_ms=%u target_bytes=%u "
+               "search_wx=%u wx_matches=%d search_dev=%u dev_matches=%d "
+               "dev_online=%u\r\n",
+               (unsigned int)s_call_lookup.request_id, (unsigned int)elapsed,
+               (unsigned int)strlen(s_call_lookup.target),
+               s_call_lookup.use_wx ? 1U : 0U, wx_matches,
+               s_call_lookup.use_dev ? 1U : 0U, dev_matches, online ? 1U : 0U);
+    if (wx_matches + dev_matches != 1)
+    {
+        status = wx_matches + dev_matches > 1 ? "ambiguous" : "not_found";
+        message = wx_matches + dev_matches > 1 ?
+            "存在同名联系人，请说明微信或设备类型，或使用唯一 ID" :
+            "没有找到联系人，请使用列表中的完整备注或 ID";
+        goto rejected;
+    }
+    if (dev_matches == 1 && !online)
+    {
+        status = "offline";
+        message = "目标设备当前不在线";
+        goto rejected;
+    }
+    request.route = wx_matches == 1 ? DEMO_AI_CALL_WECHAT : DEMO_AI_CALL_DEVICE;
+    memcpy(request.target_id, wx_matches == 1 ? wx_id : dev_id,
+           sizeof(request.target_id));
+    s_call_lookup.pending = false;
+    if (!ai_request_is_active() || s_remote_ended ||
+        s_conn_error_pending || s_disconnected_pending)
+    {
+        return;
+    }
+    if (!ai_call_reply(s_call_lookup.rpc_id, true, "accepted",
+                       "已受理语音呼叫，正在切换", request.route))
+    {
+        liot_trace("[AI-CALL] not published: accepted response not fully sent\r\n");
+        return;
+    }
+    liot_rtos_enter_critical();
+    /* KEY2 or a new AI request may have arrived while sending the response. */
+    if (s_want_active && s_running_request_id != 0U &&
+        s_control_sequence == s_running_request_id && !s_call_committed &&
+        s_call_lookup.request_id == s_running_request_id &&
+        s_call_lookup.generation == s_generation)
+    {
+        request.request_id = s_running_request_id;
+        s_call_request = request;
+        memcpy(s_call_rpc_id, s_call_lookup.rpc_id,
+               strlen(s_call_lookup.rpc_id) + 1U);
+        s_call_committed = true;
+        s_call_pending = true;
+        published = true;
+    }
+    liot_rtos_exit_critical();
+    liot_trace("[AI-CALL] publish req=%u route=%u committed=%u%s\r\n",
+               (unsigned int)request.request_id, (unsigned int)request.route,
+               published ? 1U : 0U,
+               published ? "" : " (cancelled/stale/already committed)");
+    return;
+rejected:
+    s_call_lookup.pending = false;
+    liot_trace("[AI-CALL] lookup failed req=%u elapsed_ms=%u wx=%d dev=%d status=%s\r\n",
+               (unsigned int)s_call_lookup.request_id, (unsigned int)elapsed,
+               wx_matches, dev_matches, status);
+    if (ai_request_is_active() && !s_remote_ended &&
+        !s_conn_error_pending && !s_disconnected_pending)
+    {
+        (void)ai_call_reply(s_call_lookup.rpc_id, false, status, message,
+                           DEMO_AI_CALL_NONE);
+    }
+}
+
+/* Parse in the AI worker, copy the small request, then return immediately.
+ * Only a unique contact from the new refresh may be called. */
+static void ai_handle_device_action(const cJSON *root)
+{
+    static const char *const target_names[] = {
+        "target", "target_device", "target_device_id", "device", "device_id",
+        "device_name", "device_alias", "contact", "contact_name", "name",
+        "alias", "remark", "callee", "callee_device_id", "peer", "peer_id",
+        "nickname", "query"
+    };
+    static const char *const media_names[] = {"call_type", "type", "media", "mode"};
+    static const char *const type_names[] = {
+        "contact_type", "target_type", "contact_source", "route"
+    };
+    const cJSON *params = cJSON_GetObjectItemCaseSensitive(root, "params");
+    const char *payload_key;
+    const cJSON *data = ai_call_payload(params, &payload_key);
+    const char *id = ai_call_string(root, "id");
+    const char *version = ai_call_string(root, "jsonrpc");
+    const char *action = ai_call_action(params, data);
+    const cJSON *target_item;
+    const cJSON *type_item;
+    const cJSON *media_item;
+    const char *target_key;
+    const char *type_key;
+    const char *media_key;
+    const char *target;
+    const char *type;
+    const char *media;
+    const char *status = "invalid_params";
+    const char *message = "呼叫参数无效，请提供联系人名称和音频通话类型";
+    demo_ai_call_request_t request = {0};
+    char target_name[257];
+    size_t length;
+    bool wx_only;
+    bool use_wx = true;
+    bool use_dev = true;
+    bool committed;
+    bool duplicate;
+    char action_text[49];
+    char type_text[33];
+    char media_text[33];
+
+    s_command_diag.actions++;
+    liot_trace("[AI-CALL] received req=%u action=%s state=%u remote_end=%u\r\n",
+               (unsigned int)s_running_request_id,
+               ai_diag_text(action, action_text, sizeof(action_text)),
+               (unsigned int)s_state, s_remote_ended ? 1U : 0U);
+    if (id == NULL || id[0] == '\0' || strlen(id) >= sizeof(s_call_rpc_id))
+    {
+        liot_trace("[AI-CALL] ignored missing/oversized request id\r\n");
+        return;
+    }
+    if (version == NULL || strcmp(version, "2.0") != 0 ||
+        !cJSON_IsObject(params) || action == NULL || !cJSON_IsObject(data))
+    {
+        goto rejected;
+    }
+    if (!ai_request_is_active() || s_remote_ended ||
+        (s_state != DEMO_AI_CHAT_LISTENING &&
+         s_state != DEMO_AI_CHAT_SPEAKING))
+    {
+        status = "busy";
+        message = "AI 会话正在切换，请稍后再试";
+        goto rejected;
+    }
+    liot_rtos_enter_critical();
+    committed = s_call_committed;
+    duplicate = committed && strcmp(id, s_call_rpc_id) == 0;
+    request.route = s_call_request.route;
+    liot_rtos_exit_critical();
+    if (committed)
+    {
+        liot_trace("[AI-CALL] already committed duplicate_id=%u route=%u\r\n",
+                   duplicate ? 1U : 0U, (unsigned int)request.route);
+        (void)ai_call_reply(id, duplicate, duplicate ? "accepted" : "busy",
+            duplicate ? "已受理语音呼叫，正在切换" : "已有呼叫正在切换",
+            request.route);
+        return;
+    }
+    if (s_call_lookup.pending)
+    {
+        duplicate = strcmp(id, s_call_lookup.rpc_id) == 0;
+        liot_trace("[AI-CALL] lookup pending duplicate_id=%u\r\n",
+                   duplicate ? 1U : 0U);
+        if (!duplicate)
+        {
+            (void)ai_call_reply(id, false, "busy", "已有呼叫正在查询联系人",
+                               DEMO_AI_CALL_NONE);
+        }
+        return;
+    }
+    wx_only = ai_call_ascii_equal(action, "call_wechat") ||
+              ai_call_ascii_equal(action, "wechat_call") ||
+              ai_call_ascii_equal(action, "call_wechat_contact") ||
+              ai_call_ascii_equal(action, "call_voip_contact") ||
+              ai_call_ascii_equal(action, "voip_call");
+    if (!wx_only && !ai_call_ascii_equal(action, "call_contact") &&
+        !ai_call_ascii_equal(action, "call_device") &&
+        !ai_call_ascii_equal(action, "call") &&
+        !ai_call_ascii_equal(action, "device_call") &&
+        !ai_call_ascii_equal(action, "start_device_call"))
+    {
+        status = "unsupported";
+        message = "当前仅支持呼叫微信联系人或设备联系人";
+        goto rejected;
+    }
+    target_item = ai_call_field(params, data, action, target_names,
+        sizeof(target_names) / sizeof(target_names[0]), &target_key);
+    media_item = ai_call_field(params, data, action, media_names,
+        sizeof(media_names) / sizeof(media_names[0]), &media_key);
+    type_item = ai_call_field(params, data, action, type_names,
+        sizeof(type_names) / sizeof(type_names[0]), &type_key);
+    target = cJSON_IsString(target_item) ? target_item->valuestring : NULL;
+    media = cJSON_IsString(media_item) ? media_item->valuestring : NULL;
+    type = cJSON_IsString(type_item) ? type_item->valuestring : NULL;
+    liot_trace("[AI-CALL] fields payload=%s target=%s contact_type=%s call_type=%s\r\n",
+               payload_key, target_key, type_key, media_key);
+    liot_trace("[AI-CALL] params target_string=%u target_bytes=%u "
+               "contact_type=%s call_type=%s\r\n",
+               target != NULL ? 1U : 0U,
+               (unsigned int)(target != NULL ? strlen(target) : 0U),
+               ai_diag_text(type, type_text, sizeof(type_text)),
+               ai_diag_text(media, media_text, sizeof(media_text)));
+    if (target == NULL ||
+        (media_item != NULL && media == NULL) ||
+        (type_item != NULL && type == NULL))
+    {
+        goto rejected;
+    }
+    if (media != NULL && media[0] != '\0' &&
+        !ai_call_ascii_equal(media, "audio") &&
+        !ai_call_ascii_equal(media, "voice") &&
+        ai_call_route(media) == DEMO_AI_CALL_NONE)
+    {
+        status = "unsupported_call_type";
+        message = "当前设备仅支持语音呼叫，不支持视频呼叫";
+        goto rejected;
+    }
+    use_dev = !wx_only;
+    if ((type == NULL || type[0] == '\0') &&
+        ai_call_route(media) != DEMO_AI_CALL_NONE)
+    {
+        type = media;
+    }
+    if (type != NULL && type[0] != '\0')
+    {
+        use_wx = ai_call_route(type) == DEMO_AI_CALL_WECHAT;
+        use_dev = ai_call_route(type) == DEMO_AI_CALL_DEVICE;
+        if ((!use_wx && !use_dev) || (wx_only && use_dev))
+        {
+            goto rejected;
+        }
+    }
+    while (*target == ' ' || *target == '\t' ||
+           *target == '\r' || *target == '\n')
+    {
+        ++target;
+    }
+    length = strlen(target);
+    while (length > 0U && (target[length - 1U] == ' ' ||
+           target[length - 1U] == '\t' || target[length - 1U] == '\r' ||
+           target[length - 1U] == '\n'))
+    {
+        --length;
+    }
+    if (length == 0U || length >= sizeof(target_name))
+    {
+        goto rejected;
+    }
+    memcpy(target_name, target, length);
+    target_name[length] = '\0';
+    if (!ai_binding_is_ready())
+    {
+        status = "network_offline";
+        message = "设备当前未完成联网绑定";
+        goto rejected;
+    }
+#ifndef HWDEMO_WECHAT_EN
+    use_wx = false;
+#endif
+#ifndef HWDEMO_DEV_CHAT_EN
+    use_dev = false;
+#endif
+    if (!use_wx && !use_dev)
+    {
+        status = "unsupported";
+        message = "当前固件未启用所请求的呼叫功能";
+        goto rejected;
+    }
+    memset(&s_call_lookup, 0, sizeof(s_call_lookup));
+    s_call_lookup.request_id = s_running_request_id;
+    s_call_lookup.generation = s_generation;
+    s_call_lookup.started_ms = liot_rtos_get_running_time();
+    s_call_lookup.use_wx = use_wx;
+    s_call_lookup.use_dev = use_dev;
+    memcpy(s_call_lookup.rpc_id, id, strlen(id) + 1U);
+    memcpy(s_call_lookup.target, target_name, length + 1U);
+#ifdef HWDEMO_WECHAT_EN
+    if (use_wx)
+    {
+        s_call_lookup.wx_ticket = demo_wechat_refresh_contacts_for_call();
+    }
+#endif
+#ifdef HWDEMO_DEV_CHAT_EN
+    if (use_dev)
+    {
+        s_call_lookup.dev_ticket = demo_dev_chat_refresh_contacts_for_call();
+    }
+#endif
+    s_call_lookup.pending = true;
+    liot_trace("[AI-CALL] lookup begin req=%u wx_ticket=%u dev_ticket=%u "
+               "timeout_ms=%u\r\n", (unsigned int)s_call_lookup.request_id,
+               (unsigned int)s_call_lookup.wx_ticket,
+               (unsigned int)s_call_lookup.dev_ticket,
+               (unsigned int)AI_CALL_LOOKUP_TIMEOUT_MS);
+    return;
+rejected:
+    (void)ai_call_reply(id, false, status, message, DEMO_AI_CALL_NONE);
+}
+
+/* cJSON uses C strings: an escaped NUL would silently truncate a contact/id.
+ * Validate only the new call path; keep existing AI events compatible. */
+static bool ai_call_json_is_complete(const ai_command_message_t *message,
+                                     const char *parsed_end)
+{
+    const char *payload = message->payload;
+    size_t length = message->length;
+    size_t i;
+
+    if (parsed_end == NULL || parsed_end < payload ||
+        parsed_end > payload + length)
+    {
+        return false;
+    }
+    for (i = (size_t)(parsed_end - payload); i < length; ++i)
+    {
+        if (payload[i] == '\0' && i + 1U == length)
+        {
+            break;
+        }
+        if (payload[i] != ' ' && payload[i] != '\t' &&
+            payload[i] != '\r' && payload[i] != '\n')
+        {
+            return false;
+        }
+    }
+    for (i = 0U; i < length; ++i)
+    {
+        if (payload[i] == '\0')
+        {
+            return i + 1U == length;
+        }
+        if (payload[i] == '\\')
+        {
+            if (length - i >= 6U && memcmp(payload + i, "\\u0000", 6U) == 0)
+            {
+                return false;
+            }
+            /* Skip a paired escape, so literal "\\\\u0000" remains valid. */
+            if (i + 1U < length)
+            {
+                ++i;
+            }
+        }
+    }
+    return true;
+}
+
 static void ai_handle_command(const ai_command_message_t *message)
 {
     cJSON *root;
@@ -940,18 +1749,22 @@ static void ai_handle_command(const ai_command_message_t *message)
     int input_audio_status;
     int output_audio_status;
     const char *method_text = NULL;
+    const char *parsed_end = NULL;
 
     if (message == NULL || message->cmdw != AI_CMD_WORD)
     {
         return;
     }
-    root = cJSON_ParseWithLength(message->payload, message->length);
+    s_command_diag.handled++;
+    root = demo_json_parse_with_length_opts(message->payload, message->length,
+                                           &parsed_end, 0);
     if (root == NULL)
     {
         liot_trace("[AI] command JSON parse failed len=%u\r\n",
                    (unsigned int)message->length);
         return;
     }
+    ai_diag_command(message, root);
 
     method = cJSON_GetObjectItemCaseSensitive(root, "method");
     id = cJSON_GetObjectItemCaseSensitive(root, "id");
@@ -998,7 +1811,13 @@ static void ai_handle_command(const ai_command_message_t *message)
             }
             else
             {
+                char session_text[97];
+
                 s_start_response_error = 0;
+                liot_trace("[AI-DIAG] session req=%u server_session=%s\r\n",
+                           (unsigned int)s_running_request_id,
+                           ai_diag_text(session_id->valuestring, session_text,
+                                        sizeof(session_text)));
                 liot_trace("[AI] start_session OK: Opus/16kHz/mono/20ms "
                            "format=%s\r\n",
                            (input_audio_status > 0 &&
@@ -1009,7 +1828,18 @@ static void ai_handle_command(const ai_command_message_t *message)
     }
     else if (method_text != NULL)
     {
-        if (strcmp(method_text, "round_start") == 0)
+        if (strcmp(method_text, "device_action") == 0)
+        {
+            if (ai_call_json_is_complete(message, parsed_end))
+            {
+                ai_handle_device_action(root);
+            }
+            else
+            {
+                liot_trace("[AI-CALL] ignored truncated/incomplete JSON\r\n");
+            }
+        }
+        else if (strcmp(method_text, "round_start") == 0)
         {
             s_server_speaking = true;
             s_last_audio_ms = liot_rtos_get_running_time();
@@ -1034,6 +1864,11 @@ static void ai_handle_command(const ai_command_message_t *message)
             s_remote_ended = true;
             liot_trace("[AI] server ended session\r\n");
         }
+        else
+        {
+            /* Unknown methods remain ignored; only record their occurrence. */
+            s_command_diag.unknown++;
+        }
     }
     cJSON_Delete(root);
 }
@@ -1054,11 +1889,13 @@ static void ai_process_commands(void)
             ai_command_slot_release(slot);
         }
     }
+    ai_diag_report(false);
 }
 
 static int ai_send_start_session(void)
 {
     char json[640];
+    char label[97];
     uint32_t deadline;
     int length;
     int ret;
@@ -1069,6 +1906,11 @@ static int ai_send_start_session(void)
     }
     snprintf(s_start_request_id, sizeof(s_start_request_id),
              "nt26-ai-%u", (unsigned int)s_generation);
+    liot_trace("[AI-DIAG] start req=%u rpc=%s role=%s\r\n",
+               (unsigned int)s_running_request_id, s_start_request_id,
+               ai_diag_text(s_access.role_id, label, sizeof(label)));
+    liot_trace("[AI-DIAG] local device=%s\r\n",
+               ai_diag_text(s_access.device_id, label, sizeof(label)));
     length = snprintf(
         json, sizeof(json),
         "{\"jsonrpc\":\"2.0\",\"id\":\"%s\","
@@ -1279,6 +2121,30 @@ static int ai_send_uplink_20ms(void)
     return 0;
 }
 
+/* One entry prefetch for the menus. Calls always request their own fresh
+ * result; no periodic HTTP traffic is needed during a long conversation. */
+static void ai_refresh_call_contacts(void)
+{
+    bool active;
+
+    liot_rtos_enter_critical();
+    active = s_want_active && !s_call_committed &&
+             s_running_request_id != 0U &&
+             s_control_sequence == s_running_request_id;
+    liot_rtos_exit_critical();
+    if (!active || s_remote_ended)
+    {
+        return;
+    }
+#ifdef HWDEMO_WECHAT_EN
+    demo_wechat_refresh_contacts();
+#endif
+#ifdef HWDEMO_DEV_CHAT_EN
+    demo_dev_chat_refresh_contacts();
+#endif
+    liot_trace("[AI-CACHE] entry refresh requested\r\n");
+}
+
 static int ai_active_loop(void)
 {
     uint32_t audio_count = 0U;
@@ -1286,6 +2152,7 @@ static int ai_active_loop(void)
     int ret;
 
     ai_set_state(DEMO_AI_CHAT_LISTENING, 0);
+    ai_refresh_call_contacts();
     while (!s_remote_ended)
     {
         if (!ai_request_is_active())
@@ -1304,6 +2171,7 @@ static int ai_active_loop(void)
                        s_conn_error, s_disconnected_pending ? 1 : 0);
             return ai_connection_end_result();
         }
+        ai_poll_call_lookup();
         if (s_levels_dirty)
         {
             (void)demo_ai_audio_set_levels(&s_audio_lease,
@@ -1470,6 +2338,7 @@ static void ai_session_cleanup(void)
     int disconnect_ret;
     int release_ret = 0;
 
+    memset(&s_call_lookup, 0, sizeof(s_call_lookup));
     ai_set_state(DEMO_AI_CHAT_STOPPING, 0);
     /* A delayed WHIP callback now belongs to an obsolete attempt. */
     liot_rtos_enter_critical();
@@ -1529,6 +2398,7 @@ static void ai_session_cleanup(void)
     }
     demo_ai_opus_reset();
     ai_access_clear();
+    ai_diag_report(true);
     s_server_speaking = false;
     s_remote_ended = false;
     s_play_pending_samples = 0U;
@@ -1553,6 +2423,12 @@ static int ai_run_session(void)
     bool used_prefetch;
     int ret;
 
+    memset(&s_call_lookup, 0, sizeof(s_call_lookup));
+    ai_diag_reset();
+    liot_trace("[AI-DIAG] version=ai-call-fresh-1 req=%u max_cmd=%u detail_limit=%u\r\n",
+               (unsigned int)s_running_request_id,
+               (unsigned int)AI_COMMAND_MAX_BYTES,
+               (unsigned int)AI_DIAG_DETAIL_LIMIT);
     if (!ai_request_is_active())
     {
         return AI_ERR_CANCELLED;
@@ -1771,6 +2647,8 @@ uint32_t demo_ai_chat_start(void)
     s_request_started_ms = started_ms;
     s_first_play_reported = false;
     s_want_active = true;
+    s_call_pending = false;
+    s_call_committed = false;
     s_control_sequence++;
     if (s_control_sequence == 0U)
     {
@@ -1803,6 +2681,8 @@ void demo_ai_chat_stop(void)
 {
     liot_rtos_enter_critical();
     s_want_active = false;
+    s_call_pending = false;
+    s_call_committed = false;
     s_control_sequence++;
     if (s_control_sequence == 0U)
     {
@@ -1810,6 +2690,27 @@ void demo_ai_chat_stop(void)
     }
     liot_rtos_exit_critical();
     ai_signal();
+}
+
+bool demo_ai_chat_take_call_request(uint32_t request_id,
+                                    demo_ai_call_request_t *out)
+{
+    bool taken = false;
+
+    if (out == NULL || request_id == 0U)
+    {
+        return false;
+    }
+    liot_rtos_enter_critical();
+    if (s_call_pending && s_call_request.request_id == request_id &&
+        s_control_sequence == request_id)
+    {
+        *out = s_call_request;
+        s_call_pending = false;
+        taken = true;
+    }
+    liot_rtos_exit_critical();
+    return taken;
 }
 
 bool demo_ai_chat_is_idle(void)

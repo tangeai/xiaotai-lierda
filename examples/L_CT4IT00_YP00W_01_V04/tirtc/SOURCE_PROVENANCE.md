@@ -9,7 +9,7 @@
 ## 1. 本地产品代码
 
 本目录由探鸽智能基于利尔达 NT26F6D0 OpenCPU SDK 完成板级适配，并接入探鸽
-TiRTC、ThingConnect、AI、微信通话、设备通话及平台 LIVE 对讲能力。
+TiRTC、ThingConnect、AI、微信通话、设备通话、平台 LIVE 及独立 GROUP 多人对讲能力。
 
 文件实际许可证以文件头的 `SPDX-License-Identifier` 为准：
 
@@ -64,12 +64,17 @@ TiRTC、ThingConnect、AI、微信通话、设备通话及平台 LIVE 对讲能�
 Apache-2.0 覆盖本产品新增修改。若权利负责人决定统一重许可，必须把书面授权、
 对应源版本和变更提交一并更新到本文件，不能只机械改 SPDX 行。
 
+`include/json_guard.h` 复用 cJSON 1.7.16 的输入前缀处理约定并增加本地深度保护，
+当前文件头保留 `MIT AND Apache-2.0`。它不修改或重新许可供应解析库。
+
 ## 4. 独立适配文件
 
 本次比对未发现与公开参考仓有显著逐行重合、按当前工程策略使用
 `Apache-2.0` 的文件包括：
 
 - `src/media/*`、对应媒体头文件；
+- `src/core/rtos_compat.c`：针对已核验 F6D_A 任务创建失败分支的应用侧适配；
+- `src/features/group_intercom.c`、`include/group_intercom.h`：按 ThingConnect/Room 公开协议独立实现多人对讲；
 - `src/services/network_manager.c`、`include/network_manager.h`；
 - `src/ui/ui_controller.c`、`include/ui_controller.h`；
 - `config/tirtc_config.mk`、`tirtc_app.mk`；
@@ -85,8 +90,13 @@ Apache-2.0 覆盖本产品新增修改。若权利负责人决定统一重许可
 - `sdk/include/tirtc/basedef.h`
 - `sdk/include/tirtc/tgtrp.h`
 - `sdk/include/tirtc/tiRTC_stat.h`
+- `sdk/include/tirtc/ticloudstorage.h`
 - `sdk/include/tirtc/tiRTC.h`
 - `sdk/lib/libTiRTC.a`
+
+当前 TiRTC 库为 `v2.5.0-87c3c290`，与公开 `0.1.0` 的旧包不同；匹配摘要见
+[第三方组件与发布边界](THIRD_PARTY_NOTICES.md)。
+2026-09-14 两项异常防护只增加应用侧检查和适配，未修改上述供应文件及 F6D_A 静态库。
 
 探鸽公开参考仓的 SDK NOTICE 明确说明：TiRTC SDK 头文件和预编译静态库是
 proprietary materials，不受仓库 MIT 许可证覆盖；进一步分发、修改和生产使用

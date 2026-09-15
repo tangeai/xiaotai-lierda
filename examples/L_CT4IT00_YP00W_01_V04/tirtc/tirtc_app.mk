@@ -18,6 +18,17 @@ CFLAGS_INC += -I $(TOP)/$(CUSTOM_DIR)/demo/inc
 
 CUSTOM_COBJSTEMP := $(TIRTC_SRC_ROOT)/app/app_entry.o
 
+# Only this verified F6D_A archive omits resume on TASK_CREATE_FAIL. A vendor
+# update must be reviewed before retaining the failure-path compensation.
+ifeq ($(MODEMPKG),F6D_A)
+TIRTC_LIOT_OS_SHA256 := $(word 1,$(shell sha256sum "$(TOP)/components/basePkg/$(MODEMPKG)/lib/libliot_os.a"))
+ifneq ($(TIRTC_LIOT_OS_SHA256),12b2a51796698fff748ade88e7e356ae05848a7e6828d139af33f3be41277b40)
+$(error F6D_A libliot_os.a changed; review the task-create failure adapter)
+endif
+CUSTOM_COBJSTEMP += $(TIRTC_SRC_ROOT)/core/rtos_compat.o
+LDFLAGS += -Wl,--wrap=liot_rtos_task_create
+endif
+
 BUILD_DRIVER_LCD_EN ?= y
 BUILD_DRIVER_WS2812B_EN ?= n
 BUILD_DRIVER_CAMERA_EN ?= n
@@ -86,10 +97,11 @@ PREBUILDLIBS += $(TIRTC_SDK_ROOT)/lib/libTiRTC.a
 # native objects with GCC 10 q4 and retain the ABI adapters in tirtc_runtime.c.
 LDFLAGS += -fno-lto
 LDFLAGS += -Wl,--wrap=Logf -Wl,--wrap=sha256_hmac \
+    -Wl,--wrap=tgtrp_connection_set_on_error \
     -Wl,--wrap=freertos_ThreadCreateWithStackSize \
     -Wl,--wrap=app_log_time -Wl,--wrap=printf
 
-ifneq ($(filter y,$(TIRTC_SMOKE_RUNTIME_EN) $(HWDEMO_AI_CHAT_EN) $(HWDEMO_WECHAT_EN) $(HWDEMO_DEV_CHAT_EN) $(HWDEMO_LIVE_TALK_EN)),)
+ifneq ($(filter y,$(TIRTC_SMOKE_RUNTIME_EN) $(HWDEMO_AI_CHAT_EN) $(HWDEMO_WECHAT_EN) $(HWDEMO_DEV_CHAT_EN) $(HWDEMO_LIVE_TALK_EN) $(HWDEMO_GROUP_ROOM_EN)),)
 ifeq ($(TIRTC_SMOKE_RUNTIME_EN), y)
 CFLAGS_DEFS += -DTIRTC_SMOKE_RUNTIME_EN
 endif
@@ -176,11 +188,29 @@ $(error HWDEMO_LIVE_TALK_EN=y requires HWDEMO_TIRTC_EN=y)
 endif
 endif
 
-# AI, WeChat, device calling and platform intercom share one ES8311/I2S owner.
-ifneq ($(filter y,$(HWDEMO_AI_CHAT_EN) $(HWDEMO_WECHAT_EN) $(HWDEMO_DEV_CHAT_EN) $(HWDEMO_LIVE_TALK_EN)),)
+ifeq ($(HWDEMO_GROUP_ROOM_EN), y)
+ifneq ($(HWDEMO_TIRTC_EN),y)
+$(error HWDEMO_GROUP_ROOM_EN=y requires HWDEMO_TIRTC_EN=y)
+endif
+ifneq ($(HWDEMO_BINDING_EN),y)
+$(error HWDEMO_GROUP_ROOM_EN=y requires HWDEMO_BINDING_EN=y)
+endif
+ifneq ($(HWDEMO_LCD_SSD1306_EN),y)
+$(error HWDEMO_GROUP_ROOM_EN=y requires HWDEMO_LCD_SSD1306_EN=y)
+endif
+ifneq ($(HWDEMO_KEY_EN),y)
+$(error HWDEMO_GROUP_ROOM_EN=y requires HWDEMO_KEY_EN=y)
+endif
+CUSTOM_COBJSTEMP += $(TIRTC_SRC_ROOT)/features/group_intercom.o
+CFLAGS_DEFS += -DHWDEMO_GROUP_ROOM_EN
+CFLAGS_DEFS += -DTIRTC_GROUP_BACK_HOLD_MS=$(TIRTC_GROUP_BACK_HOLD_MS)
+endif
+
+# Every voice feature shares one ES8311/I2S owner.
+ifneq ($(filter y,$(HWDEMO_AI_CHAT_EN) $(HWDEMO_WECHAT_EN) $(HWDEMO_DEV_CHAT_EN) $(HWDEMO_LIVE_TALK_EN) $(HWDEMO_GROUP_ROOM_EN)),)
 CUSTOM_COBJSTEMP += $(TIRTC_SRC_ROOT)/media/audio_device.o
 endif
 
-ifneq ($(filter y,$(HWDEMO_WECHAT_EN) $(HWDEMO_DEV_CHAT_EN) $(HWDEMO_LIVE_TALK_EN)),)
+ifneq ($(filter y,$(HWDEMO_WECHAT_EN) $(HWDEMO_DEV_CHAT_EN) $(HWDEMO_LIVE_TALK_EN) $(HWDEMO_GROUP_ROOM_EN)),)
 CUSTOM_COBJSTEMP += $(TIRTC_SRC_ROOT)/media/g711_codec.o
 endif

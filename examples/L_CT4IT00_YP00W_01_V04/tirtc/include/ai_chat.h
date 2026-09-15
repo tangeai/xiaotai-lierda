@@ -35,6 +35,20 @@ typedef struct
     int completed_result;
 } demo_ai_chat_snapshot_t;
 
+typedef enum
+{
+    DEMO_AI_CALL_NONE = 0,
+    DEMO_AI_CALL_WECHAT,
+    DEMO_AI_CALL_DEVICE,
+} demo_ai_call_route_e;
+
+typedef struct
+{
+    uint32_t request_id;
+    demo_ai_call_route_e route;
+    char target_id[96];
+} demo_ai_call_request_t;
+
 /* AI session owner.  The long-lived TiRTC runtime is owned by demo_tirtc. */
 void demo_ai_chat_task(void *argv);
 void demo_ai_chat_mark_unavailable(void);
@@ -47,6 +61,11 @@ void demo_ai_chat_stop(void);
 /* True only after the worker has acknowledged stop and released audio. */
 bool demo_ai_chat_is_idle(void);
 void demo_ai_chat_get_snapshot(demo_ai_chat_snapshot_t *out);
+
+/* UI owner consumes once, only for its current AI request. The UI must stop
+ * AI and wait for all media owners to be idle before submitting the call. */
+bool demo_ai_chat_take_call_request(uint32_t request_id,
+                                    demo_ai_call_request_t *out);
 
 /* Speaker and microphone levels use the same user-facing 1..10 scale. */
 void demo_ai_chat_set_audio_levels(uint8_t speaker_level, uint8_t mic_level);

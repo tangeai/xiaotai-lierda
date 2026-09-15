@@ -78,7 +78,7 @@ int demo_ai_audio_acquire(demo_ai_audio_owner_e owner,
     demo_ai_audio_owner_e held_owner = DEMO_AI_AUDIO_OWNER_NONE;
 
     if (owner <= DEMO_AI_AUDIO_OWNER_NONE ||
-        owner > DEMO_AI_AUDIO_OWNER_LIVE || lease == NULL)
+        owner >= DEMO_AI_AUDIO_OWNER_COUNT || lease == NULL)
     {
         return DEMO_AI_AUDIO_ERR_INVALID_LEASE;
     }

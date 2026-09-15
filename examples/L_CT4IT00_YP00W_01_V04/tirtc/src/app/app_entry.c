@@ -61,6 +61,10 @@
 #include "platform_intercom.h"
 #endif
 
+#ifdef HWDEMO_GROUP_ROOM_EN
+#include "group_intercom.h"
+#endif
+
 void user_main(void)
 {
 #ifdef HWDEMO_BINDING_EN
@@ -110,6 +114,15 @@ void user_main(void)
                               NULL) != LIOT_OSI_SUCCESS)
     {
         liot_trace("[BOOT] key task create failed\r\n");
+    }
+#endif
+
+#ifdef HWDEMO_GROUP_ROOM_EN
+    /* Registration is synchronous and precedes MQTT startup. A failed ROOM
+     * initializer must not block the existing device/call services. */
+    if (demo_group_intercom_init() != 0)
+    {
+        liot_trace("[BOOT] group room unavailable; existing features retained\r\n");
     }
 #endif
 

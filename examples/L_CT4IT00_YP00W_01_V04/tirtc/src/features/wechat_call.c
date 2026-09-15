@@ -29,6 +29,7 @@
 #include <string.h>
 
 #include "cJSON.h"
+#include "json_guard.h"
 #include "audio_device.h"
 #ifdef HWDEMO_AI_CHAT_EN
 #include "ai_chat.h"
@@ -39,6 +40,9 @@
 #endif
 #include "formal_mqtt.h"
 #include "g711_codec.h"
+#ifdef HWDEMO_GROUP_ROOM_EN
+#include "group_intercom.h"
+#endif
 #ifdef HWDEMO_LIVE_TALK_EN
 #include "platform_intercom.h"
 #endif
@@ -93,6 +97,9 @@ _Static_assert(DEMO_BIND_TIRTC_ENDPOINT_MAX + sizeof(WX_REJECT_PATH) - 1U <=
 #define WX_AUDIO_PRODUCER_TIMEOUT_MS     1000U
 #define WX_IGNORED_CALL_MS              60000U
 #define WX_RECENT_ROOM_MS              600000U
+#ifdef HWDEMO_GROUP_ROOM_EN
+#define WX_GROUP_HANDOFF_TIMEOUT_MS     30000U
+#endif
 
 #define WX_CLOSE_NONE                       (-1)
 #define WX_HANGUP_REASON_MANUAL                1
@@ -184,15 +191,31 @@ static volatile uint8_t s_speaker_level = DEMO_AI_AUDIO_DEFAULT_SPK_LEVEL;
 static volatile uint8_t s_mic_level = DEMO_AI_AUDIO_DEFAULT_MIC_LEVEL;
 
 static wx_contact_t s_contacts[WX_CONTACT_MAX];
+/* A named AI call must not follow a reordered/refreshed UI selection. */
+static wx_contact_t s_request_contact;
+static bool s_request_contact_valid;
+static bool s_contacts_ready;
 static uint8_t s_contact_count;
 static uint8_t s_selected_contact;
 static uint32_t s_contacts_revision;
+static bool s_contacts_refreshing;
+static uint32_t s_call_refresh_requested;
+static uint32_t s_call_refresh_completed;
+static int s_call_refresh_result;
 static char s_display_name[WX_DISPLAY_MAX] = "WX";
 
 static wx_mqtt_event_t s_call;
 static uint32_t s_incoming_generation;
 static uint32_t s_session_sequence;
 static uint32_t s_completed_sequence;
+#ifdef HWDEMO_GROUP_ROOM_EN
+/* s_call is the bounded invitation record. RINGING is visible immediately,
+ * but answering cannot acquire media until ROOM has actually drained. */
+static bool s_group_pending;
+static uint32_t s_group_ticket;
+static uint32_t s_group_wait_deadline_ms;
+static uint32_t s_group_cancel_generation;
+#endif
 static uint32_t s_generation;
 static uint32_t s_deadline_ms;
 static uint32_t s_error_deadline_ms;
@@ -709,6 +732,31 @@ static void wx_formal_mqtt_handler(
         return;
     }
 
+#ifdef HWDEMO_GROUP_ROOM_EN
+    /* Terminal cancellation must survive a full ordinary event pool while
+     * ROOM is releasing. Only the currently reserved invitation may latch it. */
+    if (strcmp(type, "call_cancel") == 0 && payload != NULL)
+    {
+        char room_id[WX_ROOM_ID_MAX];
+        char call_id[WX_CALL_ID_MAX];
+
+        (void)wx_json_copy(payload, "wx_room_id", room_id,
+                           sizeof(room_id), false);
+        (void)wx_json_copy(payload, "wx_call_id", call_id,
+                           sizeof(call_id), false);
+        liot_rtos_enter_critical();
+        if (s_group_ticket != 0U && wx_state_has_session(s_state) &&
+            ((room_id[0] != '\0' && s_call.room_id[0] != '\0' &&
+              strcmp(room_id, s_call.room_id) == 0) ||
+             (call_id[0] != '\0' && s_call.call_id[0] != '\0' &&
+              strcmp(call_id, s_call.call_id) == 0)))
+        {
+            s_group_cancel_generation = s_incoming_generation;
+        }
+        liot_rtos_exit_critical();
+        wx_signal();
+    }
+#endif
     acquired = wx_mqtt_slot_acquire();
     if (acquired < 0)
     {
@@ -1075,7 +1123,7 @@ static int wx_reject(const wx_mqtt_event_t *call, int reason)
 
 static int wx_business_code_ok(const char *response)
 {
-    cJSON *root = cJSON_Parse(response);
+    cJSON *root = demo_json_parse(response);
     const cJSON *code = root != NULL ?
                             cJSON_GetObjectItemCaseSensitive(root, "code") :
                             NULL;
@@ -1109,7 +1157,7 @@ static int wx_fetch_contacts(void)
                    ret, http_status);
         return WX_ERR_CONTACTS;
     }
-    root = cJSON_Parse(s_http_response);
+    root = demo_json_parse(s_http_response);
     code = root != NULL ? cJSON_GetObjectItemCaseSensitive(root, "code") : NULL;
     data = root != NULL ? cJSON_GetObjectItemCaseSensitive(root, "data") : NULL;
     list = cJSON_IsObject(data) ?
@@ -1149,6 +1197,7 @@ static int wx_fetch_contacts(void)
 
     liot_rtos_enter_critical();
     memcpy(s_contacts, contacts, sizeof(contacts));
+    s_contacts_ready = true;
     s_contact_count = count;
     if (s_selected_contact >= count)
     {
@@ -1173,6 +1222,54 @@ static int wx_fetch_contacts(void)
                (unsigned int)count,
                (unsigned int)s_contacts_revision);
     return 0;
+}
+
+/* Same worker owns both initial and subsequent contact refreshes. Failed
+ * refreshes retain the display array, invalidate AI lookups and back off. */
+static void wx_refresh_contacts_now(void)
+{
+    uint32_t call_ticket;
+    int ret;
+
+    liot_rtos_enter_critical();
+    s_request_refresh = false;
+    s_contacts_refreshing = true;
+    call_ticket = s_call_refresh_requested != s_call_refresh_completed ?
+                      s_call_refresh_requested : 0U;
+    /* Keep an already accepted call usable during silent WX refresh.
+     * New AI lookups see refreshing and cannot use this older snapshot. */
+    liot_rtos_exit_critical();
+    ret = wx_fetch_contacts();
+    liot_rtos_enter_critical();
+    s_contacts_refreshing = false;
+    /* Only the ticket present before I/O belongs to this result. */
+    if (call_ticket != 0U)
+    {
+        s_call_refresh_completed = call_ticket;
+        s_call_refresh_result = ret;
+    }
+    if (ret == 0)
+    {
+        s_contacts_retry_at = 0U;
+    }
+    else
+    {
+        s_contacts_ready = false;
+        s_contacts_retry_at = liot_rtos_get_running_time() + WX_SYNC_RETRY_MS;
+        if (s_contacts_retry_at == 0U) s_contacts_retry_at = 1U;
+        s_request_refresh = true;
+    }
+    liot_rtos_exit_critical();
+    if (call_ticket != 0U)
+    {
+        liot_trace("[WX-CACHE] call refresh ticket=%u result=%d\r\n",
+                   (unsigned int)call_ticket, ret);
+    }
+    if (ret != 0)
+    {
+        liot_trace("[WX-CACHE] refresh failed ret=%d retry_ms=%u\r\n",
+                   ret, (unsigned int)WX_SYNC_RETRY_MS);
+    }
 }
 
 static int wx_sync_profile(void)
@@ -1202,7 +1299,7 @@ static int wx_sync_profile(void)
     liot_trace("[WX] audio-only profile ready ALAW/8k/mono/20ms video=none\r\n");
     /* Incoming calling remains available even if an empty/stale contact list
      * cannot be refreshed, so contact failure is non-fatal after profile OK. */
-    (void)wx_fetch_contacts();
+    wx_refresh_contacts_now();
     s_profile_ready = true;
     wx_set_state(DEMO_WECHAT_READY, 0);
     return 0;
@@ -1351,6 +1448,15 @@ static void wx_cleanup_session(int result, int hangup_reason,
     int disconnect_ret = TIRTC_E_INVALID_HANDLE;
 
     wx_set_state(DEMO_WECHAT_STOPPING, 0);
+#ifdef HWDEMO_GROUP_ROOM_EN
+    liot_rtos_enter_critical();
+    s_group_pending = false;
+    s_group_wait_deadline_ms = 0U;
+    s_group_cancel_generation = 0U;
+    if (s_group_ticket != 0U) s_request_answer_generation = 0U;
+    liot_rtos_exit_critical();
+    /* Keep s_group_ticket until even late WHIP/audio cleanup is idle. */
+#endif
     if (reject_reason != WX_CLOSE_NONE && s_call.room_id[0] != '\0')
     {
         (void)wx_reject(&s_call, reject_reason);
@@ -1726,15 +1832,24 @@ static int wx_start_outgoing_call(void)
     liot_rtos_enter_critical();
     if (s_request_hangup)
     {
+        s_request_contact_valid = false;
         liot_rtos_exit_critical();
         return 0;
     }
-    if (s_contact_count == 0U || s_selected_contact >= s_contact_count)
+    if (s_request_contact_valid)
+    {
+        contact = s_request_contact;
+        s_request_contact_valid = false;
+    }
+    else if (s_contact_count == 0U || s_selected_contact >= s_contact_count)
     {
         liot_rtos_exit_critical();
         return WX_ERR_NO_CONTACT;
     }
-    contact = s_contacts[s_selected_contact];
+    else
+    {
+        contact = s_contacts[s_selected_contact];
+    }
     liot_rtos_exit_critical();
     memset(&identity, 0, sizeof(identity));
     if (demo_binding_get_tirtc_identity(&identity) != 0)
@@ -1790,7 +1905,7 @@ static int wx_start_outgoing_call(void)
     {
         goto cleanup;
     }
-    root = cJSON_Parse(s_http_response);
+    root = demo_json_parse(s_http_response);
     code = root != NULL ? cJSON_GetObjectItemCaseSensitive(root, "code") : NULL;
     data = root != NULL ? cJSON_GetObjectItemCaseSensitive(root, "data") : NULL;
     call_id = cJSON_IsObject(data) ?
@@ -1956,6 +2071,61 @@ static void wx_process_incoming(const wx_mqtt_event_t *event)
         return;
     }
 
+#ifdef HWDEMO_GROUP_ROOM_EN
+    /* Only ROOM adds deferred admission. The ordinary HOME path below keeps
+     * its original policy. The global reservation prevents WX/DEV races. */
+    liot_rtos_enter_critical();
+    local_idle = state == DEMO_WECHAT_READY && !s_request_call &&
+                 !s_call_starting && !s_request_hangup &&
+                 !s_request_contact_valid && s_group_ticket == 0U &&
+                 wx_local_rtc_idle_locked();
+    liot_rtos_exit_critical();
+    if (local_idle && wx_other_features_idle())
+    {
+        uint32_t ticket = 0U;
+        uint32_t received = event->received_ms != 0U ? event->received_ms :
+                              liot_rtos_get_running_time();
+        int reserved;
+
+        if (demo_group_intercom_is_enabled() &&
+            !wx_deadline_pending(received + WX_INCOMING_TIMEOUT_MS))
+        {
+            (void)wx_reject(event, WX_HANGUP_REASON_TIMEOUT);
+            return;
+        }
+        reserved = demo_group_intercom_reserve_call(DEMO_GROUP_CALL_WECHAT,
+                                                    &ticket);
+        if (reserved < 0)
+        {
+            (void)wx_reject(event, WX_HANGUP_REASON_BUSY);
+            return;
+        }
+        if (reserved > 0)
+        {
+            s_outgoing_session = false;
+            s_call = *event;
+            ++s_incoming_generation;
+            if (s_incoming_generation == 0U) ++s_incoming_generation;
+            wx_new_session_sequence();
+            wx_make_display(event->remark, event->open_id, 0U, display);
+            wx_set_display(display);
+            liot_rtos_enter_critical();
+            s_group_ticket = ticket;
+            s_group_pending = true;
+            s_group_cancel_generation = 0U;
+            s_group_wait_deadline_ms = liot_rtos_get_running_time() +
+                                       WX_GROUP_HANDOFF_TIMEOUT_MS;
+            s_deadline_ms = received + WX_INCOMING_TIMEOUT_MS;
+            s_request_answer_generation = 0U;
+            liot_rtos_exit_critical();
+            wx_set_state(DEMO_WECHAT_RINGING, 0);
+            liot_trace("[WX] ROOM handoff pending generation=%u\r\n",
+                       (unsigned int)s_incoming_generation);
+            return;
+        }
+    }
+#endif
+
     if (state == DEMO_WECHAT_DIALING)
     {
         if (!wx_incoming_matches_outgoing(event))
@@ -2000,7 +2170,7 @@ static void wx_process_incoming(const wx_mqtt_event_t *event)
     state = s_state;
     home_allowed = s_home_allowed;
     liot_rtos_enter_critical();
-    local_idle = wx_local_rtc_idle_locked();
+    local_idle = wx_local_rtc_idle_locked() && !s_request_contact_valid;
     liot_rtos_exit_critical();
     if (state != DEMO_WECHAT_READY || !home_allowed ||
         !local_idle || !wx_other_features_idle())
@@ -2044,6 +2214,15 @@ static void wx_process_cancel(const wx_mqtt_event_t *event)
     {
         matches = true;
     }
+#ifdef HWDEMO_GROUP_ROOM_EN
+    else if (s_group_ticket != 0U && event->call_id[0] != '\0' &&
+             s_call.call_id[0] != '\0' &&
+             strcmp(event->call_id, s_call.call_id) == 0)
+    {
+        /* A cancellation during ROOM teardown may only identify call_id. */
+        matches = true;
+    }
+#endif
     if (matches)
     {
         liot_trace("[WX] remote call_cancel matched current session\r\n");
@@ -2097,11 +2276,24 @@ static void wx_process_control(void)
     {
         s_call_starting = true;
     }
+    else
+    {
+        s_request_contact_valid = false;
+    }
     hangup = s_request_hangup;
     s_request_hangup = false;
     refresh = s_request_refresh;
     answer_generation = s_request_answer_generation;
-    s_request_answer_generation = 0U;
+#ifdef HWDEMO_GROUP_ROOM_EN
+    if (s_group_pending)
+    {
+        answer_generation = 0U; /* Retain the user's explicit answer request. */
+    }
+    else
+#endif
+    {
+        s_request_answer_generation = 0U;
+    }
     liot_rtos_exit_critical();
 
     if (hangup && wx_state_has_session(s_state))
@@ -2123,6 +2315,17 @@ static void wx_process_control(void)
     if (answer_generation != 0U && s_state == DEMO_WECHAT_RINGING &&
         answer_generation == s_incoming_generation)
     {
+#ifdef HWDEMO_GROUP_ROOM_EN
+        if (s_group_ticket != 0U &&
+            (!wx_deadline_pending(s_deadline_ms) ||
+             s_group_cancel_generation == s_incoming_generation))
+        {
+            wx_cleanup_session(0, WX_CLOSE_NONE,
+                s_group_cancel_generation == s_incoming_generation ?
+                    WX_CLOSE_NONE : WX_HANGUP_REASON_TIMEOUT);
+            return;
+        }
+#endif
         int ret = wx_start_whip(&s_call);
         if (ret != 0)
         {
@@ -2150,24 +2353,7 @@ static void wx_process_control(void)
         (s_contacts_retry_at == 0U ||
          !wx_deadline_pending(s_contacts_retry_at)))
     {
-        int ret;
-
-        /* Clear immediately before I/O.  A new MQTT update arriving during
-         * the request sets the flag again and therefore cannot be lost. */
-        liot_rtos_enter_critical();
-        s_request_refresh = false;
-        liot_rtos_exit_critical();
-        ret = wx_fetch_contacts();
-        if (ret == 0)
-        {
-            s_contacts_retry_at = 0U;
-        }
-        else
-        {
-            s_contacts_retry_at = liot_rtos_get_running_time() +
-                                  WX_SYNC_RETRY_MS;
-            s_request_refresh = true;
-        }
+        wx_refresh_contacts_now();
     }
 }
 
@@ -2273,6 +2459,74 @@ static void wx_process_timeouts(void)
     }
 }
 
+#ifdef HWDEMO_GROUP_ROOM_EN
+static void wx_group_release_if_idle(void)
+{
+    uint32_t ticket = 0U;
+
+    liot_rtos_enter_critical();
+    if (s_group_ticket != 0U && !s_group_pending &&
+        !wx_state_has_session(s_state) && !s_request_call &&
+        !s_call_starting && !s_request_hangup &&
+        s_request_answer_generation == 0U && s_audio_producers == 0U &&
+        s_audio_queued == 0U && wx_local_rtc_idle_locked())
+    {
+        ticket = s_group_ticket;
+        s_group_ticket = 0U;
+    }
+    liot_rtos_exit_critical();
+    if (ticket != 0U)
+    {
+        demo_group_intercom_release_call(DEMO_GROUP_CALL_WECHAT, ticket);
+    }
+}
+
+static void wx_group_process_pending(void)
+{
+    bool local_idle;
+
+    if (s_group_ticket != 0U && wx_state_has_session(s_state) &&
+        s_group_cancel_generation != 0U &&
+        s_group_cancel_generation == s_incoming_generation)
+    {
+        wx_cleanup_session(0, WX_CLOSE_NONE, WX_CLOSE_NONE);
+        return;
+    }
+    if (!s_group_pending || s_state != DEMO_WECHAT_RINGING ||
+        s_request_hangup)
+    {
+        return;
+    }
+    if (!wx_deadline_pending(s_deadline_ms) ||
+        !wx_deadline_pending(s_group_wait_deadline_ms))
+    {
+        wx_cleanup_session(0, WX_CLOSE_NONE, WX_HANGUP_REASON_TIMEOUT);
+        return;
+    }
+    if (!demo_group_intercom_call_ready(DEMO_GROUP_CALL_WECHAT,
+                                        s_group_ticket) ||
+        !demo_tirtc_admission_try_enter())
+    {
+        return;
+    }
+    liot_rtos_enter_critical();
+    local_idle = wx_local_rtc_idle_locked() && !s_request_call &&
+                 !s_call_starting && !s_request_contact_valid;
+    liot_rtos_exit_critical();
+    if (local_idle && wx_other_features_idle() && !s_request_hangup)
+    {
+        liot_rtos_enter_critical();
+        s_group_pending = false;
+        s_group_wait_deadline_ms = 0U;
+        liot_rtos_exit_critical();
+        /* RINGING, identity and its original deadline stay unchanged.
+         * Only process_control may honor an explicit queued answer. */
+        liot_trace("[WX] ROOM handoff drained; incoming ready\r\n");
+    }
+    demo_tirtc_admission_leave();
+}
+#endif
+
 void demo_wechat_task(void *argv)
 {
     uint32_t sync_retry_at = 0U;
@@ -2319,6 +2573,9 @@ void demo_wechat_task(void *argv)
     while (1)
     {
         wx_drain_unwanted();
+#ifdef HWDEMO_GROUP_ROOM_EN
+        wx_group_release_if_idle();
+#endif
         liot_rtos_enter_critical();
         release_pending = s_tirtc_owned &&
                           !wx_state_has_session(s_state);
@@ -2337,6 +2594,7 @@ void demo_wechat_task(void *argv)
                                    WX_CLOSE_NONE);
             }
             s_profile_ready = false;
+            s_contacts_ready = false;
             transport_was_ready = false;
             wx_set_state(DEMO_WECHAT_OFFLINE, 0);
             (void)liot_rtos_semaphore_wait(s_event_sem, 500U);
@@ -2364,6 +2622,9 @@ void demo_wechat_task(void *argv)
         }
 
         wx_process_mqtt();
+#ifdef HWDEMO_GROUP_ROOM_EN
+        wx_group_process_pending();
+#endif
         wx_process_control();
         wx_process_connection_events();
         wx_process_timeouts();
@@ -2440,7 +2701,7 @@ void demo_wechat_mark_unavailable(void)
 void demo_wechat_enter(void)
 {
     liot_rtos_enter_critical();
-    if (s_state == DEMO_WECHAT_READY)
+    if (s_state == DEMO_WECHAT_READY && !s_contacts_refreshing)
     {
         s_request_refresh = true;
     }
@@ -2455,6 +2716,7 @@ void demo_wechat_leave(void)
      * state from READY to DIALING.  Cancel that request unconditionally so a
      * call can never start after the UI has already returned HOME. */
     s_request_call = false;
+    s_request_contact_valid = false;
     if (s_state != DEMO_WECHAT_STOPPING &&
         (s_call_starting || wx_state_has_session(s_state)))
     {
@@ -2485,8 +2747,109 @@ bool demo_wechat_call_selected(void)
     if (s_state == DEMO_WECHAT_READY && s_contact_count > 0U &&
         !s_request_call && !s_call_starting && wx_local_rtc_idle_locked())
     {
+        s_request_contact_valid = false;
         s_request_call = true;
         accepted = true;
+    }
+    liot_rtos_exit_critical();
+    if (accepted)
+    {
+        wx_signal();
+    }
+    return accepted;
+}
+
+int demo_wechat_find_contact(const char *target, char *open_id,
+                              size_t capacity, uint32_t refresh_ticket)
+{
+    uint8_t i;
+    uint8_t matched = 0U;
+    int matches = 0;
+
+    if (target == NULL || target[0] == '\0' || open_id == NULL ||
+        capacity == 0U || refresh_ticket == 0U)
+    {
+        return -1;
+    }
+    open_id[0] = '\0';
+    liot_rtos_enter_critical();
+    if (refresh_ticket != s_call_refresh_requested || s_event_sem == NULL ||
+        !s_profile_ready || s_state != DEMO_WECHAT_READY ||
+        (s_call_refresh_completed == refresh_ticket &&
+         s_call_refresh_result != 0))
+    {
+        liot_rtos_exit_critical();
+        return -1;
+    }
+    if (s_call_refresh_completed != refresh_ticket ||
+        s_contacts_refreshing || s_request_refresh)
+    {
+        liot_rtos_exit_critical();
+        return -2;
+    }
+    if (!s_contacts_ready)
+    {
+        liot_rtos_exit_critical();
+        return -1;
+    }
+    for (i = 0U; i < s_contact_count; ++i)
+    {
+        if (strcmp(target, s_contacts[i].open_id) == 0 ||
+            (s_contacts[i].remark[0] != '\0' &&
+             strcmp(target, s_contacts[i].remark) == 0))
+        {
+            matched = i;
+            ++matches;
+        }
+    }
+    if (matches == 1)
+    {
+        size_t length = strlen(s_contacts[matched].open_id);
+
+        if (length >= capacity)
+        {
+            matches = -1;
+        }
+        else
+        {
+            memcpy(open_id, s_contacts[matched].open_id, length + 1U);
+        }
+    }
+    liot_rtos_exit_critical();
+    return matches;
+}
+
+bool demo_wechat_call_contact(const char *open_id)
+{
+    uint8_t i;
+    uint8_t matched = 0U;
+    uint8_t matches = 0U;
+    bool accepted = false;
+
+    if (open_id == NULL || open_id[0] == '\0')
+    {
+        return false;
+    }
+    liot_rtos_enter_critical();
+    if (s_state == DEMO_WECHAT_READY && s_contacts_ready &&
+        s_profile_ready && !s_request_call && !s_call_starting &&
+        !s_request_hangup && wx_local_rtc_idle_locked())
+    {
+        for (i = 0U; i < s_contact_count; ++i)
+        {
+            if (strcmp(open_id, s_contacts[i].open_id) == 0)
+            {
+                matched = i;
+                ++matches;
+            }
+        }
+        if (matches == 1U)
+        {
+            s_request_contact = s_contacts[matched];
+            s_request_contact_valid = true;
+            s_request_call = true;
+            accepted = true;
+        }
     }
     liot_rtos_exit_critical();
     if (accepted)
@@ -2521,6 +2884,7 @@ void demo_wechat_hangup(void)
 {
     liot_rtos_enter_critical();
     s_request_call = false;
+    s_request_contact_valid = false;
     if (s_state != DEMO_WECHAT_STOPPING &&
         (s_call_starting || wx_state_has_session(s_state)))
     {
@@ -2532,8 +2896,42 @@ void demo_wechat_hangup(void)
 
 void demo_wechat_refresh_contacts(void)
 {
-    s_request_refresh = true;
+    liot_rtos_enter_critical();
+    if (!s_contacts_refreshing)
+    {
+        s_request_refresh = true;
+    }
+    liot_rtos_exit_critical();
     wx_signal();
+}
+
+uint32_t demo_wechat_refresh_contacts_for_call(void)
+{
+    uint32_t ticket = 0U;
+
+    liot_rtos_enter_critical();
+    if (s_event_sem != NULL && s_profile_ready &&
+        s_state == DEMO_WECHAT_READY && !s_request_call &&
+        !s_call_starting && !s_request_hangup &&
+        (s_contacts_retry_at == 0U ||
+         !wx_deadline_pending(s_contacts_retry_at)))
+    {
+        do
+        {
+            ++s_call_refresh_requested;
+        } while (s_call_refresh_requested == 0U ||
+                 s_call_refresh_requested == s_call_refresh_completed);
+        ticket = s_call_refresh_requested;
+        s_request_refresh = true;
+    }
+    liot_rtos_exit_critical();
+    if (ticket != 0U)
+    {
+        liot_trace("[WX-CACHE] call refresh requested ticket=%u\r\n",
+                   (unsigned int)ticket);
+        wx_signal();
+    }
+    return ticket;
 }
 
 void demo_wechat_get_snapshot(demo_wechat_snapshot_t *out)
@@ -2554,6 +2952,9 @@ void demo_wechat_get_snapshot(demo_wechat_snapshot_t *out)
     out->rx_dropped = s_rx_dropped;
     out->tx_dropped = s_tx_dropped;
     memcpy(out->display_name, s_display_name, sizeof(out->display_name));
+#ifdef HWDEMO_GROUP_ROOM_EN
+    out->group_pending = s_group_pending;
+#endif
     liot_rtos_exit_critical();
 }
 
@@ -2575,6 +2976,9 @@ bool demo_wechat_is_idle(void)
 
     liot_rtos_enter_critical();
     idle = !wx_state_has_session(s_state) && !s_request_call &&
+#ifdef HWDEMO_GROUP_ROOM_EN
+           !s_group_pending && s_group_ticket == 0U &&
+#endif
            !s_call_starting &&
            !s_request_hangup && s_request_answer_generation == 0U &&
            wx_local_rtc_idle_locked();
