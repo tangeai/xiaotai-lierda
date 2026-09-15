@@ -26,7 +26,7 @@
 
 ### 操作视频
 
-点击标题展开视频。原有五段视频可在 GitHub 页面直接播放；新增两段点击视频链接打开或下载，全部原视频随本仓库保存。
+点击标题展开视频，可在 GitHub 页面直接播放；全部原视频随本仓库保存，也可通过下方链接下载。
 
 <a id="video-binding"></a>
 <details open>
@@ -82,7 +82,7 @@ https://github.com/user-attachments/assets/2fb17e1b-e6a1-487a-8240-e44c93f56bab
 <details>
 <summary>通过 AI 对话呼叫微信和其他设备</summary>
 
-[观看演示：通过 AI 对话呼叫微信和其他设备](assets/videos/ai-call-contacts.mp4)
+https://github.com/user-attachments/assets/7851c373-bcab-4646-aa40-3204b7e59e44
 
 [下载原视频](assets/videos/ai-call-contacts.mp4) · [配置与操作步骤](examples/L_CT4IT00_YP00W_01_V04/tirtc/docs/AI呼叫微信与设备配置详解.md)
 
@@ -92,7 +92,7 @@ https://github.com/user-attachments/assets/2fb17e1b-e6a1-487a-8240-e44c93f56bab
 <details>
 <summary>创建房间多人对讲</summary>
 
-[观看演示：创建房间多人对讲](assets/videos/group-intercom.mp4)
+https://github.com/user-attachments/assets/40d16fd3-29e7-40d9-be6c-e0e52d503b7b
 
 [下载原视频](assets/videos/group-intercom.mp4) · [网页建房、加入与按键操作](examples/L_CT4IT00_YP00W_01_V04/tirtc/docs/当前设备操作.md#10a-独立多人对讲group)
 
