@@ -1,5 +1,46 @@
 CUSTOM_DIR := examples/$(PROJECT)
 
+# Product code and compatibility dependencies are independent. Only the
+# vendor SDK source and toolchain are shared; keep legacy commands on lite.
+TIRTC_EXPLICIT_VARIANT := $(strip $(APP_VARIANT))
+APP_VARIANT ?= $(if $(filter tirtc,$(BUILD_MODE)),pro,lite)
+ifneq ($(APP_VARIANT),lite)
+ifneq ($(APP_VARIANT),pro)
+$(error Unsupported APP_VARIANT "$(APP_VARIANT)"; use lite or pro)
+endif
+endif
+
+ifeq ($(APP_VARIANT),pro)
+BUILD_MODE ?= tirtc
+ifneq ($(BUILD_MODE),tirtc)
+$(error pro requires BUILD_MODE=tirtc; use build_tirtc_pro.bat)
+endif
+TIRTC_DIR := $(CUSTOM_DIR)/tirtc_pro
+IOINI := $(TOP)/$(CUSTOM_DIR)/iodriver.ini
+# pro reclaims TTS space; its generated layout must be used for packaging.
+APP_PACKAGE_MEMMAP = $(BUILDDIR)/mem_map.txt
+include $(TOP)/$(TIRTC_DIR)/config
+include $(TOP)/$(TIRTC_DIR)/tirtc_app.mk
+else
+ifneq ($(TIRTC_EXPLICIT_VARIANT),)
+ifneq ($(strip $(BUILD_MODE)),)
+ifneq ($(BUILD_MODE),demo)
+$(error APP_VARIANT=lite requires BUILD_MODE=demo)
+endif
+endif
+ifneq ($(strip $(DEMO_NAME)),)
+ifneq ($(DEMO_NAME),tirtc_app)
+$(error APP_VARIANT=lite requires DEMO_NAME=tirtc_app; omit APP_VARIANT for official demos)
+endif
+endif
+endif
+ifeq ($(BUILD_MODE),tirtc)
+$(error lite requires BUILD_MODE=demo DEMO_NAME=tirtc_app; use build_tirtc_lite.bat)
+endif
+ifeq ($(TIRTC_ASSET_INSTALLER),y)
+$(error The external UI resource installer belongs to pro only)
+endif
+
 # Select the product application before loading a variant-specific config.
 # Command-line BUILD_MODE/DEMO_NAME values still take precedence over these
 # defaults, so the restored official demos remain directly buildable.
@@ -8,7 +49,7 @@ DEMO_NAME ?= tirtc_app
 
 ifeq ($(BUILD_MODE), demo)
 ifeq ($(DEMO_NAME), tirtc_app)
-include $(TOP)/$(CUSTOM_DIR)/tirtc/config/tirtc_config.mk
+include $(TOP)/$(CUSTOM_DIR)/tirtc_lite/config/tirtc_config.mk
 else
 include $(TOP)/$(CUSTOM_DIR)/config
 endif
@@ -24,7 +65,7 @@ ifeq ($(BUILD_MODE), demo)
 
 ifeq ($(DEMO_NAME), tirtc_app)
 
-include $(TOP)/$(CUSTOM_DIR)/tirtc/tirtc_app.mk
+include $(TOP)/$(CUSTOM_DIR)/tirtc_lite/tirtc_app.mk
 
 else ifeq ($(DEMO_NAME), hardware)
 
@@ -103,3 +144,5 @@ $(BUILDDIR)/lib/libusr/lib_L_CT4IT00_YP00W_01_V04.a: $(CUSTOM_COBJS)
 	$(ECHO) AR $@
 	$(Q)$(AR) -cr $@ $^
 endif
+
+endif # APP_VARIANT

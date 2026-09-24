@@ -6,6 +6,19 @@
 # Publish only the complete firmware package.
 /firmware/*
 !/firmware/L_CT4IT00_YP00W_01_V04_NT26F6D0_01.binpkg
+!/firmware/lite/
+/firmware/lite/*
+!/firmware/lite/latest.binpkg
+!/firmware/lite/SHA256SUMS.txt
+!/firmware/pro/
+/firmware/pro/*
+!/firmware/pro/latest.binpkg
+!/firmware/pro/SHA256SUMS.txt
+!/firmware/pro/manifest.json
+!/firmware/tirtc_lite/
+/firmware/tirtc_lite/*
+!/firmware/tirtc_lite/TiRTC_lite_NT26F6D0_01.binpkg
+!/firmware/tirtc_lite/SHA256SUMS.txt
 
 # Local diagnostics and editor state.
 /.codex*/

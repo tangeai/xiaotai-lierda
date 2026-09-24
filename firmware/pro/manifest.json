@@ -1,0 +1,80 @@
+{
+  "product": "pro",
+  "purpose": "factory initialization",
+  "external_flash_files_overwritten": true,
+  "package": "latest.binpkg",
+  "size": 7566228,
+  "sha256": "9e551a918272aaf584ebeab8b2e0d937d2d98270051155ec7f59b9791fbb8ff4",
+  "normal_firmware_payloads_unchanged": true,
+  "images": [
+    {
+      "name": "ap_bootloader",
+      "type": "BL",
+      "address": 8400896,
+      "capacity": 90112,
+      "size": 90112,
+      "sha256": "89df6262986c1312041848fe085365dd68a37058af483e80d679b76b9f4831f5"
+    },
+    {
+      "name": "ap_lierda_app",
+      "type": "AP",
+      "address": 8921088,
+      "capacity": 1818624,
+      "size": 1818624,
+      "sha256": "90b31cc6129c1dc677a00ed51bb0971a82df12b18b9da1203ae81f6d06c9bb93"
+    },
+    {
+      "name": "cp-demo-flash",
+      "type": "CP",
+      "address": 8511488,
+      "capacity": 409600,
+      "size": 409600,
+      "sha256": "2a0d35d3c58295b13f4fb0263e49d491348df4dfe521015226ada0e09ae88498"
+    },
+    {
+      "name": "TiRTC_pro_NT26F6D0",
+      "type": "PKGFLXAPP",
+      "address": 10838016,
+      "capacity": 1466368,
+      "size": 1051296,
+      "sha256": "90585e7f3f5423cc1eb13e875692d960c71112d69399bbae5c42d4a73463f425"
+    },
+    {
+      "name": "ext_lfs",
+      "type": "EFID01",
+      "address": 2147483648,
+      "capacity": 4194304,
+      "size": 4194304,
+      "sha256": "2607b2bcb4c126b9515a52c861c592e07353a88fcec68117e36cad6839419682"
+    }
+  ],
+  "external_filesystem": {
+    "size": 4194304,
+    "sha256": "2607b2bcb4c126b9515a52c861c592e07353a88fcec68117e36cad6839419682",
+    "disk_version": "2.0",
+    "block_size": 4096,
+    "block_count": 1024,
+    "read_size": 256,
+    "prog_size": 256,
+    "cache_size": 256,
+    "files": [
+      {
+        "name": "ui14-font.bin",
+        "size": 631201,
+        "crc32": "5ef3a3ca",
+        "sha256": "fbfbc213d8457d56d200937f56bf9b94b0856103de90f45fb2abf71cabe7e398"
+      },
+      {
+        "name": "ui13-bg.bin",
+        "size": 153600,
+        "crc32": "87dd3141",
+        "sha256": "8252e37c06131043d07374282520aa9a94d1703dd2b82250e87cdf0e106554fb"
+      }
+    ],
+    "geometry_verified": true,
+    "readback_verified": true,
+    "lfsutil_version": "version: 1.2.3.7",
+    "lfsutil_sha256": "3797474ed6901a6766bc664e654e7e70473164753c1f5c1cb3c32377dea8bc7f"
+  },
+  "hardware_flash_verified": false
+}

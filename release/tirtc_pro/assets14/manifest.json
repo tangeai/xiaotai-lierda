@@ -1,0 +1,17 @@
+{
+  "format": "unaltered bytes; no compression or quantization",
+  "files": [
+    {
+      "name": "ui14-font.bin",
+      "size": 631201,
+      "crc32": "5ef3a3ca",
+      "sha256": "fbfbc213d8457d56d200937f56bf9b94b0856103de90f45fb2abf71cabe7e398"
+    },
+    {
+      "name": "ui13-bg.bin",
+      "size": 153600,
+      "crc32": "87dd3141",
+      "sha256": "8252e37c06131043d07374282520aa9a94d1703dd2b82250e87cdf0e106554fb"
+    }
+  ]
+}
