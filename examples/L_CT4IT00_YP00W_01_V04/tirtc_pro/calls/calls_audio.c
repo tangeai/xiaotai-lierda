@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT AND Apache-2.0
+/* SPDX-License-Identifier: MIT
  * Shared call/LIVE audio: 8k A-law uplink and bounded 8/16k A-law downlink.
  * Playback control never invokes Record. Same retained lease spans both tasks. */
 #include "calls_audio.h"

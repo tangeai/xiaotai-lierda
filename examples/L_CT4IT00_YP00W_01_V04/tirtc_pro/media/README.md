@@ -1,6 +1,6 @@
 # 共用音频硬件与 G.711 适配
 
-AI、微信电话、设备电话和 LIVE 共用同一 ES8311 录放硬件。派生自 [小钛利尔达参考](https://github.com/tangeai/xiaotai-lierda/tree/f159bfd3e82cc514dfe6b5b2269b2c96fa8e8f93/examples/L_CT4IT00_YP00W_01_V04/tirtc) 的 `audio_device/g711_codec`，保留 Apache-2.0 文件许可头。当前接口见 [audio_device.h](audio_device.h)。
+AI、微信电话、设备电话和 LIVE 共用同一 ES8311 录放硬件。派生自 [小钛利尔达参考](https://github.com/tangeai/xiaotai-lierda/tree/f159bfd3e82cc514dfe6b5b2269b2c96fa8e8f93/examples/L_CT4IT00_YP00W_01_V04/tirtc) 的 `audio_device/g711_codec`，保留探鸽版权归属；2026-09-28 按维护者要求将探鸽自有源码统一为 [MIT](LICENSE)，所调用的原厂音频 SDK 仍遵循自身授权。当前接口见 [audio_device.h](audio_device.h)。
 
 ## 硬件和格式
 

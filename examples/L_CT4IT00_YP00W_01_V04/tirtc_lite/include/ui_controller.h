@@ -1,6 +1,6 @@
 /*
  * SPDX-FileCopyrightText: 2026 Shenzhen Tange Intelligent Technology Co., Ltd. <https://tange.ai>
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: MIT
  *
  * Three-key UI event contract and the OLED controller task interface.
  */

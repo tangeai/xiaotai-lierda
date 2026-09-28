@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT AND Apache-2.0
+/* SPDX-License-Identifier: MIT
  * Device-action envelope/aliases follow xiaotai-lierda ai_chat.c. Only parsing
  * is shared: media, UI and call ownership remain this V04 application's. */
 #include "ai_call_protocol.h"

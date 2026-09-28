@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2026 鎺㈤附鏅鸿兘
  * SPDX-FileCopyrightText: 2026 Shenzhen Tange Intelligent Technology Co., Ltd. <https://tange.ai>
- * SPDX-License-Identifier: MIT AND Apache-2.0
+ * SPDX-License-Identifier: MIT
  */
 
 /**

@@ -46,4 +46,4 @@ pro 最新固件为出厂初始化包，包含固件、外置 Flash 字库和背
 - [利尔达文档首页](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/zh_CN/)
 - 本仓库保留的 [SDK 英文说明](README_SDK.md) / [SDK 中文说明](README_ZH.md)
 
-应用源码、利尔达 SDK、TiRTC SDK 和第三方组件分别遵循各自授权声明，见 [仓库许可](LICENSE) 及各产品内的来源和第三方说明。
+探鸽自有的 lite / pro 应用代码与文档采用 [MIT 许可证](LICENSE)。利尔达 OpenCPU SDK、原厂派生代码、TiRTC 预编译 SDK、第三方组件及字体资源保留各自授权，具体范围见 [许可与第三方说明](THIRD_PARTY_NOTICES.md)。

@@ -1,9 +1,9 @@
 <!-- SPDX-FileCopyrightText: 2026 Shenzhen Tange Intelligent Technology Co., Ltd. <https://tange.ai> -->
-<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- SPDX-License-Identifier: MIT -->
 
 # 源码来源记录
 
-本文记录 `tirtc` 产品目录的来源边界，供公开发布、代码审查和后续升级使用。
+本文记录 `tirtc_lite` 产品目录的来源边界，供公开发布、代码审查和后续升级使用。
 它是工程溯源记录，不替代权利人的授权文件或法律意见。
 
 ## 1. 本地产品代码
@@ -13,9 +13,8 @@ TiRTC、ThingConnect、AI、微信通话、设备通话、平台 LIVE 及独立 
 
 文件实际许可证以文件头的 `SPDX-License-Identifier` 为准：
 
-- 独立新增的板级适配、媒体、网络、UI、构建和文档代码使用 `Apache-2.0`；
-- 包含探鸽公开参考实现表达及本项目 Apache 修改的文件使用
-  `MIT AND Apache-2.0`；
+- 探鸽独立新增的板级适配、媒体、网络、UI、构建和文档代码使用 `MIT`；
+- 包含探鸽公开 MIT 参考实现及探鸽本地修改的文件统一使用 `MIT`；
 - 利尔达派生文件继续使用其上游 `Apache-2.0`，保留利尔达归属并标记探鸽修改；
 - `sdk/` 下的 TiRTC 头文件和静态库不属于上述开源授权。
 
@@ -32,8 +31,10 @@ TiRTC、ThingConnect、AI、微信通话、设备通话、平台 LIVE 及独立 
 | `include/ssd1306_display.h` | `demo/inc/demo_lcd_ssd1306.h` | 改为显示服务 API |
 | `board/iodriver.ini` | 产品变体根目录 `iodriver.ini` | SPI0 换脚，避开 I2C1 OLED 引脚 |
 
-上游仓根 `LICENSE` 为 Apache License 2.0。发布时不得删除这些文件中已有的
-利尔达版权、作者或来源说明。
+利尔达上游仓根 `LICENSE` 为 Apache License 2.0，原文保存在本仓库
+[利尔达许可副本](../../../LICENSES/Lierda-OpenCPU-Apache-2.0.txt)。当前根目录
+[LICENSE](../../../LICENSE) 为探鸽自有应用的 MIT 许可，不覆盖以上派生文件。
+发布时不得删除这些文件中已有的利尔达版权、作者或来源说明。
 
 ## 3. 探鸽公开参考实现
 
@@ -60,17 +61,19 @@ TiRTC、ThingConnect、AI、微信通话、设备通话、平台 LIVE 及独立 
 - `src/services/formal_mqtt.c`、`include/formal_mqtt.h`
 - `src/core/tirtc_runtime.c`、`include/tirtc_runtime.h`
 
-这些文件当前标为 `MIT AND Apache-2.0`：MIT 约束覆盖保留的上游表达，
-Apache-2.0 覆盖本产品新增修改。若权利负责人决定统一重许可，必须把书面授权、
-对应源版本和变更提交一并更新到本文件，不能只机械改 SPDX 行。
+这些文件原标为 `MIT AND Apache-2.0`，其中 Apache-2.0 对应探鸽自有修改。
+2026-09-28 按项目维护者的明确许可要求，该部分与已有 MIT 参考代码统一为 `MIT`；
+原版权通知和固定上游来源继续保留。核对基线为本仓库提交 `b6c85ce`，实际变更
+见其后的许可调整提交；范围见 [仓库许可说明](../../../THIRD_PARTY_NOTICES.md)。
+此决定不涉及第 2 节利尔达派生文件或第 5 节供应 SDK。
 
 `include/json_guard.h` 复用 cJSON 1.7.16 的输入前缀处理约定并增加本地深度保护，
-当前文件头保留 `MIT AND Apache-2.0`。它不修改或重新许可供应解析库。
+当前文件头使用 `MIT`。它不修改或重新许可供应解析库。
 
 ## 4. 独立适配文件
 
 本次比对未发现与公开参考仓有显著逐行重合、按当前工程策略使用
-`Apache-2.0` 的文件包括：
+`MIT` 的文件包括：
 
 - `src/media/*`、对应媒体头文件；
 - `src/core/rtos_compat.c`：针对已核验 F6D_A 任务创建失败分支的应用侧适配；
@@ -95,7 +98,7 @@ Apache-2.0 覆盖本产品新增修改。若权利负责人决定统一重许可
 - `sdk/lib/libTiRTC.a`
 
 当前 TiRTC 库为 `v2.5.0-87c3c290`，与公开 `0.1.0` 的旧包不同；匹配摘要见
-[第三方组件与发布边界](THIRD_PARTY_NOTICES.md)。`sdk_bak/` 是旧交付包备份，不参与当前链接。
+[第三方组件与发布边界](THIRD_PARTY_NOTICES.md)。旧交付包备份不属于当前产品发布目录。
 2026-09-14 两项异常防护只增加应用侧检查和适配，未修改上述供应文件及 F6D_A 静态库。
 
 探鸽公开参考仓的 SDK NOTICE 明确说明：TiRTC SDK 头文件和预编译静态库是
@@ -108,7 +111,7 @@ proprietary materials，不受仓库 MIT 许可证覆盖；进一步分发、修
 ## 6. 发布前溯源检查
 
 1. 将参考仓的浮动 `main` 换成确认过的 release tag/commit。
-2. 由权利负责人确认每个 `MIT AND Apache-2.0` 文件的最终许可策略。
+2. 按上述 MIT 范围保留自有代码许可，同时核对利尔达派生文件及第三方原通知。
 3. 确认当前 `libTiRTC.a` 的来源、版本、目标 ABI 和公开再分发权。
 4. 重新计算 SDK、ELF、BIN、BINPKG 的 SHA-256，并更新对应清单。
 5. 保留 `LICENSES/`、`THIRD_PARTY_NOTICES.md` 及所有第三方原始通知。

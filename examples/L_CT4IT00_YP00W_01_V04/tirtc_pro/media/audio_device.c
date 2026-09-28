@@ -1,6 +1,6 @@
 /*
  * SPDX-FileCopyrightText: 2026 Shenzhen Tange Intelligent Technology Co., Ltd. <https://tange.ai>
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: MIT
  *
  * Derived from xiaotai-lierda f159bfd3e82cc514dfe6b5b2269b2c96fa8e8f93.
  * V04 ES8311: I2C0/I2S0, PA GPIO11, 8 kHz mono-right PCM16.

@@ -1,6 +1,6 @@
 /*
  * SPDX-FileCopyrightText: 2026 Shenzhen Tange Intelligent Technology Co., Ltd. <https://tange.ai>
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: MIT
  *
  * Failure-path compatibility for the verified F6D_A libliot_os.a.
  */

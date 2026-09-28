@@ -1,4 +1,4 @@
-/*
+/* SPDX-License-Identifier: Apache-2.0
  * Lierda V04 display and touch adaptation.
  * Derived from the board-tested official demo_watch ports:
  *   examples/NT26FxDx_OpenKit/demo/src/demo_watch/framework/platform/

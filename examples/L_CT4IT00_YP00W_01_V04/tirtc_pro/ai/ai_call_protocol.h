@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT AND Apache-2.0 */
+/* SPDX-License-Identifier: MIT */
 #ifndef TIRTC_AI_CALL_PROTOCOL_H
 #define TIRTC_AI_CALL_PROTOCOL_H
 #include "../platform/json_guard.h"

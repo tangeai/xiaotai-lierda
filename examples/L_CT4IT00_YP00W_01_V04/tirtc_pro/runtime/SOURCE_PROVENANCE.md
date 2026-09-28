@@ -2,7 +2,7 @@
 
 - 上游：https://github.com/tangeai/xiaotai-lierda
 - commit：`f159bfd3e82cc514dfe6b5b2269b2c96fa8e8f93`（2026-09-15）。源路径为 `examples/L_CT4IT00_YP00W_01_V04/tirtc/src/tirtc_runtime.c` 及 `include/tirtc_runtime.h`。
-- 原通知与 `MIT AND Apache-2.0` 标识保留；完整文本在本目录 `LICENSES/`。
+- 原版权和来源通知保留。上述历史版本使用 `MIT AND Apache-2.0`；2026-09-28 按维护者要求，探鸽自有修改与已有 MIT 参考代码统一为 MIT，见 [当前应用许可](../LICENSE) 和 [仓库许可范围](../../../../THIRD_PARTY_NOTICES.md)。本目录 `LICENSES/` 保留历史许可全文，不改变供应 SDK 的授权。
 - 2026-09-23 按用户提供的 `tirtc__eigencomm-ec71x__gcc-arm-none-eabi-10-2020-q4-major__v2.5.0__mini` 原样更新库和配套头文件，SHA-256：`31c72553a082104b28eb8a2baa3e837b87afd25a54c2330eadc640dd0f287a5d`。内部版本为 `v2.5.0-9088239c` / `f72f5d3c`；此前工程实际为 `v2.5.0-87c3c290`，并非 2.3。5 个公共头文件字节相同。
 - 保留的本地 F6D_A `ap_lierda_app.elf` SHA-256：`8bc2f616e021fb1c98f36afcf2a7f09d0de02937e6cf00909c202b920b0301e0`。这与最新上游底包不同，不能直接沿用上游底包哈希或假定所有 ABI 相同。
 

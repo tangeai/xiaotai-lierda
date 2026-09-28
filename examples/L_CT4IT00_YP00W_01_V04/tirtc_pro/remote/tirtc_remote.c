@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT AND Apache-2.0
+/* SPDX-License-Identifier: MIT
  * Authenticated platform VIEW: camera 11, microphone 10, talkback 10/14.
  * SDK callbacks only latch bounded state or copy into the audio mailbox.
  * One control worker owns media start/step/stop; the existing camera and

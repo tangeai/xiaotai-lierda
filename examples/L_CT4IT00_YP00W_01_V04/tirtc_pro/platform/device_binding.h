@@ -1,5 +1,5 @@
 /* Copyright (c) 2026 探鸽智能
- * SPDX-License-Identifier: MIT AND Apache-2.0
+ * SPDX-License-Identifier: MIT
  * Adapted from xiaotai-lierda f159bfd3: provisioning-only public surface. */
 #ifndef TIRTC_APP_DEVICE_BINDING_H
 #define TIRTC_APP_DEVICE_BINDING_H

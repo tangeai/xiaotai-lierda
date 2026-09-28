@@ -1,5 +1,5 @@
 <!-- SPDX-FileCopyrightText: 2026 Shenzhen Tange Intelligent Technology Co., Ltd. <https://tange.ai> -->
-<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- SPDX-License-Identifier: MIT -->
 
 # TiRTC SDK placement
 
@@ -30,11 +30,11 @@ provenance. Integration details are in [runtime/README.md](../runtime/README.md)
 
 当前可用的许可入口：
 
-- [仓库 LICENSE](../../../../LICENSE)
-- [应用适配 MIT 副本](../runtime/LICENSES/MIT.txt)
-- [应用适配 Apache-2.0 副本](../runtime/LICENSES/Apache-2.0.txt)
+- [当前应用 MIT 许可](../LICENSE) / [仓库许可范围](../../../../THIRD_PARTY_NOTICES.md)
+- [上游 MIT 副本](../runtime/LICENSES/MIT.txt)
+- [历史上游 Apache-2.0 副本](../runtime/LICENSES/Apache-2.0.txt) / [利尔达原厂许可](../../../../LICENSES/Lierda-OpenCPU-Apache-2.0.txt)
 - [cJSON 许可头](../../../../components/thirdparty/CJSON/cJSON.h)
 - [Opus 上游许可（公共 SDK 保留组件，当前应用未启用）](../../../../components/thirdparty/opus/opus-1.4/COPYING)
 - [保留的 mbedTLS 许可](../board_compat/licenses/mbedtls-LICENSE)
 
-以上仅修正文档阅读路径，不修改任何原始许可文本。
+以上提供当前应用与历史上游许可的阅读路径；原始供应 SDK、历史通知和上游许可副本均保持原文。

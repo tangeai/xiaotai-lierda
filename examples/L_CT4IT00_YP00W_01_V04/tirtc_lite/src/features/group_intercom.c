@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: Apache-2.0
+/* SPDX-License-Identifier: MIT
  * SPDX-FileCopyrightText: 2026 Shenzhen Tange Intelligent Technology Co., Ltd. <https://tange.ai>
  * Independent Room owner. Only this worker touches Room audio/state;
  * blocking HTTP/WHIP submission runs on the bounded service worker.

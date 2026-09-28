@@ -10,6 +10,6 @@ Upstream: [tangeai/xiaotai-lierda](https://github.com/tangeai/xiaotai-lierda/tre
 | `formal_mqtt.h` | `include/formal_mqtt.h` | Preserve router interface; add lifecycle-owner cleanup gate. |
 | `json_guard.h` | `include/json_guard.h` | Preserve bounded-depth parsing guard. |
 
-Original copyright/SPDX notices remain in adapted files. The upstream MIT and Apache-2.0 licenses are copied into `LICENSES/`. `tirtc_platform.c/.h` and `platform_internal.h` implement this board's independent UI/network adapter; `tirtc_mqtt_compat.c/.h` is a new, hash-gated compatibility probe for the exact bundled SDK, not a borrowed upstream ABI patch.
+Original copyright and provenance notices remain in adapted files. On 2026-09-28, at the project maintainer's request, Tange-owned adaptations previously marked `MIT AND Apache-2.0` were unified under [MIT](../LICENSE); the existing MIT-covered upstream expressions remain MIT. The historical upstream MIT and Apache-2.0 texts are retained in `LICENSES/`. This change does not relicense vendor or third-party materials; see the [repository license scope](../../../../THIRD_PARTY_NOTICES.md). `tirtc_platform.c/.h` and `platform_internal.h` implement this board's independent UI/network adapter; `tirtc_mqtt_compat.c/.h` is a new, hash-gated compatibility probe for the exact bundled SDK, not a borrowed upstream ABI patch.
 
 

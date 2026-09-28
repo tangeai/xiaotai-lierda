@@ -1,6 +1,6 @@
 /*
  * SPDX-FileCopyrightText: 2026 Shenzhen Tange Intelligent Technology Co., Ltd. <https://tange.ai>
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: MIT
  *
  * ES8311 audio adapter: I2C0/I2S0, PA GPIO11, 16 kHz mono-right PCM.
  */

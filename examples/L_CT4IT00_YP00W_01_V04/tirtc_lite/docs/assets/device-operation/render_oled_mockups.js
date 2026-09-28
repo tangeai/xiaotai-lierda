@@ -1,6 +1,6 @@
 /*
  * SPDX-FileCopyrightText: 2026 Shenzhen Tange Intelligent Technology Co., Ltd. <https://tange.ai>
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: MIT
  *
  * Deterministically renders the documentation OLED mockups from the same
  * 5x7 glyph data, spacing and coordinates used by src/ui/*.c.
@@ -224,7 +224,7 @@ function toSvg(canvas, title) {
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!-- SPDX-FileCopyrightText: 2026 Shenzhen Tange Intelligent Technology Co., Ltd. <https://tange.ai> -->
-<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- SPDX-License-Identifier: MIT -->
 <svg xmlns="http://www.w3.org/2000/svg" width="520" height="264" viewBox="-1 -1 130 66" role="img" aria-label="${title}">
   <title>${title}</title>
   <rect x="-1" y="-1" width="130" height="66" rx="2" fill="#101820"/>

@@ -1,6 +1,6 @@
 /* ThingConnect call protocol adapted from pinned official examples.
  * Copyright (c) 2026 Tange Intelligent Technology.
- * SPDX-License-Identifier: MIT AND Apache-2.0
+ * SPDX-License-Identifier: MIT
  * Source/contract: https://github.com/tangeai/tirtc-server-example (thing-connect API). */
 #include "calls_protocol.h"
 #include "../platform/json_guard.h"

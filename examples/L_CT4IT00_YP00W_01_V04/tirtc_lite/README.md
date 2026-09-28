@@ -157,3 +157,7 @@ lite 应用位于 [examples/L_CT4IT00_YP00W_01_V04/tirtc_lite](.)：利尔达 SD
 [TiRTC 官方文档](https://docs.tange.ai/products/tirtc/) · [WebRTC / TiRTC 基础知识](https://github.com/tangeai/xiaotai-esp32/blob/main/docs/README_CN.md)
 
 应用源码、利尔达 SDK、TiRTC SDK 及第三方组件分别遵循各自授权声明。
+
+## 许可
+
+探鸽自有应用代码与文档采用 [MIT](LICENSE)；利尔达派生代码、供应 SDK 和第三方组件保留各自授权。具体范围见 [源码来源](SOURCE_PROVENANCE.md) 与 [第三方说明](THIRD_PARTY_NOTICES.md)。

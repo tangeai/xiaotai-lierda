@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT AND Apache-2.0
+/* SPDX-License-Identifier: MIT
  * Calls are three owners: bounded control/playback, blocking capture, and
  * blocking service requests. No SDK callback performs HTTP, codec or UI work. */
 #include "tirtc_calls.h"

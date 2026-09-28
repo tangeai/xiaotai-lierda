@@ -1,6 +1,6 @@
 /* ThingConnect call protocol, adapted from official Lierda/ESP32 examples.
  * Copyright (c) 2026 Tange Intelligent Technology.
- * SPDX-License-Identifier: MIT AND Apache-2.0 */
+ * SPDX-License-Identifier: MIT */
 #ifndef TIRTC_CALLS_PROTOCOL_H
 #define TIRTC_CALLS_PROTOCOL_H
 #include "../contacts/tirtc_contacts.h"

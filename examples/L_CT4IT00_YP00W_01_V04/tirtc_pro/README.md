@@ -221,4 +221,4 @@ https://github.com/user-attachments/assets/7a21bd5b-7a95-4a19-aadb-e22c2752a642
 - [小钛利尔达参考工程](https://github.com/tangeai/xiaotai-lierda)：本页采用其“功能—硬件—官方教程—烧录—开发”阅读顺序，操作与参数以当前触屏产品源码为准。
 - [小钛 ESP32 参考工程](https://github.com/tangeai/xiaotai-esp32)：UI 与产品交互参考，不能直接照搬其硬件参数。
 - [设备能力协议](https://github.com/tangeai/tirtc-server-example/blob/main/thing-connect/api-reference.md)：服务端业务与能力声明参考，部署服务版本需与设备配套。
-- 仓库及第三方代码保留各自许可；TiRTC 预编译 SDK 遵循独立协议，详见 [SDK 分发说明](sdk/README.md) 与 [仓库许可](../../../LICENSE)。
+- 探鸽自有应用采用 [MIT](LICENSE)；原厂派生代码、TiRTC 预编译 SDK、第三方组件及字体保留各自许可，详见 [SDK 分发说明](sdk/README.md) 与 [仓库许可范围](../../../THIRD_PARTY_NOTICES.md)。

@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Shenzhen Tange Intelligent Technology Co., Ltd. <https://tange.ai>
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: MIT
 
 # TiRTC application sources are kept outside the vendor demo tree so that the
 # official demo can remain byte-for-byte restorable.
