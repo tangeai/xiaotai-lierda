@@ -43,27 +43,27 @@
 <a id="demo-videos"></a>
 ### 操作演示视频
 
-以下 6 段为真实设备录像，按首次使用的顺序排列。点击视频链接，或展开条目后点击封面；仓库页面若没有内嵌播放器，可下载 MP4 播放。横竖画幅均保留原比例，没有把竖屏录像拉伸成横屏。
+以下 6 段为真实设备录像，按首次使用的顺序排列。展开条目后，点击播放器的播放按钮即可观看；也可下载仓库中的 MP4。本页使用 GitHub 视频附件，横竖画幅均保留原比例。为适配附件大小限制，绑定、微信呼入和实时查看使用较小的在线播放副本，保留 720p、30 fps、完整时长和声音；下载文件保留原版。
 
 | 演示 | 时长 | 视频文件 |
 | --- | --- | --- |
-| 设备绑定与基本信息查看 | 01:29 | [播放 / 下载 · 18.4 MiB](../../../assets/videos/pro/binding.mp4) |
-| AI 对话与字幕 | 01:53 | [播放 / 下载 · 7.2 MiB](../../../assets/videos/pro/ai-talk.mp4) |
-| 通过 AI 呼叫微信（语音演示） | 00:37 | [播放 / 下载 · 2.9 MiB](../../../assets/videos/pro/ai-call-wechat.mp4) |
-| 设备呼叫微信（视频） | 00:53 | [播放 / 下载 · 8.9 MiB](../../../assets/videos/pro/wechat-outgoing.mp4) |
-| 微信呼叫设备（视频） | 00:39 | [播放 / 下载 · 10.1 MiB](../../../assets/videos/pro/wechat-incoming.mp4) |
-| 网页与微信实时查看 | 00:55 | [播放 / 下载 · 11.3 MiB](../../../assets/videos/pro/remote-view.mp4) |
+| 设备绑定与基本信息查看 | 01:29 | [观看演示](#video-binding) · [下载 MP4 · 18.4 MiB](../../../assets/videos/pro/binding.mp4?raw=true) |
+| AI 对话与字幕 | 01:53 | [观看演示](#video-ai-talk) · [下载 MP4 · 7.2 MiB](../../../assets/videos/pro/ai-talk.mp4?raw=true) |
+| 通过 AI 呼叫微信（语音演示） | 00:37 | [观看演示](#video-ai-call) · [下载 MP4 · 2.9 MiB](../../../assets/videos/pro/ai-call-wechat.mp4?raw=true) |
+| 设备呼叫微信（视频） | 00:53 | [观看演示](#video-wechat-outgoing) · [下载 MP4 · 8.9 MiB](../../../assets/videos/pro/wechat-outgoing.mp4?raw=true) |
+| 微信呼叫设备（视频） | 00:39 | [观看演示](#video-wechat-incoming) · [下载 MP4 · 10.1 MiB](../../../assets/videos/pro/wechat-incoming.mp4?raw=true) |
+| 网页与微信实时查看 | 00:55 | [观看演示](#video-remote-view) · [下载 MP4 · 11.3 MiB](../../../assets/videos/pro/remote-view.mp4?raw=true) |
 
 
 **演示与当前版本：** 录像未注明对应固件版本；其中 AI 呼叫录像展示的是**语音电话**，当前源码普通 AI 呼叫默认视频、明确要求语音时仍可发起音频通话。录像用于了解操作，不能代替 [发布包验证记录](../../../release/tirtc_pro/README.md)。视频文件的 720p / 30 fps 是录制与分发格式，不是设备摄像头上传参数。
 
 <a id="video-binding"></a>
-<details>
+<details open>
 <summary>设备绑定与基本信息查看（01:29）</summary>
 
-<a href="../../../assets/videos/pro/binding.mp4"><img src="../../../assets/videos/pro/posters/binding.jpg" width="240" alt="设备绑定与基本信息查看：实机录像封面，点击打开视频"></a>
+https://github.com/user-attachments/assets/eeb510ab-61ee-40d0-9867-d9554f160cd9
 
-[播放 / 下载视频（18.4 MiB）](../../../assets/videos/pro/binding.mp4)
+[下载 MP4（18.4 MiB）](../../../assets/videos/pro/binding.mp4?raw=true)
 
 从平台绑定到设备信息查看，先了解设备和平台的关系。操作步骤、资源准备及绑定失败检查见 [联网与绑定](docs/当前设备操作.md#binding)。
 
@@ -73,9 +73,9 @@
 <details>
 <summary>AI 对话与字幕（01:53）</summary>
 
-<a href="../../../assets/videos/pro/ai-talk.mp4"><img src="../../../assets/videos/pro/posters/ai-talk.jpg" width="480" alt="AI 对话与字幕：实机录像封面，点击打开视频"></a>
+https://github.com/user-attachments/assets/b1c84a00-48b7-454e-b12a-4847e43723e5
 
-[播放 / 下载视频（7.2 MiB）](../../../assets/videos/pro/ai-talk.mp4)
+[下载 MP4（7.2 MiB）](../../../assets/videos/pro/ai-talk.mp4?raw=true)
 
 观察触屏设备的 AI 对话、字幕和语音回答。如何开始、结束及检查有字幕无声音，见 [AI 对话](docs/当前设备操作.md#ai)。
 
@@ -85,9 +85,9 @@
 <details>
 <summary>通过 AI 呼叫微信（语音演示）（00:37）</summary>
 
-<a href="../../../assets/videos/pro/ai-call-wechat.mp4"><img src="../../../assets/videos/pro/posters/ai-call-wechat.jpg" width="480" alt="通过 AI 呼叫微信（语音演示）：实机录像封面，点击打开视频"></a>
+https://github.com/user-attachments/assets/607bf11e-fa28-4e4e-87a7-d57266bc40d7
 
-[播放 / 下载视频（2.9 MiB）](../../../assets/videos/pro/ai-call-wechat.mp4)
+[下载 MP4（2.9 MiB）](../../../assets/videos/pro/ai-call-wechat.mp4?raw=true)
 
 这段录像展示 AI 把语音请求转成真实微信电话，设备画面为“语音通话”。要体验当前默认视频策略，按 [AI 角色与插件配置](docs/AI呼叫微信与设备配置详解.md) 设置，再检查真实呼叫页面和对端画面；AI 口头回复不等于已经拨号。
 
@@ -98,9 +98,9 @@
 <details>
 <summary>设备呼叫微信（视频）（00:53）</summary>
 
-<a href="../../../assets/videos/pro/wechat-outgoing.mp4"><img src="../../../assets/videos/pro/posters/wechat-outgoing.jpg" width="240" alt="设备呼叫微信（视频）：实机录像封面，点击打开视频"></a>
+https://github.com/user-attachments/assets/912e0841-aa12-449a-a149-f6b1c3f5403d
 
-[播放 / 下载视频（8.9 MiB）](../../../assets/videos/pro/wechat-outgoing.mp4)
+[下载 MP4（8.9 MiB）](../../../assets/videos/pro/wechat-outgoing.mp4?raw=true)
 
 设备作为主叫、微信接听，观察两端的视频通话。手动视频入口在通讯录，首页绿色电话仍是语音快捷入口，详见 [通讯录和音视频电话](docs/当前设备操作.md#calls)。
 
@@ -110,9 +110,9 @@
 <details>
 <summary>微信呼叫设备（视频）（00:39）</summary>
 
-<a href="../../../assets/videos/pro/wechat-incoming.mp4"><img src="../../../assets/videos/pro/posters/wechat-incoming.jpg" width="240" alt="微信呼叫设备（视频）：实机录像封面，点击打开视频"></a>
+https://github.com/user-attachments/assets/b1a9903d-680e-439a-b8c6-a7b88af15146
 
-[播放 / 下载视频（10.1 MiB）](../../../assets/videos/pro/wechat-incoming.mp4)
+[下载 MP4（10.1 MiB）](../../../assets/videos/pro/wechat-incoming.mp4?raw=true)
 
 微信作为主叫、设备接听，配合上一段了解呼入和呼出两个方向。接听、拒绝、关麦、关摄像头和挂断的说明见 [电话操作](docs/当前设备操作.md#calls)。
 
@@ -122,9 +122,9 @@
 <details>
 <summary>网页与微信实时查看（00:55）</summary>
 
-<a href="../../../assets/videos/pro/remote-view.mp4"><img src="../../../assets/videos/pro/posters/remote-view.jpg" width="240" alt="网页与微信实时查看：实机录像封面，点击打开视频"></a>
+https://github.com/user-attachments/assets/7a21bd5b-7a95-4a19-aadb-e22c2752a642
 
-[播放 / 下载视频（11.3 MiB）](../../../assets/videos/pro/remote-view.mp4)
+[下载 MP4（11.3 MiB）](../../../assets/videos/pro/remote-view.mp4?raw=true)
 
 远端发起查看，设备上传摄像头画面；声音订阅、按住说话及结束方式见 [实时查看与远程对讲](docs/当前设备操作.md#live)。设备停在首页或时钟页，进入菜单等其他页面会结束本次查看。
 

@@ -28,7 +28,14 @@
       "recording_fps": 30,
       "audio_codec": "aac",
       "audio": "copied without re-encoding",
-      "poster_at_seconds": 12.0
+      "poster_at_seconds": 12.0,
+      "github_playback": {
+        "url": "https://github.com/user-attachments/assets/eeb510ab-61ee-40d0-9867-d9554f160cd9",
+        "bytes": 9241121,
+        "sha256": "f5abf239aa28ea43561233df084af47e6785284e464e6144db6dd3471eb839cf",
+        "reencoded_for_attachment_limit": true,
+        "note": "Same duration, display dimensions, frame rate and original AAC audio; repository download remains unchanged."
+      }
     },
     {
       "title": "AI 对话与字幕",
@@ -47,7 +54,14 @@
       "recording_fps": 30,
       "audio_codec": "aac",
       "audio": "copied without re-encoding",
-      "poster_at_seconds": 42.0
+      "poster_at_seconds": 42.0,
+      "github_playback": {
+        "url": "https://github.com/user-attachments/assets/b1c84a00-48b7-454e-b12a-4847e43723e5",
+        "bytes": 7498687,
+        "sha256": "8c215287dfc5840cb81441b22a0677993a158fb5362bf2858bbc1b9aace8bf32",
+        "reencoded_for_attachment_limit": false,
+        "note": "Same duration, display dimensions, frame rate and original AAC audio; repository download remains unchanged."
+      }
     },
     {
       "title": "通过 AI 呼叫微信（语音演示）",
@@ -66,7 +80,14 @@
       "recording_fps": 30,
       "audio_codec": "aac",
       "audio": "copied without re-encoding",
-      "poster_at_seconds": 25.0
+      "poster_at_seconds": 25.0,
+      "github_playback": {
+        "url": "https://github.com/user-attachments/assets/607bf11e-fa28-4e4e-87a7-d57266bc40d7",
+        "bytes": 3051220,
+        "sha256": "e8a905618b7c42258d81d7fab36d21d52d85f07f4f33da8154b86ef1834f6e3d",
+        "reencoded_for_attachment_limit": false,
+        "note": "Same duration, display dimensions, frame rate and original AAC audio; repository download remains unchanged."
+      }
     },
     {
       "title": "设备呼叫微信（视频）",
@@ -85,7 +106,14 @@
       "recording_fps": 30,
       "audio_codec": "aac",
       "audio": "copied without re-encoding",
-      "poster_at_seconds": 25.0
+      "poster_at_seconds": 25.0,
+      "github_playback": {
+        "url": "https://github.com/user-attachments/assets/912e0841-aa12-449a-a149-f6b1c3f5403d",
+        "bytes": 9294371,
+        "sha256": "4db0326eb0b265991337eee1ddb18ae84c92e14e1e45f9d044f728ddbcdf9386",
+        "reencoded_for_attachment_limit": false,
+        "note": "Same duration, display dimensions, frame rate and original AAC audio; repository download remains unchanged."
+      }
     },
     {
       "title": "微信呼叫设备（视频）",
@@ -104,7 +132,14 @@
       "recording_fps": 30,
       "audio_codec": "aac",
       "audio": "copied without re-encoding",
-      "poster_at_seconds": 25.0
+      "poster_at_seconds": 25.0,
+      "github_playback": {
+        "url": "https://github.com/user-attachments/assets/b1a9903d-680e-439a-b8c6-a7b88af15146",
+        "bytes": 9253030,
+        "sha256": "f7f3ace472a2025f8ab23b09b9c02f6e5c2d4327e193fbd30ff9ffa0eb084a53",
+        "reencoded_for_attachment_limit": true,
+        "note": "Same duration, display dimensions, frame rate and original AAC audio; repository download remains unchanged."
+      }
     },
     {
       "title": "网页与微信实时查看",
@@ -123,7 +158,14 @@
       "recording_fps": 30,
       "audio_codec": "aac",
       "audio": "copied without re-encoding",
-      "poster_at_seconds": 28.0
+      "poster_at_seconds": 28.0,
+      "github_playback": {
+        "url": "https://github.com/user-attachments/assets/7a21bd5b-7a95-4a19-aadb-e22c2752a642",
+        "bytes": 9235788,
+        "sha256": "8640f36b49ac28dc8f7af4caf7383d597ba5c82022f4bc102e78e923b8da0dce",
+        "reencoded_for_attachment_limit": true,
+        "note": "Same duration, display dimensions, frame rate and original AAC audio; repository download remains unchanged."
+      }
     }
   ]
 }
