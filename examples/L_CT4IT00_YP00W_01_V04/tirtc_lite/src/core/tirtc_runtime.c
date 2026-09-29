@@ -517,6 +517,11 @@ void __wrap_Logf(int level, const char *module, const char *format, ...)
     va_list args;
     int written;
 
+    /* Preserve the SDK severity gate before formatting; bit 15 is metadata. */
+    if ((level & 0x7fff) > DEMO_TIRTC_LOG_LEVEL)
+    {
+        return;
+    }
     if (format == NULL)
     {
         return;

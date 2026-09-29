@@ -34,7 +34,8 @@ extern "C" {
 #define DEMO_AI_AUDIO_LEVEL_MIN          1U
 #define DEMO_AI_AUDIO_LEVEL_MAX          10U
 #define DEMO_AI_AUDIO_DEFAULT_SPK_LEVEL  8U
-#define DEMO_AI_AUDIO_DEFAULT_MIC_LEVEL  10U
+/* L10 clipped captured speech; L5 made the far end too quiet in board tests. */
+#define DEMO_AI_AUDIO_DEFAULT_MIC_LEVEL  7U
 
 /*
  * ES8311/I2S0 is a process-wide singleton.  A fixed owner plus generation

@@ -62,6 +62,9 @@
 #define DEV_SIGNAL_EVENT_DEPTH              8U
 #define DEV_SIGNAL_PAYLOAD_MAX             160U
 #define DEV_AUDIO_QUEUE_DEPTH                8U
+/* Absorb brief TX scheduling delays without blocking capture (160 ms PCM). */
+#define DEV_UPLINK_QUEUE_DEPTH               8U
+#define DEV_UPLINK_TASK_STACK       (12U * 1024U)
 #define DEV_AUDIO_FRAME_BYTES              160U
 /* Accept up to four coalesced 20 ms G.711 A-law packets without allocating
  * from the heap in the SDK callback. */
@@ -189,6 +192,14 @@ typedef struct
 typedef struct
 {
     uint32_t generation;
+    uint32_t tirtc_generation;
+    TIRTCFRAMEINFO frame;
+    uint8_t payload[DEV_UPLINK_SAMPLES_8K];
+} dev_uplink_job_t;
+
+typedef struct
+{
+    uint32_t generation;
     uint8_t attempt;
     volatile bool pending;
     /* TiRtcConnect is asynchronous.  Keep its string arguments alive until
@@ -217,6 +228,7 @@ static liot_sem_t s_event_sem;
 static liot_queue_t s_mqtt_queue;
 static liot_queue_t s_signal_queue;
 static liot_queue_t s_audio_queue;
+static liot_queue_t s_uplink_queue;
 static liot_queue_t s_room_action_queue;
 
 static dev_audio_frame_t s_audio_pool[DEV_AUDIO_QUEUE_DEPTH];
@@ -302,6 +314,8 @@ static uint32_t s_rx_frames;
 static uint32_t s_tx_frames;
 static uint32_t s_rx_dropped;
 static uint32_t s_tx_dropped;
+static uint32_t s_tx_session_queue_full;
+static uint32_t s_tx_session_sdk_busy;
 static uint32_t s_prebuffer_start_ms;
 static bool s_downlink_reject_logged;
 static bool s_playback_error_logged;
@@ -330,6 +344,100 @@ static void dev_signal(void)
     if (s_event_sem != NULL)
     {
         (void)liot_rtos_semaphore_release(s_event_sem);
+    }
+}
+
+static void dev_uplink_reset_session_stats(void)
+{
+    liot_rtos_enter_critical();
+    s_tx_session_queue_full = 0U;
+    s_tx_session_sdk_busy = 0U;
+    liot_rtos_exit_critical();
+}
+
+/* Caller holds the critical section. Jobs never borrow the audio lease or
+ * the capture buffer, and a late sender cannot affect a newer call. */
+static bool dev_uplink_job_current_locked(const dev_uplink_job_t *job)
+{
+    return s_state == DEMO_DEV_CHAT_IN_CALL &&
+           s_generation == job->generation && s_tirtc_claimed &&
+           !s_tirtc_release_pending &&
+           s_tirtc_generation == job->tirtc_generation &&
+           !s_request_hangup && !s_request_conn_error;
+}
+
+static void dev_drain_uplink(void)
+{
+    dev_uplink_job_t job;
+
+    while (s_uplink_queue != NULL &&
+           liot_rtos_queue_wait(s_uplink_queue, (uint8 *)&job,
+                                sizeof(job), LIOT_NO_WAIT) == LIOT_OSI_SUCCESS)
+    {
+        /* Only the call worker produces jobs, so no new call can enqueue
+         * while this worker drains the previous call during start/stop. */
+    }
+}
+
+static void dev_send_uplink_job(const dev_uplink_job_t *job)
+{
+    bool current;
+    bool signal = false;
+    bool first = false;
+    int ret;
+
+    liot_rtos_enter_critical();
+    current = dev_uplink_job_current_locked(job);
+    liot_rtos_exit_critical();
+    if (!current)
+    {
+        return;
+    }
+    /* The runtime acquires its own generation-checked connection reference;
+     * concurrent hangup therefore cannot free an SDK handle in this call. */
+    ret = demo_tirtc_send_audio(DEMO_TIRTC_OWNER_DEV_CHAT,
+                                job->tirtc_generation,
+                                &job->frame, job->payload);
+    liot_rtos_enter_critical();
+    if (dev_uplink_job_current_locked(job))
+    {
+        if (ret == TIRTC_E_BUSY)
+        {
+            ++s_tx_dropped;
+            ++s_tx_session_sdk_busy;
+        }
+        else if (ret < 0)
+        {
+            s_request_conn_error = true;
+            s_request_conn_error_code = ret;
+            signal = true;
+        }
+        else
+        {
+            first = ++s_tx_frames == 1U;
+        }
+    }
+    liot_rtos_exit_critical();
+    if (first)
+    {
+        liot_trace("[DEV] first uplink ALAW bytes=%u\r\n",
+                   (unsigned int)job->frame.length);
+    }
+    if (signal) dev_signal();
+}
+
+static void dev_uplink_task(void *argv)
+{
+    dev_uplink_job_t job;
+
+    (void)argv;
+    while (1)
+    {
+        if (liot_rtos_queue_wait(s_uplink_queue, (uint8 *)&job,
+                                 sizeof(job), LIOT_WAIT_FOREVER) == LIOT_OSI_SUCCESS)
+        {
+            dev_send_uplink_job(&job);
+        }
     }
 }
 
@@ -1789,6 +1897,7 @@ static void dev_finish_session(int result,
     }
 
     dev_set_state(DEMO_DEV_CHAT_STOPPING, 0);
+    dev_drain_uplink();
     memset(room_id, 0, sizeof(room_id));
     liot_rtos_enter_critical();
     connection = (tirtc_conn_t)s_conn;
@@ -1914,10 +2023,13 @@ static void dev_finish_session(int result,
         dev_set_state(DEMO_DEV_CHAT_OFFLINE, 0);
     }
     liot_trace("[DEV] session=%u closed result=%d action_ret=%d "
-               "rx_drop=%u tx_drop=%u\r\n",
+               "rx_drop=%u tx_drop=%u tx_session_queue_full=%u "
+               "tx_session_sdk_busy=%u\r\n",
                (unsigned int)s_completed_sequence, result, action_ret,
                (unsigned int)s_rx_dropped,
-               (unsigned int)s_tx_dropped);
+               (unsigned int)s_tx_dropped,
+               (unsigned int)s_tx_session_queue_full,
+               (unsigned int)s_tx_session_sdk_busy);
 }
 
 static int dev_start_audio(void)
@@ -1967,8 +2079,11 @@ static int dev_start_audio(void)
         return ret;
     }
     s_deadline_ms = 0U;
+    dev_drain_uplink();
     s_rx_frames = 0U;
+    liot_rtos_enter_critical();
     s_tx_frames = 0U;
+    liot_rtos_exit_critical();
     s_prebuffer_start_ms = 0U;
     s_downlink_reject_logged = false;
     s_playback_error_logged = false;
@@ -2132,8 +2247,9 @@ static void dev_service_downlink(void)
 
 static int dev_send_uplink(void)
 {
-    TIRTCFRAMEINFO frame;
+    dev_uplink_job_t job;
     uint32_t i;
+    bool current;
     int ret;
 
     ret = demo_ai_audio_record_20ms(&s_audio_lease, s_capture_pcm);
@@ -2148,29 +2264,33 @@ static int dev_send_uplink(void)
         s_uplink_alaw[i] =
             demo_g711_alaw_encode_sample((int16_t)(mixed / 2));
     }
-    memset(&frame, 0, sizeof(frame));
-    frame.stream_id = DEV_STREAM_ID;
-    frame.media = TIRTC_AUDIO_ALAW;
-    frame.flags = TIRTC_AUDIOSAMPLE_8K16B1C;
-    frame.ts = liot_rtos_get_running_time();
-    frame.length = DEV_UPLINK_SAMPLES_8K;
-    ret = demo_tirtc_send_audio(DEMO_TIRTC_OWNER_DEV_CHAT,
-                                s_tirtc_generation,
-                                &frame, s_uplink_alaw);
-    if (ret == TIRTC_E_BUSY)
+    memset(&job, 0, sizeof(job));
+    job.frame.stream_id = DEV_STREAM_ID;
+    job.frame.media = TIRTC_AUDIO_ALAW;
+    job.frame.flags = TIRTC_AUDIOSAMPLE_8K16B1C;
+    job.frame.ts = liot_rtos_get_running_time();
+    job.frame.length = DEV_UPLINK_SAMPLES_8K;
+    memcpy(job.payload, s_uplink_alaw, sizeof(job.payload));
+    liot_rtos_enter_critical();
+    job.generation = s_generation;
+    job.tirtc_generation = s_tirtc_generation;
+    current = dev_uplink_job_current_locked(&job);
+    liot_rtos_exit_critical();
+    if (!current)
     {
-        ++s_tx_dropped;
         return 0;
     }
-    if (ret < 0)
+    ret = liot_rtos_queue_release(s_uplink_queue, sizeof(job),
+                                  (uint8 *)&job, LIOT_NO_WAIT);
+    if (ret != LIOT_OSI_SUCCESS)
     {
-        return ret;
-    }
-    ++s_tx_frames;
-    if (s_tx_frames == 1U)
-    {
-        liot_trace("[DEV] first uplink ALAW bytes=%u\r\n",
-                   (unsigned int)DEV_UPLINK_SAMPLES_8K);
+        liot_rtos_enter_critical();
+        if (dev_uplink_job_current_locked(&job))
+        {
+            ++s_tx_dropped;
+            ++s_tx_session_queue_full;
+        }
+        liot_rtos_exit_critical();
     }
     return 0;
 }
@@ -2183,6 +2303,7 @@ static void dev_begin_session(bool caller, const char *peer_id,
     {
         ++s_generation;
     }
+    dev_uplink_reset_session_stats();
     if (caller && s_request_call_sequence != 0U)
     {
         s_session_sequence = s_request_call_sequence;
@@ -3664,6 +3785,7 @@ static void dev_group_process_pending(void)
 void demo_dev_chat_task(void *argv)
 {
     liot_task_t room_action_handle = NULL;
+    liot_task_t uplink_handle = NULL;
     bool mqtt_registered = false;
     bool transport_was_ready = false;
     bool transport_ready;
@@ -3692,6 +3814,11 @@ void demo_dev_chat_task(void *argv)
     {
         goto init_failed;
     }
+    if (liot_rtos_queue_create(&s_uplink_queue, sizeof(dev_uplink_job_t),
+                               DEV_UPLINK_QUEUE_DEPTH) != LIOT_OSI_SUCCESS)
+    {
+        goto init_failed;
+    }
     if (liot_rtos_queue_create(&s_room_action_queue,
                                sizeof(dev_room_action_job_t),
                                DEV_ROOM_ACTION_DEPTH) != LIOT_OSI_SUCCESS)
@@ -3704,6 +3831,13 @@ void demo_dev_chat_task(void *argv)
                               "dev_call_http",
                               dev_room_action_task,
                               NULL) != LIOT_OSI_SUCCESS)
+    {
+        goto init_failed;
+    }
+    /* Keep capture runnable ahead of TX; its DMA wait gives TX time to run. */
+    if (liot_rtos_task_create(&uplink_handle, DEV_UPLINK_TASK_STACK,
+                              LIOT_APP_TASK_PRIORITY - 1U, "dev_call_tx",
+                              dev_uplink_task, NULL) != LIOT_OSI_SUCCESS)
     {
         goto init_failed;
     }
@@ -3840,6 +3974,15 @@ init_failed:
     if (room_action_handle != NULL)
     {
         (void)liot_rtos_task_delete(room_action_handle);
+    }
+    if (uplink_handle != NULL)
+    {
+        (void)liot_rtos_task_delete(uplink_handle);
+    }
+    if (s_uplink_queue != NULL)
+    {
+        (void)liot_rtos_queue_delete(s_uplink_queue);
+        s_uplink_queue = NULL;
     }
     if (s_room_action_queue != NULL)
     {

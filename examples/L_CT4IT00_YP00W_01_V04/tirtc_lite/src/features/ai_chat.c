@@ -187,7 +187,7 @@ static struct
 static volatile bool s_prepare_requested;
 static volatile bool s_levels_dirty = true;
 static volatile uint8_t s_speaker_level = 8U;
-static volatile uint8_t s_mic_level = 10U;
+static volatile uint8_t s_mic_level = DEMO_AI_AUDIO_DEFAULT_MIC_LEVEL;
 static volatile uint32_t s_rx_dropped;
 static volatile uint32_t s_tx_dropped;
 static volatile uint32_t s_request_started_ms;

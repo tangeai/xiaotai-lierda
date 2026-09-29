@@ -18,6 +18,7 @@
 
 #include "liot_log.h"
 #include "liot_os.h"
+#include "audio_device.h"
 #include "ssd1306_display.h"
 #ifdef HWDEMO_NET_TIME_EN
 #include "network_manager.h"
@@ -128,7 +129,7 @@ static ui_startup_state_e s_startup_state = UI_STARTUP_WAIT_NETWORK;
 static uint8_t s_main_selected;
 static uint8_t s_settings_selected;
 static uint8_t s_speaker_level = 8U;
-static uint8_t s_mic_level = 10U;
+static uint8_t s_mic_level = DEMO_AI_AUDIO_DEFAULT_MIC_LEVEL;
 static bool s_dirty = true;
 /* HOME entry is an intent, not an audio owner. Keep taking keys while the
  * previous worker tears down (unresolved DEV calls may retain a 10-second guard).

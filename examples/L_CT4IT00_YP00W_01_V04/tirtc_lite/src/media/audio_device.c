@@ -39,6 +39,72 @@ static const uint8_t s_mic_volume_by_level[DEMO_AI_AUDIO_LEVEL_MAX] = {
 static __attribute__((aligned(16))) int16_t
     s_record_frame[DEMO_AI_AUDIO_FRAME_SAMPLES];
 
+/* Work around isolated full-scale capture impulses observed in SDK Record
+ * blocks. This does not repair the underlying capture fault or analog
+ * clipping. Limit it to DEV/GROUP uplink, before their 16k-to-8k conversion.
+ * Four quiet, consistent ORIGINAL neighbours are required: checking just
+ * the adjacent pair would also remove legitimate 4 kHz waveform peaks.
+ * The independently captured blocks must never borrow previous-frame data. */
+static uint32_t lite_audio_guard_impulses(demo_ai_audio_owner_e owner,
+                                        const int16_t *raw, int16_t *output)
+{
+    uint32_t cleaned = 0U;
+    const uint32_t count = DEMO_AI_AUDIO_FRAME_SAMPLES;
+
+    if (owner != DEMO_AI_AUDIO_OWNER_DEVICE
+#ifdef HWDEMO_GROUP_ROOM_EN
+        && owner != DEMO_AI_AUDIO_OWNER_GROUP_ROOM
+#endif
+        ) {
+        return 0U;
+    }
+    if (count < 5U) {
+        return 0U;
+    }
+    for (uint32_t i = 0U; i < count; ++i) {
+        uint32_t first, neighbours = 0U;
+        int16_t local[4];
+        int32_t value = raw[i];
+        bool quiet = true;
+
+        if (value > -28000 && value < 28000) {
+            continue;
+        }
+        first = i > 2U ? i - 2U : 0U;
+        if (first > count - 5U) first = count - 5U;
+        for (uint32_t j = first; j < first + 5U; ++j) {
+            if (j == i) continue;
+            if (raw[j] < -2000 || raw[j] > 2000) {
+                quiet = false;
+                break;
+            }
+            local[neighbours++] = raw[j];
+        }
+        if (!quiet) continue;
+
+        if (i > 0U && i + 1U < count) {
+            int32_t difference = (int32_t)raw[i - 1U] - raw[i + 1U];
+            if (difference < -1000 || difference > 1000) continue;
+            output[i] = (int16_t)(((int32_t)raw[i - 1U] + raw[i + 1U]) / 2);
+        } else {
+            /* Median of the four local samples at either block edge. */
+            for (uint32_t j = 1U; j < 4U; ++j) {
+                uint32_t k = j;
+                int16_t item = local[j];
+                while (k > 0U && local[k - 1U] > item) {
+                    local[k] = local[k - 1U];
+                    --k;
+                }
+                local[k] = item;
+            }
+            if ((int32_t)local[3] - local[0] > 1000) continue;
+            output[i] = (int16_t)(((int32_t)local[1] + local[2]) / 2);
+        }
+        ++cleaned;
+    }
+    return cleaned;
+}
+
 /* Liot_AudioInit keeps the configuration pointer for later stop/deinit and
  * callback operations.  It must therefore outlive demo_ai_audio_init(). */
 static Liot_AudHwConfig_t s_audio_config;
@@ -60,6 +126,7 @@ static bool demo_ai_audio_lease_valid_locked(
            lease->generation != 0U &&
            lease->generation == s_audio_generation;
 }
+
 
 bool demo_ai_audio_lease_is_valid(const demo_ai_audio_lease_t *lease)
 {
@@ -379,6 +446,7 @@ int demo_ai_audio_record_20ms(
     }
 
     memcpy(pcm, s_record_frame, DEMO_AI_AUDIO_FRAME_BYTES);
+    (void)lite_audio_guard_impulses(lease->owner, s_record_frame, pcm);
     return 0;
 }
 
