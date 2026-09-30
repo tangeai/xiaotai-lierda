@@ -166,6 +166,39 @@
         "reencoded_for_attachment_limit": true,
         "note": "Same duration, display dimensions, frame rate and original AAC audio; repository download remains unchanged."
       }
+    },
+    {
+      "title": "多人对讲：创建、加入与房间讲话",
+      "file": "assets/videos/pro/group-intercom.mp4",
+      "poster": "assets/videos/pro/posters/group-intercom.jpg",
+      "added_on": "2026-09-30",
+      "source_filename": "多人对讲.mp4",
+      "source_bytes": 18013763,
+      "source_sha256": "1f10c08fe73eec2c359978a9ed677db2394483e23bef8933c04ebfff6a344600",
+      "bytes": 18013763,
+      "sha256": "1f10c08fe73eec2c359978a9ed677db2394483e23bef8933c04ebfff6a344600",
+      "duration_seconds": 113.6,
+      "width": 540,
+      "height": 960,
+      "video_codec": "h264",
+      "pixel_format": "yuv420p",
+      "recording_fps": 30,
+      "audio_codec": "aac",
+      "audio": "Original source file, copied byte-for-byte",
+      "poster_at_seconds": 105.0,
+      "conversion": {
+        "mode": "none",
+        "clip": "Full duration, no cuts, no crop; original MP4 retained"
+      },
+      "github_playback": {
+        "url": "https://github.com/user-attachments/assets/c5d0ade8-9627-4e2a-9795-d41af390b7c8",
+        "bytes": 8753141,
+        "sha256": "73aacda931604d9936d84d6a827dd6c61daeaa7721cf18e9ed0efd391a5aa7c2",
+        "reencoded_for_attachment_limit": true,
+        "note": "540x960, 30 fps, full duration and original AAC packets retained; only video re-encoded, MP4 faststart. Source firmware version not established; footage includes reconnect states."
+      }
     }
-  ]
+  ],
+  "updated_on": "2026-09-30",
+  "conversion_scope": "The top-level conversion describes the original six videos; group-intercom.mp4 is an unchanged source copy with its own conversion entry."
 }

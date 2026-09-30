@@ -125,6 +125,7 @@ def main() -> None:
         package_bytes = package.read_bytes()
         report = {
             "product": "pro", "purpose": "factory initialization",
+            "app_version": match.group(1),
             "external_flash_files_overwritten": True,
             "package": "latest.binpkg", "size": len(package_bytes), "sha256": digest(package_bytes),
             "normal_firmware_payloads_unchanged": True, "images": images,

@@ -12,7 +12,7 @@
 
 ### pro · 触屏音视频终端
 
-320×240 触屏与摄像头，支持 AI 对话和字幕、AI 呼叫联系人、微信与设备音视频电话、摄像头实时查看和远程对讲。支持音量与音频开关记忆；多人对讲目前仅保留界面，尚未接入后端。
+320×240 触屏与摄像头，支持 AI 对话和字幕、AI 呼叫联系人、微信与设备音视频电话、摄像头实时查看和远程对讲。支持扬声器音量、麦克风增益与音频开关记忆；支持房间创建/加入、成员列表和按住讲话的多人对讲。
 
 **[进入 pro：看演示、准备硬件、逐步上手 →](examples/L_CT4IT00_YP00W_01_V04/tirtc_pro/README.md)**
 
@@ -33,6 +33,8 @@ cd xiaotai-lierda
 | pro | `.\build_tirtc.bat pro` | [下载 pro 最新固件](firmware/pro/latest.binpkg) |
 
 pro 最新固件为出厂初始化包，包含固件、外置 Flash 字库和背景，**一次烧录即可；会覆盖外置 Flash 文件，请先备份需要保留的文件。** 板型要求、烧录步骤和验证范围见 [pro 入门指南](examples/L_CT4IT00_YP00W_01_V04/tirtc_pro/docs/当前设备操作.md#build-flash)。
+
+Pro 当前发布名统一为 `pro_release`，最新下载包包含本次多人对讲与音频修复；后续用 Git 提交和固件 SHA-256 区分构建。操作见 [pro 多人对讲](examples/L_CT4IT00_YP00W_01_V04/tirtc_pro/docs/多人对讲.md)，包内容和验证范围见 [pro 发布记录](release/tirtc_pro/README.md)。
 
 ## 从使用到开发
 

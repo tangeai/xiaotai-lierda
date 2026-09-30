@@ -1,6 +1,6 @@
 # TiRTC 运行时与单路会话管理
 
-本目录由固定上游 managed runtime 适配而来，来源/许可见 [SOURCE_PROVENANCE.md](SOURCE_PROVENANCE.md)。当前加载应用 `sdk` 目录的 TiRTC 2.5.0，使用本产品 `board_compat` 的配套底包；音视频能力由上层 AI/calls/LIVE 复用，不是早期只启动 SDK 的占位模块。
+本目录由固定上游 managed runtime 适配而来，来源/许可见 [SOURCE_PROVENANCE.md](SOURCE_PROVENANCE.md)。当前加载应用 `sdk` 目录的 TiRTC 2.5.0，使用本产品 `board_compat` 的配套底包；音视频能力由上层 AI/calls/LIVE/Room 复用，不是早期只启动 SDK 的占位模块。
 
 完整接入流程见 [TiRTC 接口篇](../docs/TiRTC接口调用与模块流程.md)，下面只保留生命周期与内存约束。
 
@@ -20,6 +20,9 @@
 | 2 | 微信 |
 | 3 | 设备通话 |
 | 4 | LIVE 实时查看 |
+| 5 | GROUP_ROOM 多人对讲（启用 `HWDEMO_GROUP_ROOM_EN` 时） |
+
+Room 的 WHIP、订阅流 1、入房确认和电话抢占交接见 [多人对讲流程](../docs/多人对讲.md#connection-flow)。加入业务房间不等于已经获取本层媒体使用权。
 
 当前最大媒体连接数为 1。相同数值句柄被后来连接复用，也必须通过 generation 区分。不要绕过本层从 UI 或业务直接调用全局 Stop/Uninit。
 

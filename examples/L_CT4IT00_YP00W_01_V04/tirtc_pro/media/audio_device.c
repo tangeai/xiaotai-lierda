@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  *
  * Derived from xiaotai-lierda f159bfd3e82cc514dfe6b5b2269b2c96fa8e8f93.
- * V04 ES8311: I2C0/I2S0, PA GPIO11, 8 kHz mono-right PCM16.
+ * V04 ES8311: I2C0/I2S0, PA GPIO11, 16 kHz mono-right PCM16.
  * The display port owns the shared 3.3V rail. No power/reset/deinit here.
  */
 #include "audio_device.h"
@@ -18,22 +18,89 @@
  * as an explicit mute in this port: ADC attenuation alone is not a mute,
  * so capture is also zeroed and AI suppresses its upload at mic level 0. */
 static const uint8_t s_speaker_volume[] = {0, 30, 33, 37, 40, 43, 47, 50, 53, 57, 60};
+static const uint8_t s_dev_codec_volume[] = {0, 38, 41, 46, 50, 53, 57, 61, 64, 69, 72};
 static const uint8_t s_mic_gain[] = {0, 7, 7, 8, 8, 8, 9, 9, 9, 10, 10};
 static const uint8_t s_mic_volume[] = {0, 160, 168, 176, 183, 191, 199, 207, 214, 222, 230};
-/* One 40 ms SDK transaction reduces RX stop/start gaps. The public API still
- * returns ordered 20 ms frames; only the record/control owner touches cache. */
-#define CAPTURE_BATCH_FRAMES 2U
+/* Match Lite: one 20 ms SDK transaction per public frame. */
+#define CAPTURE_BATCH_FRAMES 1U
 #define CAPTURE_BATCH_SAMPLES (DEMO_AI_AUDIO_FRAME_SAMPLES * CAPTURE_BATCH_FRAMES)
 static __attribute__((aligned(16))) int16_t s_record_frame[CAPTURE_BATCH_SAMPLES];
-/* Fixed F6D_A copies this single <=5120-byte item before returning. OP_PLAY
- * serializes its construction. No heap allocation or shared-rail toggling. */
+/* Work around isolated full-scale capture impulses observed in SDK Record
+ * blocks. This does not repair the underlying capture fault or analog
+ * clipping. Limit it to DEV/GROUP uplink, before their 16k-to-8k conversion.
+ * Four quiet, consistent ORIGINAL neighbours are required: checking just
+ * the adjacent pair would also remove legitimate 4 kHz waveform peaks.
+ * The independently captured blocks must never borrow previous-frame data. */
+static uint32_t audio_guard_impulses(demo_ai_audio_owner_e owner,
+                                        const int16_t *raw, int16_t *output)
+{
+    uint32_t cleaned = 0U;
+    const uint32_t count = DEMO_AI_AUDIO_FRAME_SAMPLES;
+
+    if (owner != DEMO_AI_AUDIO_OWNER_DEVICE
+#ifdef HWDEMO_GROUP_ROOM_EN
+        && owner != DEMO_AI_AUDIO_OWNER_GROUP_ROOM
+#endif
+        ) {
+        return 0U;
+    }
+    if (count < 5U) {
+        return 0U;
+    }
+    for (uint32_t i = 0U; i < count; ++i) {
+        uint32_t first, neighbours = 0U;
+        int16_t local[4];
+        int32_t value = raw[i];
+        bool quiet = true;
+
+        if (value > -28000 && value < 28000) {
+            continue;
+        }
+        first = i > 2U ? i - 2U : 0U;
+        if (first > count - 5U) first = count - 5U;
+        for (uint32_t j = first; j < first + 5U; ++j) {
+            if (j == i) continue;
+            if (raw[j] < -2000 || raw[j] > 2000) {
+                quiet = false;
+                break;
+            }
+            local[neighbours++] = raw[j];
+        }
+        if (!quiet) continue;
+
+        if (i > 0U && i + 1U < count) {
+            int32_t difference = (int32_t)raw[i - 1U] - raw[i + 1U];
+            if (difference < -1000 || difference > 1000) continue;
+            output[i] = (int16_t)(((int32_t)raw[i - 1U] + raw[i + 1U]) / 2);
+        } else {
+            /* Median of the four local samples at either block edge. */
+            for (uint32_t j = 1U; j < 4U; ++j) {
+                uint32_t k = j;
+                int16_t item = local[j];
+                while (k > 0U && local[k - 1U] > item) {
+                    local[k] = local[k - 1U];
+                    --k;
+                }
+                local[k] = item;
+            }
+            if ((int32_t)local[3] - local[0] > 1000) continue;
+            output[i] = (int16_t)(((int32_t)local[1] + local[2]) / 2);
+        }
+        ++cleaned;
+    }
+    return cleaned;
+}
+
+/* Keep every SDK submission within one <=5120-byte queue item: a larger
+ * call can enqueue a prefix before failing, hiding accepted silence from
+ * WARM_PARTIAL accounting. OP_PLAY serializes this copied scratch buffer. */
 #define WARMUP_SAMPLES (DEMO_AI_AUDIO_WARMUP_MS * (DEMO_AI_AUDIO_SAMPLE_RATE / 1000U))
-#define SESSION_CHUNK_MS 300U
+#define SESSION_CHUNK_MS 150U
 #define SESSION_CHUNK_SAMPLES (SESSION_CHUNK_MS * (DEMO_AI_AUDIO_SAMPLE_RATE / 1000U))
 static __attribute__((aligned(16))) int16_t s_warm_frame[SESSION_CHUNK_SAMPLES];
 static bool s_session_warm_pending;
-/* Early warmup is valid only for the speaker level prepared before connect.
- * A changed target before the first speech falls back to the proven preamble. */
+/* GROUP warms the DAC clocks even at L0; a codec-volume write does not restart
+ * those clocks. Other owners retain their existing level-specific preamble. */
 static bool s_session_prewarmed;
 static uint32_t s_record_offset, s_record_cached_frames;
 /* Captured samples omitted by controls/suppression still occupy media time.
@@ -159,6 +226,15 @@ int demo_ai_audio_release(demo_ai_audio_lease_t *lease)
 static uint8_t clamp(uint8_t level)
 {
     return level > DEMO_AI_AUDIO_LEVEL_MAX ? DEMO_AI_AUDIO_LEVEL_MAX : level;
+}
+
+static bool group_owner(void)
+{
+#ifdef HWDEMO_GROUP_ROOM_EN
+    return s_audio_owner == DEMO_AI_AUDIO_OWNER_GROUP_ROOM;
+#else
+    return false;
+#endif
 }
 
 static void audio_callback(Liot_AudEvent_e event, void *context)
@@ -291,14 +367,22 @@ bool demo_ai_audio_is_ready(const demo_ai_audio_lease_t *lease)
 static int apply_levels(void)
 {
     Liot_AudErr_e sw, codec, mic;
+    uint8_t software_volume = s_speaker_volume[s_speaker_level];
+    uint8_t codec_volume = s_speaker_volume[s_speaker_level];
+    if (s_audio_owner == DEMO_AI_AUDIO_OWNER_DEVICE || group_owner()) {
+        software_volume = 10U;
+        codec_volume = s_dev_codec_volume[s_speaker_level];
+    }
     if (!s_audio_ready) return -1;
     if (!s_levels_dirty) return 0;
-    sw = Liot_AudioSetVolume(s_speaker_volume[s_speaker_level]);
-    codec = Liot_AudioSetCodecVolume(s_speaker_volume[s_speaker_level]);
+    /* G.711 already spans PCM16: preserve its waveform at software unity.
+     * Apply the saved speaker level at the codec, as in DEV playback. */
+    sw = Liot_AudioSetVolume(software_volume);
+    codec = Liot_AudioSetCodecVolume(codec_volume);
     mic = Liot_AudioSetMicVolume(s_mic_gain[s_mic_level], s_mic_volume[s_mic_level]);
     /* Only a real commit reaches here; unchanged settings never flood logs. */
-    liot_trace("[AI-AUDIO] levels speaker=%u sw/codec=%u mic=%u gain=%u adc=%u ret=%d/%d/%d\r\n",
-               s_speaker_level, s_speaker_volume[s_speaker_level], s_mic_level,
+    liot_trace("[AI-AUDIO] levels speaker=%u sw=%u codec=%u mic=%u gain=%u adc=%u ret=%d/%d/%d\r\n",
+               s_speaker_level, software_volume, codec_volume, s_mic_level,
                s_mic_gain[s_mic_level], s_mic_volume[s_mic_level], sw, codec, mic);
     if (sw || codec || mic) {
         return -20;
@@ -321,7 +405,7 @@ int demo_ai_audio_set_levels(const demo_ai_audio_lease_t *lease, uint8_t speaker
     int result = enter(lease, OP_CONTROL, false);
     if (result) return result;
     speaker = clamp(speaker); mic = clamp(mic);
-    if (s_session_prewarmed && speaker != s_speaker_level) {
+    if (s_session_prewarmed && !group_owner() && speaker != s_speaker_level) {
         s_session_warm_pending = true;
         s_session_prewarmed = false;
     }
@@ -372,7 +456,7 @@ static int init_audio(void)
         s_audio_config.role = L_AUD_ROLE_SLAVE;
         s_audio_config.mode = L_AUD_MODE_I2S;
         s_audio_config.frameSize = L_AUD_FRAMESIZE_16_16;
-        s_audio_config.samples = L_AUD_08K_SAMPLES;
+        s_audio_config.samples = L_AUD_16K_SAMPLES;
         s_audio_config.callback = audio_callback;
         s_audio_config.use3A = 0; /* F6D_A's 3A entry points return NO_SUPPORT. */
         result = Liot_AudioInit(&s_audio_config);
@@ -381,7 +465,7 @@ static int init_audio(void)
             return -result - 1;
         }
         s_audio_ready = true;
-        liot_trace("[AI-AUDIO] ES8311 I2C0/I2S0 PA11 8000Hz/16bit/mono no-AEC\r\n");
+        liot_trace("[AI-AUDIO] ES8311 I2C0/I2S0 PA11 16000Hz/16bit/mono-right no-AEC\r\n");
     }
     s_levels_dirty = true;
     result = apply_levels();
@@ -417,7 +501,7 @@ int demo_ai_audio_prepare_session(const demo_ai_audio_lease_t *lease, uint8_t sp
     if (result) return result;
     discard_capture_buffer();
     s_discarded_capture_ms = 0;
-    if (s_session_prewarmed && clamp(speaker) != s_speaker_level) {
+    if (s_session_prewarmed && !group_owner() && clamp(speaker) != s_speaker_level) {
         s_session_warm_pending = true;
         s_session_prewarmed = false;
     }
@@ -458,7 +542,11 @@ int demo_ai_audio_record_20ms(const demo_ai_audio_lease_t *lease,
         s_record_cached_frames = CAPTURE_BATCH_FRAMES;
     }
     if (!s_mic_level) memset(pcm, 0, DEMO_AI_AUDIO_FRAME_BYTES);
-    else memcpy(pcm, s_record_frame + s_record_offset, DEMO_AI_AUDIO_FRAME_BYTES);
+    else {
+        const int16_t *raw = s_record_frame + s_record_offset;
+        memcpy(pcm, raw, DEMO_AI_AUDIO_FRAME_BYTES);
+        (void)audio_guard_impulses(lease->owner, raw, pcm);
+    }
     s_record_offset += DEMO_AI_AUDIO_FRAME_SAMPLES;
     --s_record_cached_frames;
     s_last_record_error = 0;
@@ -508,7 +596,12 @@ int demo_ai_audio_prewarm_session(const demo_ai_audio_lease_t *lease, uint32_t *
     *queued_ms = 0;
     result = enter(lease, OP_PLAY, true);
     if (result) return result;
-    if (!s_speaker_level || !s_session_warm_pending) { leave(OP_PLAY); return 0; }
+    /* Room must finish its cold preamble before join/receive, including L0.
+     * Otherwise unmuting could insert 1200ms ahead of a 500ms RX queue. */
+    if ((!s_speaker_level && !group_owner()) || !s_session_warm_pending) {
+        leave(OP_PLAY);
+        return 0;
+    }
     liot_rtos_enter_critical();
     s_play_done = false;
     liot_rtos_exit_critical();
@@ -539,7 +632,7 @@ static int queue_playback(const demo_ai_audio_lease_t *lease, const int16_t *pcm
      * explicit silence, so scheduling cannot split preheat from its speech. */
     /* F6D_A Liot_I2sSend truncates bytes to a multiple of four. Reject odd
      * PCM16 counts here instead of silently losing the final speech sample;
-     * the AI ring coalesces odd network tails and pads a final lone sample. */
+     * 8 kHz network samples expand to aligned 16 kHz PCM sample pairs. */
     if (!pcm || !samples || (samples & 1U) || samples > DEMO_AI_AUDIO_FRAME_SAMPLES) return -1;
     result = enter(lease, OP_PLAY, true);
     if (result) return result;
@@ -548,11 +641,10 @@ static int queue_playback(const demo_ai_audio_lease_t *lease, const int16_t *pcm
     s_play_done = false;
     liot_rtos_exit_critical();
     if (warm && s_session_warm_pending) {
-        /* The vendor Start leaves DAC register 0x37=0x48: at 8 kHz it
-         * takes 4 ms/0.25 dB. Our maximum codec level 60 maps to code153,
-         * so the worst 0->153 restoration needs 1224 ms of DAC clocks.
-         * Only the first reply gets 1280 ms of valid silent I2S samples.
-         * Every 4800-byte item stays below the SDK's 5120-byte item limit. */
+        /* Retain the configured 1280 ms session settling time. The first
+         * 1200 ms uses eight 150 ms / 4800-byte SDK items; the final
+         * 80 ms stays attached to the first speech frame. Each call
+         * fits one SDK item so a failure cannot hide a queued prefix. */
         result = queue_session_silence(&silent_queued);
         if (result) goto play_result;
         extra += silent_queued;

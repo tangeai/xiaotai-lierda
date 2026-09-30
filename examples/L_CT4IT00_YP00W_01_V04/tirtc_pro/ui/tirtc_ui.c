@@ -30,6 +30,8 @@ static tirtc_ui_ai_t pending_ai;
 static tirtc_ui_contacts_t pending_contacts;
 static tirtc_ui_call_t pending_call;
 static tirtc_ui_remote_t pending_remote;
+static tirtc_ui_room_t pending_room;
+static bool room_live;
 static bool remote_live;
 static uint32_t remote_end_pending_until, remote_end_generation, home_phone_pressed_generation;
 static bool home_phone_pressed_remote;
@@ -78,6 +80,7 @@ static lv_img_dsc_t preview_descriptor;
 static uint32_t toast_until, ai_pending_until, phone_pending_until, last_interaction, call_tick;
 static bool asleep, wake_requested;
 static bool contacts_changed;
+static bool return_to_room_after_call;
 static int last_signal_bars = -1, last_signal_ready = -1, last_caption_role = -1;
 static char caption_cache[TIRTC_UI_CAPTION_MAX + 8];
 static const char *const page_names[TIRTC_PAGE_COUNT] = {
@@ -225,6 +228,25 @@ int tirtc_ui_publish_remote(const tirtc_ui_remote_t *s)
     pending_remote.peer_name[sizeof(pending_remote.peer_name) - 1U] = 0;
     pending_remote.message[sizeof(pending_remote.message) - 1U] = 0;
     remote_live = true; tirtc_ui_platform_unlock(); return 0;
+}
+int tirtc_ui_publish_room(const tirtc_ui_room_t *s)
+{
+    if (!s || s->member_count > TIRTC_UI_ROOM_MEMBER_MAX) return -2;
+    tirtc_ui_platform_lock(); pending_room = *s;
+    pending_room.code[sizeof(pending_room.code) - 1U] = 0;
+    pending_room.message[sizeof(pending_room.message) - 1U] = 0;
+    for (unsigned i = 0; i < TIRTC_UI_ROOM_MEMBER_MAX; ++i) {
+        pending_room.members[i].id[63] = 0;
+        pending_room.members[i].name[63] = 0;
+    }
+    room_live = true; tirtc_ui_platform_unlock(); return 0;
+}
+static bool apply_room(void)
+{
+    if (!room_live) return false;
+    bool changed = memcmp(&ui_state.room, &pending_room, sizeof(pending_room)) != 0;
+    ui_state.room = pending_room;
+    return changed;
 }
 bool tirtc_ui_get_rendered_page(tirtc_ui_page_t *out)
 {
@@ -1177,10 +1199,14 @@ void tirtc_ui_process(void)
     tirtc_ui_platform_lock();
     /* Safety releases must not wait for a held finger to release. Widget and
      * ordinary state replacement remain deferred until the pointer is idle. */
-    if (busy && state_dirty && ui_page == TIRTC_PAGE_ROOM &&
+    if (busy && !room_live && state_dirty && ui_page == TIRTC_PAGE_ROOM &&
         (!pending_state.room.known || !pending_state.room.connected || !pending_state.room.assigned || pending_state.room.busy ||
-         !pending_state.mic_enabled || pending_state.room.generation != ui_state.room.generation ||
+         !pending_state.mic_enabled || pending_state.mic_gain == 0 || pending_state.room.generation != ui_state.room.generation ||
          strcmp(pending_state.room.code, ui_state.room.code))) cancel_ptt = true;
+    if (busy && room_live && ui_page == TIRTC_PAGE_ROOM &&
+        (!pending_room.known || !pending_room.assigned || !pending_room.connected || pending_room.busy ||
+         (audio_settings_live && (!settings_mic_enabled || settings_mic_gain == 0)) || pending_room.generation != ui_state.room.generation ||
+         strcmp(pending_room.code, ui_state.room.code))) cancel_ptt = true;
     if (!busy && state_dirty) {
         call_changed = ui_state.call_state != pending_state.call_state;
         call_type_changed = ui_state.call_type != pending_state.call_type;
@@ -1254,6 +1280,9 @@ void tirtc_ui_process(void)
     /* Privacy status and generation must be current even under a held touch.
      * Remote widget rebuilds/refreshes still wait for pointer release. */
     if (apply_remote()) changed = true;
+    /* Replace only room data while held, never widgets: disconnect and room
+     * changes must revoke PTT before another touch heartbeat can be accepted. */
+    if (apply_room()) changed = true;
     /* Pixel replacement does not delete objects. Keep a stable video call
      * live under a held touch, while deferring clear/page/session changes
      * until LVGL has finished dispatching that pointer interaction. */
@@ -1293,9 +1322,14 @@ void tirtc_ui_process(void)
     /* Remote VIEW stays on HOME/CLOCK. A previous QR overlay must not hide
      * the privacy status; defer deletion until the pointer is released. */
     if (!busy && remote_session_active() && qr_layer) close_qr_cb(NULL);
-    if (call_changed && ui_state.call_state >= TIRTC_CALL_OUTGOING && ui_state.call_state <= TIRTC_CALL_CONNECTED) page = TIRTC_PAGE_CALL;
+    if (call_changed && ui_state.call_state >= TIRTC_CALL_OUTGOING && ui_state.call_state <= TIRTC_CALL_CONNECTED) {
+        if (ui_page != TIRTC_PAGE_CALL)
+            return_to_room_after_call = ui_page == TIRTC_PAGE_ROOM || ui_page == TIRTC_PAGE_ROOM_FORM;
+        page = TIRTC_PAGE_CALL;
+    }
     if (call_changed && (ui_state.call_state == TIRTC_CALL_ENDED || ui_state.call_state == TIRTC_CALL_BUSY || ui_state.call_state == TIRTC_CALL_ERROR) && ui_page == TIRTC_PAGE_CALL) {
-        page = TIRTC_PAGE_CALL_RESULT;
+        page = return_to_room_after_call ? TIRTC_PAGE_ROOM : TIRTC_PAGE_CALL_RESULT;
+        return_to_room_after_call = false;
     }
     if (!busy) page = setup_target(page);
     if (page >= 0 && page != (int)ui_page && !busy && ai_live &&
@@ -1311,6 +1345,7 @@ void tirtc_ui_process(void)
         ui_pages_navigation(previous, (tirtc_ui_page_t)page);
         ui_page = (tirtc_ui_page_t)page;
         if (previous == TIRTC_PAGE_CALL && ui_page != TIRTC_PAGE_CALL) {
+            return_to_room_after_call = false;
             frame_w=frame_h=0;
         }
         render_page(); ui_note_interaction();

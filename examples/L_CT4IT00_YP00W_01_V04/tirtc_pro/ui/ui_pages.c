@@ -13,7 +13,7 @@
 /* Object references are cleared before the core deletes the previous screen.
  * Drafts and navigation/session bookkeeping deliberately live separately. */
 static struct {
-    lv_obj_t *volume, *down, *up, *speaker, *microphone, *sleep, *ack;
+    lv_obj_t *volume, *down, *up, *speaker, *microphone, *mic_gain, *sleep, *ack;
     lv_obj_t *network, *refresh, *reconnect;
     lv_obj_t *diagnostics, *diagnostic_panel, *tabs[3];
     lv_obj_t *code, *status, *count, *ptt, *previous, *next, *leave, *confirm;
@@ -103,6 +103,10 @@ static void settings_event(lv_event_t *event)
     if (type == TIRTC_ACTION_SET_SPEAKER_VOLUME) {
         value = (int32_t)ui_state.volume + (target == view.up ? 1 : -1);
         if (value < 0 || value > 10) return;
+    } else if (type == TIRTC_ACTION_SET_MIC_GAIN) {
+        uint16_t selected = lv_dropdown_get_selected(target);
+        if (selected > 10) return;
+        value = selected;
     } else if (type == TIRTC_ACTION_SET_SLEEP_MINUTES) {
         uint16_t selected = lv_dropdown_get_selected(target);
         if (selected >= sizeof(minutes) / sizeof(minutes[0])) return;
@@ -117,6 +121,7 @@ static void settings_event(lv_event_t *event)
         case TIRTC_ACTION_SET_SPEAKER_VOLUME: ui_state.volume = (uint8_t)value; break;
         case TIRTC_ACTION_SET_SPEAKER_ENABLED: ui_state.speaker_enabled = value != 0; break;
         case TIRTC_ACTION_SET_MIC_ENABLED: ui_state.mic_enabled = value != 0; break;
+        case TIRTC_ACTION_SET_MIC_GAIN: ui_state.mic_gain = (uint8_t)value; break;
         case TIRTC_ACTION_SET_SLEEP_MINUTES: ui_state.sleep_minutes = (uint16_t)value; break;
         case TIRTC_ACTION_SET_ACK_VOICE: ui_state.acknowledgement_male = value != 0; break;
         default: break;
@@ -198,6 +203,7 @@ static void settings_refresh(void)
     default: break;
     }
     /* A background network snapshot must not move the open dropdown's cursor. */
+    if (!lv_dropdown_is_open(view.mic_gain)) lv_dropdown_set_selected(view.mic_gain, ui_state.mic_gain);
     if (!lv_dropdown_is_open(view.sleep)) lv_dropdown_set_selected(view.sleep, selection);
     if (!lv_dropdown_is_open(view.ack)) lv_dropdown_set_selected(view.ack, ui_state.acknowledgement_male ? 1 : 0);
 }
@@ -212,8 +218,9 @@ static void settings_render(void)
     lv_obj_set_style_text_align(view.volume, LV_TEXT_ALIGN_CENTER, 0);
     view.speaker = settings_switch(settings_row(panel, "扬声器", 52), TIRTC_ACTION_SET_SPEAKER_ENABLED);
     view.microphone = settings_switch(settings_row(panel, "麦克风", 104), TIRTC_ACTION_SET_MIC_ENABLED);
-    view.sleep = settings_choice(settings_row(panel, "自动息屏", 156), "1 分钟\n5 分钟\n10 分钟\n30 分钟\n永不", TIRTC_ACTION_SET_SLEEP_MINUTES);
-    view.ack = settings_choice(settings_row(panel, "回应声", 208), "女声\n男声", TIRTC_ACTION_SET_ACK_VOICE);
+    view.mic_gain = settings_choice(settings_row(panel, "麦克风音量", 156), "L0 静音\nL1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10", TIRTC_ACTION_SET_MIC_GAIN);
+    view.sleep = settings_choice(settings_row(panel, "自动息屏", 208), "1 分钟\n5 分钟\n10 分钟\n30 分钟\n永不", TIRTC_ACTION_SET_SLEEP_MINUTES);
+    view.ack = settings_choice(settings_row(panel, "回应声", 260), "女声\n男声", TIRTC_ACTION_SET_ACK_VOICE);
     settings_refresh();
 }
 
@@ -484,7 +491,7 @@ static bool room_can_talk(void)
 {
     return ui_page == TIRTC_PAGE_ROOM && local.opened && ui_state.room.known &&
         ui_state.room.assigned && ui_state.room.connected && !ui_state.room.busy &&
-        ui_state.room.generation != 0 && ui_state.mic_enabled && !view.confirm &&
+        ui_state.room.generation != 0 && ui_state.mic_enabled && ui_state.mic_gain != 0 && !view.confirm &&
         !local.ptt_cancelled_until_release;
 }
 
@@ -494,7 +501,7 @@ static void ptt_refresh(void)
     bool ready = room_can_talk();
     ui_enabled(view.ptt, ready);
     button_text(view.ptt, local.held ? "松开结束讲话" : !ui_state.mic_enabled ?
-        "麦克风已关闭" : ready ? "按下讲话" : "等待房间连接");
+        "麦克风已关闭" : !ui_state.mic_gain ? "麦克风静音（L0）" : ready ? "按下讲话" : "等待房间连接");
     lv_obj_set_style_bg_color(view.ptt, lv_color_hex(local.held ? UI_ACCEPT : UI_BUTTON), 0);
     lv_obj_set_style_bg_color(view.ptt, lv_color_hex(local.held ? UI_ACCEPT : 0x465057), LV_STATE_PRESSED);
 }
@@ -837,7 +844,7 @@ static void room_refresh(uint32_t now)
     text_if_changed(view.code, text);
     /* The adapter supplies a visible member list, not a separate total online
      * counter. Do not label that count as an independently measured total. */
-    snprintf(text, sizeof(text), "%u 位成员  %u/%u", count, local.offset / ROOM_PAGE_SIZE + 1, pages ? pages : 1);
+    snprintf(text, sizeof(text), ui_state.room.members_limited ? "前 %u 位成员  %u/%u" : "%u 位成员  %u/%u", count, local.offset / ROOM_PAGE_SIZE + 1, pages ? pages : 1);
     text_if_changed(view.count, text);
     ui_enabled(view.previous, local.offset > 0);
     ui_enabled(view.next, local.offset + ROOM_PAGE_SIZE < count);

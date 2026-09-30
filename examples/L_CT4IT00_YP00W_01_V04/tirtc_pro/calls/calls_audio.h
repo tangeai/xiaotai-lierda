@@ -13,7 +13,8 @@ void calls_audio_set_config(uint8_t volume, uint8_t mic, bool speaker, bool micr
 int calls_audio_set_session_controls(demo_tirtc_owner_e owner, uint32_t generation,
                                      bool speaker, bool microphone, bool uplink_subscribed);
 /* Copy bounded A-law data. LIVE accepts streams 10/14, mono 8/16 kHz;
- * WX/DEV retain stream 0/10 and mono 8 kHz. Decode/resample happens in step(). */
+ * WX/DEV retain stream 0/10 and mono 8 kHz on the wire. Decode/resample
+ * happens in step() and always feeds the shared 16 kHz local PCM device. */
 void calls_audio_receive(demo_tirtc_owner_e owner, uint32_t generation,
                          const TIRTCFRAMEINFO *frame, const void *data);
 /* Called by control/playback owner every 5 ms during a call. */

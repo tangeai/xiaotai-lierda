@@ -5,6 +5,9 @@
 #include "calls_audio.h"
 #include "calls_protocol.h"
 #include "../ai/tirtc_ai.h"
+#ifdef HWDEMO_GROUP_ROOM_EN
+#include "../group/tirtc_group.h"
+#endif
 #include "../video/tirtc_video.h"
 #include "../platform/json_guard.h"
 #include "liot_os.h"
@@ -225,12 +228,17 @@ static bool live_owned(void)
 /* Caller holds the task critical section through the local intent commit.
  * NONE must use the shared non-recursive gate. AI already excludes passive
  * admission; reserving the call intent before its release preserves the
- * existing call-to-AI-stop handoff. No SDK or action runs inside this gate. */
+ * existing call-to-AI-stop handoff. GROUP is also preemptible: commit the
+ * call intent before asking its worker to drain; never steal its live lease.
+ * No SDK or action runs inside this gate. */
 static bool call_admission_locked(bool *entered)
 {
  demo_tirtc_connection_snapshot_t snapshot;*entered=false;
  demo_tirtc_get_connection_snapshot(&snapshot);
  if(snapshot.owner==DEMO_TIRTC_OWNER_AI)return true;
+#ifdef HWDEMO_GROUP_ROOM_EN
+ if(snapshot.owner==DEMO_TIRTC_OWNER_GROUP_ROOM)return true;
+#endif
  if(snapshot.owner!=DEMO_TIRTC_OWNER_NONE)return false;
  *entered=demo_tirtc_admission_try_enter();return *entered;
 }
@@ -252,6 +260,9 @@ static bool new_call(const tirtc_contact_t*contact,bool video,const calls_proto_
  copy(s_room,sizeof(s_room),invite?invite->room:"");copy(s_call_id,sizeof(s_call_id),invite?invite->call_id:"");copy(s_self,sizeof(s_self),binding.device_id);
  if(admission)demo_tirtc_admission_leave();
  liot_rtos_exit_critical();
+#ifdef HWDEMO_GROUP_ROOM_EN
+ tirtc_group_suspend();
+#endif
  memset(&stop,0,sizeof(stop));stop.type=TIRTC_ACTION_AI_STOP;(void)tirtc_ai_action(&stop);
  demo_tirtc_set_feature_listener(contact->wechat?DEMO_TIRTC_FEATURE_WECHAT:DEMO_TIRTC_FEATURE_DEV_CHAT,&s_listener);s_listener_live=true;
  publish(invite?TIRTC_CALL_INCOMING:TIRTC_CALL_OUTGOING,invite?"收到来电":"正在拨号",0);
@@ -451,7 +462,18 @@ static void step(void)
   if((uint32_t)(tick()-s_last_publish)>=1000U){liot_rtos_enter_critical();s_ui.seconds=(tick()-s_started)/1000U;liot_rtos_exit_critical();publish(TIRTC_CALL_CONNECTED,"通话中",0);}
  }
 }
-static void worker(void*arg){(void)arg;for(;;){step();liot_rtos_task_sleep_ms(5);}}
+static void worker(void*arg)
+{
+ (void)arg;
+ for(;;){
+  uint32_t started=tick(),elapsed;
+  step();
+  /* Record already waits for the next 20 ms of PCM. Do not insert a 5 ms
+   * capture gap after every frame; retain the idle/control polling floor. */
+  elapsed=(uint32_t)(tick()-started);
+  if(elapsed<5U)liot_rtos_task_sleep_ms(5U-elapsed);
+ }
+}
 static bool decimal_session(const char*text,uint32_t*out)
 {uint32_t value=0;unsigned i;if(!text||!text[0])return false;for(i=0;text[i];i++){unsigned digit=(unsigned)(text[i]-'0');if(i>=10||digit>9U||value>(UINT32_MAX-digit)/10U)return false;value=value*10U+digit;}*out=value;return value!=0;}
 int tirtc_calls_dial_contact(const tirtc_contact_t *contact,bool video)
@@ -465,7 +487,11 @@ int tirtc_calls_dial_contact(const tirtc_contact_t *contact,bool video)
  if(s_phase!=C_IDLE||s_pending_dial||!call_admission_locked(&admission)){liot_rtos_exit_critical();return -4;}
  s_pending_contact=*contact;s_pending_video=video;s_pending_dial=true;
  if(admission)demo_tirtc_admission_leave();
- liot_rtos_exit_critical();return 0;
+ liot_rtos_exit_critical();
+#ifdef HWDEMO_GROUP_ROOM_EN
+ tirtc_group_suspend();
+#endif
+ return 0;
 }
 int tirtc_calls_action(const tirtc_ui_action_t*a)
 {

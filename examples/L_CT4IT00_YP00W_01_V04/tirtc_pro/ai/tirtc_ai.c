@@ -47,6 +47,7 @@
 #define AI_ERR_LOST (-1406)
 #define AI_ERR_AUDIO_CLEANUP (-1407)
 #define AI_ERR_UPLINK (-1408)
+#define AI_NETWORK_SAMPLES_8K (DEMO_AI_AUDIO_FRAME_SAMPLES / 2U)
 typedef enum { AI_IDLE, AI_TOKEN, AI_CONNECT, AI_NEGOTIATE, AI_ACTIVE, AI_STOPPING, AI_ERROR, AI_BLOCKED, AI_IDLE_FETCH, AI_WAIT_OWNER, AI_IDLE_CONNECT, AI_IDLE_READY } ai_phase_t;
 typedef struct { uint8_t used; uint32_t order, epoch, received_at; uint16_t length; char data[AI_CMD_BYTES + 1U]; } ai_cmd_t;
 
@@ -64,7 +65,7 @@ static bool s_runtime_owned, s_audio_owned, s_audio_started, s_restart_requested
 static demo_ai_audio_lease_t s_lease = DEMO_AI_AUDIO_LEASE_INIT;
 static tirtc_network_snapshot_t s_route;
 static demo_binding_ai_access_t s_access;
-static uint8_t s_rx[AI_RX_BYTES], s_play_alaw[DEMO_AI_AUDIO_FRAME_SAMPLES];
+static uint8_t s_rx[AI_RX_BYTES], s_play_alaw[AI_NETWORK_SAMPLES_8K];
 static uint32_t s_rx_read, s_rx_queued, s_rx_peak, s_rx_drop_bytes, s_rx_bad_frames, s_cmd_drops, s_play_errors;
 static uint32_t s_media_step_at, s_media_gap_max, s_rebuffers;
 static bool s_media_step_seen;
@@ -72,7 +73,7 @@ static ai_cmd_t s_commands[AI_CMD_COUNT];
 static ai_call_request_t s_call_request;
 static uint32_t s_call_ticket, s_call_started, s_call_epoch;
 static int16_t s_pcm[DEMO_AI_AUDIO_FRAME_SAMPLES], s_record[DEMO_AI_AUDIO_FRAME_SAMPLES];
-static uint8_t s_alaw[DEMO_AI_AUDIO_FRAME_SAMPLES];
+static uint8_t s_alaw[AI_NETWORK_SAMPLES_8K];
 static char s_device_id[DEMO_BIND_DEVICE_ID_MAX], s_role[DEMO_BIND_AI_ROLE_ID_MAX], s_rpc_id[40];
 static uint32_t s_tx, s_rx_frames, s_played, s_rx_drops, s_tx_drops, s_suppressed, s_capture;
 static uint32_t s_play_audio_until, s_preroll_since;
@@ -600,7 +601,7 @@ static uint16_t peek_audio(void)
 {
     uint32_t samples, first;
     liot_rtos_enter_critical();
-    samples=s_rx_queued; if(samples>DEMO_AI_AUDIO_FRAME_SAMPLES)samples=DEMO_AI_AUDIO_FRAME_SAMPLES;
+    samples=s_rx_queued; if(samples>AI_NETWORK_SAMPLES_8K)samples=AI_NETWORK_SAMPLES_8K;
     first=AI_RX_BYTES-s_rx_read; if(first>samples)first=samples;
     memcpy(s_play_alaw,s_rx+s_rx_read,first);
     if(first<samples)memcpy(s_play_alaw+first,s_rx,samples-first);
@@ -649,9 +650,9 @@ static bool submit_playback(bool speaker, uint8_t volume)
         if(controls_changed)return false;
         if(submitted && (uint32_t)(tick()-began)>=AI_PLAY_BUDGET_MS)break;
         samples=peek_audio(); if(!samples)break;
-        /* F6D I2S rounds its DMA byte count down to a multiple of four.
-         * Keep an odd trailing A-law sample for the next packet; only a real
-         * short tail is padded with one silent PCM sample after a bounded wait. */
+        /* Coalesce short network tails with the next packet for at most the
+         * existing prebuffer wait. Each A-law sample is duplicated below,
+         * so even the final lone sample yields four aligned PCM bytes. */
         if(samples>1U && (samples&1U))samples--;
         if(samples==1U) {
             if(!s_partial_waiting) {
@@ -660,20 +661,27 @@ static bool submit_playback(bool speaker, uint8_t volume)
             }
             if((uint32_t)(tick()-s_partial_since)<AI_PREROLL_WAIT_MS)break;
         } else s_partial_waiting=false;
-        play_samples=(uint16_t)(samples+(samples&1U));
+        play_samples=(uint16_t)(2U*samples);
         fractional=play_samples+(s_play_continuing ? s_play_sample_remainder : 0U);
-        duration=fractional/8U; now=tick();
+        duration=fractional/16U; now=tick();
         ahead=s_play_guard ? (int32_t)(s_play_audio_until-now) : 0;
-        if(ahead>0 && (uint32_t)ahead+duration+(fractional%8U!=0)+
+        if(ahead>0 && (uint32_t)ahead+duration+(fractional%16U!=0)+
            (s_play_continuing ? 0U : DEMO_AI_AUDIO_WARMUP_MS)>AI_PLAY_AHEAD_MS)break;
         (void)demo_g711_alaw_decode(s_play_alaw,s_pcm,samples);
-        if(play_samples!=samples)s_pcm[samples]=0;
+        {
+            uint32_t sample;
+            for(sample=samples; sample>0U; --sample) {
+                int16_t value=s_pcm[sample-1U];
+                s_pcm[(sample-1U)*2U]=value;
+                s_pcm[(sample-1U)*2U+1U]=value;
+            }
+        }
         result=s_play_continuing ? demo_ai_audio_play(&s_lease,s_pcm,play_samples) :
             demo_ai_audio_play_warm(&s_lease,s_pcm,play_samples,&extra);
         if(!result) {
             now=tick();
             if(!s_play_guard || (int32_t)(s_play_audio_until-now)<=0)s_play_audio_until=now;
-            s_play_audio_until+=duration+extra; s_play_sample_remainder=(uint8_t)(fractional%8U);
+            s_play_audio_until+=duration+extra; s_play_sample_remainder=(uint8_t)(fractional%16U);
             if(!s_first_signal_logged) {
                 uint32_t k, peak=0;
                 for(k=0;k<play_samples;k++) {
@@ -740,8 +748,8 @@ static void media_step(void)
     if (!mic || !mic_gain || (speaker && volume && s_play_guard)) s_tx_failure_active=false;
     if (dirty || volume!=s_applied_volume || mic_gain!=s_applied_mic_gain || effective_speaker!=s_applied_speaker || mic!=s_applied_mic) {
         if (demo_ai_audio_set_levels(&s_lease,effective_speaker ? volume : 0,mic ? mic_gain : 0)) { finish(AI_ERR_AUDIO); return; }
-        /* set_levels may invalidate the second half of a previously captured
-         * batch. Account for it before timestamping the next fresh frame. */
+        /* Account for capture discarded by a level change before
+         * timestamping the next fresh frame. */
         if (demo_ai_audio_discard_capture_timed(&s_lease,&discarded_ms)) { finish(AI_ERR_AUDIO); return; }
         s_timestamp += discarded_ms;
         s_applied_volume=volume; s_applied_mic_gain=mic_gain; s_applied_speaker=effective_speaker; s_applied_mic=mic;
@@ -772,8 +780,8 @@ static void media_step(void)
     if(suppress_capture) { (void)pause_capture(); return; }
     if(s_capture_paused) {
         /* Resume barrier: the SDK starts a new RX DMA each time. Discard one
-         * complete 40 ms batch, including its cached half, before reopening
-         * uplink. Downlink arriving during this wait is reconsidered next turn. */
+         * complete 20 ms frame before reopening uplink. Downlink arriving
+         * during this wait is reconsidered next turn. */
         account_capture_pause();
         result=demo_ai_audio_record_20ms(&s_lease,s_record);
         if(!result)result=demo_ai_audio_discard_capture_timed(&s_lease,&discarded_ms);
@@ -805,7 +813,7 @@ static void media_step(void)
     for(i=0;i<DEMO_AI_AUDIO_FRAME_SAMPLES;++i) { int32_t v=s_record[i]; uint32_t n=(uint32_t)(v<0 ? -v : v); if(n>peak)peak=n; }
     liot_rtos_enter_critical(); s_ui.audio_level=(uint8_t)(!mic || peak<512U ? 0U : peak<4096U ? 1U : peak<12288U ? 2U : 3U); liot_rtos_exit_critical();
     if (!mic || suppress_capture || (speaker && volume && (s_play_guard || queued_audio_bytes()!=0))) {
-        /* Do not upload a cached second half after protection/mute expires. */
+        /* Do not upload stale captured data after protection/mute expires. */
         if(demo_ai_audio_discard_capture_timed(&s_lease,&discarded_ms)) { finish(AI_ERR_AUDIO); return; }
         if(mic && s_ui.ai_state==TIRTC_AI_LISTENING) { s_suppression_hint=true; show(TIRTC_AI_SPEAKING,"播放收尾，暂缓收音"); }
         s_tx_failure_active=false;
@@ -814,11 +822,17 @@ static void media_step(void)
         s_capture_paused=true; s_capture_pause_at=tick(); s_capture_pause_remainder=0; return;
     }
     if(s_suppression_hint || s_prime_wait_hint) { s_suppression_hint=s_prime_wait_hint=false; show(TIRTC_AI_LISTENING,"正在聆听"); }
-    (void)demo_g711_alaw_encode(s_record,s_alaw,DEMO_AI_AUDIO_FRAME_SAMPLES);
+    {
+        unsigned int sample;
+        for (sample=0U; sample<AI_NETWORK_SAMPLES_8K; ++sample) {
+            int32_t mixed=(int32_t)s_record[sample*2U]+(int32_t)s_record[sample*2U+1U];
+            s_alaw[sample]=demo_g711_alaw_encode_sample((int16_t)(mixed/2));
+        }
+    }
     {
         TIRTCFRAMEINFO frame; memset(&frame,0,sizeof(frame));
         frame.stream_id=1; frame.media=TIRTC_AUDIO_ALAW; frame.flags=TIRTC_AUDIOSAMPLE_8K16B1C;
-        frame.ts=s_timestamp; frame.length=DEMO_AI_AUDIO_FRAME_SAMPLES;
+        frame.ts=s_timestamp; frame.length=AI_NETWORK_SAMPLES_8K;
         result=demo_tirtc_send_audio(DEMO_TIRTC_OWNER_AI,s_generation,&frame,s_alaw);
     }
     s_timestamp+=DEMO_AI_AUDIO_FRAME_MS;

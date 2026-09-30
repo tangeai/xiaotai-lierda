@@ -7,6 +7,7 @@ CFLAGS_INC += -I $(TOP)/$(TIRTC_DIR)/preferences
 CFLAGS_INC += -I $(TOP)/$(TIRTC_DIR)/keys
 CFLAGS_INC += -I $(TOP)/$(TIRTC_DIR)/platform
 CFLAGS_INC += -I $(TOP)/$(TIRTC_DIR)/ai -I $(TOP)/$(TIRTC_DIR)/media -I $(TOP)/$(TIRTC_DIR)/resource_store
+CFLAGS_INC += -I $(TOP)/$(TIRTC_DIR)/group
 CFLAGS_INC += -I $(TOP)/$(TIRTC_DIR)/contacts -I $(TOP)/$(TIRTC_DIR)/calls -I $(TOP)/$(TIRTC_DIR)/video
 CFLAGS_INC += -I $(TOP)/$(TIRTC_DIR)/ui/assets -I $(TOP)/$(TIRTC_DIR)/ui/fonts
 CFLAGS_DEFS += -DLV_CONF_PATH=$(TOP)/$(TIRTC_DIR)/ui/lv_conf.h
@@ -26,6 +27,7 @@ TIRTC_CALL_CFILES := $(wildcard $(TOP)/$(TIRTC_DIR)/contacts/*.c) \
                     $(wildcard $(TOP)/$(TIRTC_DIR)/video/*.c)
 ifneq ($(TIRTC_ASSET_INSTALLER),y)
 include $(TOP)/$(TIRTC_DIR)/runtime/runtime.mk
+CFLAGS_DEFS += -DHWDEMO_GROUP_ROOM_EN
 CFLAGS_DEFS += -DTIRTC_EXTERNAL_UI_ASSETS=1
 endif
 # This exact F6D_A OS wrapper leaves the scheduler suspended after allocation
@@ -96,6 +98,7 @@ $(error This standalone board port is verified only against F6D_A)
 endif
 TIRTC_CFILES := $(TOP)/$(TIRTC_DIR)/user_main.c \
                 $(TOP)/$(TIRTC_DIR)/remote/tirtc_remote.c \
+                $(wildcard $(TOP)/$(TIRTC_DIR)/group/*.c) \
                 $(TOP)/$(TIRTC_DIR)/port/tirtc_port.c \
                 $(TOP)/$(TIRTC_DIR)/port/tirtc_rtos_compat.c \
                 $(TIRTC_NETWORK_CFILES) \

@@ -1,10 +1,11 @@
 {
   "product": "pro",
   "purpose": "factory initialization",
+  "app_version": "pro_release",
   "external_flash_files_overwritten": true,
   "package": "latest.binpkg",
-  "size": 7566228,
-  "sha256": "9e551a918272aaf584ebeab8b2e0d937d2d98270051155ec7f59b9791fbb8ff4",
+  "size": 7587268,
+  "sha256": "b2336e0f16ff9e4b55ed1a4214c2794e4a23ef8d2808b9f52ceebf86751263b6",
   "normal_firmware_payloads_unchanged": true,
   "images": [
     {
@@ -36,8 +37,8 @@
       "type": "PKGFLXAPP",
       "address": 10838016,
       "capacity": 1466368,
-      "size": 1051296,
-      "sha256": "90585e7f3f5423cc1eb13e875692d960c71112d69399bbae5c42d4a73463f425"
+      "size": 1072336,
+      "sha256": "b4b4c08c1793908acf697fccc248bd01be34b35bffd03bd8fc98d3670f1812d9"
     },
     {
       "name": "ext_lfs",

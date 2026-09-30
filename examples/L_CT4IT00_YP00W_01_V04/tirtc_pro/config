@@ -1,5 +1,5 @@
 # Standalone UI project on the verified NT26F6D0 / F6D_A baseline.
-APP_VERSION := 47
+APP_VERSION := pro_release
 BUILD_COMP_THIRDPART_EN := y
 BUILD_COMP_TTS_EN := n
 BUILD_THPART_MP3_ENABLE := n

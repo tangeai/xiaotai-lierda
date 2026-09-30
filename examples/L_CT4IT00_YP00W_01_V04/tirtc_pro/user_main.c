@@ -11,6 +11,7 @@
 #include "tirtc_calls.h"
 #include "tirtc_video.h"
 #include "remote/tirtc_remote.h"
+#include "group/tirtc_group.h"
 #include "tirtc_preferences.h"
 #include "tirtc_keys.h"
 #include "assets.h"
@@ -22,7 +23,7 @@
 
 enum app_service {
     APP_STATUS, APP_RESOURCES, APP_NETWORK, APP_PLATFORM, APP_RUNTIME,
-    APP_CONTACTS, APP_VIDEO, APP_CALLS, APP_REMOTE, APP_AI,
+    APP_CONTACTS, APP_VIDEO, APP_CALLS, APP_REMOTE, APP_AI, APP_GROUP,
     APP_SERVICE_COUNT
 };
 static int s_service_result[APP_SERVICE_COUNT];
@@ -57,6 +58,7 @@ static void retry_background_services(void)
     (void)app_start_service(APP_CALLS, tirtc_calls_start_service(), "calls", true);
     (void)app_start_service(APP_REMOTE, tirtc_remote_start_service(), "remote", true);
     (void)app_start_service(APP_AI, tirtc_ai_start_service(), "AI", true);
+    (void)app_start_service(APP_GROUP, tirtc_group_start_service(), "group", true);
 }
 
 static uint32_t s_applied_audio_revision;
@@ -72,6 +74,7 @@ static void apply_audio_preferences_locked(void)
         const tirtc_preferences_t *p=&snapshot.value;
         tirtc_ai_set_audio_config(p->volume, p->mic_gain, p->speaker_enabled, p->mic_enabled);
         tirtc_calls_set_audio_config(p->volume, p->mic_gain, p->speaker_enabled, p->mic_enabled);
+        tirtc_group_set_audio_config(p->volume, p->mic_gain, p->speaker_enabled, p->mic_enabled);
         (void)tirtc_ui_publish_audio_settings(p->volume, p->mic_gain, p->speaker_enabled, p->mic_enabled);
         s_applied_audio_revision=snapshot.value_revision;
     }
@@ -86,6 +89,8 @@ static void apply_audio_preferences(void)
 static int app_ui_action(const tirtc_ui_action_t *action, void *context)
 {
     if (!action) return -1;
+    if (action->type >= TIRTC_ACTION_ROOM_OPEN && action->type <= TIRTC_ACTION_ROOM_PTT)
+        return tirtc_group_action(action);
     if (action->type == TIRTC_ACTION_REMOTE_END || action->type == TIRTC_ACTION_REMOTE_SET_MIC ||
         action->type == TIRTC_ACTION_REMOTE_SET_SPEAKER || action->type == TIRTC_ACTION_REMOTE_SET_CAMERA)
         return tirtc_remote_action(action);
@@ -128,6 +133,19 @@ static int app_ui_action(const tirtc_ui_action_t *action, void *context)
     if (action->type == TIRTC_ACTION_AI_START) {
         int result;
         if (tirtc_calls_has_session()) return -2;
+        /* Room exit may still be draining after navigating home. Commit the
+         * AI intent atomically, then let both workers hand off the real lease. */
+        demo_tirtc_connection_snapshot_t connection;
+        liot_rtos_enter_critical();
+        demo_tirtc_get_connection_snapshot(&connection);
+        if (connection.owner == DEMO_TIRTC_OWNER_GROUP_ROOM) {
+            result = (tirtc_remote_has_session() || tirtc_calls_has_session()) ?
+                     -2 : tirtc_ai_action(action);
+            if (!result) tirtc_group_suspend();
+            liot_rtos_exit_critical();
+            return result;
+        }
+        liot_rtos_exit_critical();
         /* Even an existing AI session can finish cleanup before this action
          * reaches its worker. Every START must reserve incoming admission. */
         if (!demo_tirtc_admission_try_enter()) return -2;
@@ -139,6 +157,7 @@ static int app_ui_action(const tirtc_ui_action_t *action, void *context)
     if (action->type == TIRTC_ACTION_AI_STOP) return tirtc_ai_action(action);
     if (action->type == TIRTC_ACTION_ENTER_PAGE || action->type == TIRTC_ACTION_RETURN_HOME) {
         (void)tirtc_remote_action(action);
+        (void)tirtc_group_action(action);
         int contacts_result = tirtc_contacts_action(action);
         int ai_result = tirtc_ai_action(action);
         return contacts_result == 0 ? 0 : ai_result;
@@ -221,6 +240,8 @@ void user_main(void)
         tirtc_contacts_publish();
         if (app_start_service(APP_AI, tirtc_ai_start_service(), "AI", false) != 0)
             tirtc_status_event("AI 对讲服务启动失败");
+        if (app_start_service(APP_GROUP, tirtc_group_start_service(), "group", false) != 0)
+            tirtc_status_event("多人对讲服务启动失败");
         liot_trace("[app13] periodic data loop entered: 5000 ms");
     }
     /* AI and RTC own their workers; tirtc_port owns the only LVGL task. */

@@ -360,7 +360,15 @@ static void step(void)
 static void worker(void *context)
 {
     (void)context;
-    for (;;) { step(); liot_rtos_task_sleep_ms(tirtc_remote_has_session() ? 5U : 100U); }
+    for (;;) {
+        uint32_t started=now(),elapsed,period;
+        step();
+        /* Shared audio capture paces subscribed uplink itself. Only wait for
+         * the remainder of the control/idle period after nonblocking work. */
+        period=tirtc_remote_has_session() ? 5U : 100U;
+        elapsed=(uint32_t)(now()-started);
+        if (elapsed<period) liot_rtos_task_sleep_ms(period-elapsed);
+    }
 }
 int tirtc_remote_start_service(void)
 {

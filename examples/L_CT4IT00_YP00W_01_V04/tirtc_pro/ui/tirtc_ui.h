@@ -149,7 +149,7 @@ typedef struct {
 } tirtc_ui_remote_t;
 typedef struct { char id[64], name[64]; bool self, speaking; } tirtc_ui_room_member_t;
 typedef struct {
- bool known, assigned, connected, busy;
+ bool known, assigned, connected, busy, mic_on, members_limited;
  char code[8], message[128];
  uint32_t generation;
  uint8_t member_count;
@@ -214,6 +214,8 @@ int tirtc_ui_publish_ai(const tirtc_ui_ai_t *state);
 int tirtc_ui_publish_contacts(const tirtc_ui_contacts_t *state);
 int tirtc_ui_publish_call(const tirtc_ui_call_t *state);
 int tirtc_ui_publish_remote(const tirtc_ui_remote_t *state);
+/* Group owner only; copies bounded, secret-free room state into its own mailbox. */
+int tirtc_ui_publish_room(const tirtc_ui_room_t *state);
 /* Nonblocking RAM-only admission snapshot; never calls LVGL or waits on a
  * mutex. False until a real page has completed a successful LCD refresh,
  * including resource loading/failure and page rebuild. NULL returns false. */
