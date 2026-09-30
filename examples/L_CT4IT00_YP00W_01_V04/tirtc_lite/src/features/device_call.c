@@ -61,9 +61,17 @@
 #define DEV_MQTT_EVENT_DEPTH                8U
 #define DEV_SIGNAL_EVENT_DEPTH              8U
 #define DEV_SIGNAL_PAYLOAD_MAX             160U
-#define DEV_AUDIO_QUEUE_DEPTH                8U
+/* Hold 480 ms of ordinary 20 ms packets to absorb late receive bursts. */
+#define DEV_AUDIO_QUEUE_DEPTH               24U
+/* Keep each receive service bounded so a larger queue cannot starve capture. */
+#define DEV_PLAY_BATCH_MAX                   8U
+/* Return to capture after a slow playback submission. A single SDK call may
+ * still block longer than this; do not compound that wait across a batch. */
+#define DEV_PLAY_BUDGET_MS                   20U
 /* Absorb brief TX scheduling delays without blocking capture (160 ms PCM). */
 #define DEV_UPLINK_QUEUE_DEPTH               8U
+/* Drop locally queued speech that is no longer useful after a TX stall. */
+#define DEV_UPLINK_MAX_AGE_MS               300U
 #define DEV_UPLINK_TASK_STACK       (12U * 1024U)
 #define DEV_AUDIO_FRAME_BYTES              160U
 /* Accept up to four coalesced 20 ms G.711 A-law packets without allocating
@@ -106,8 +114,9 @@
 #define DEV_EXISTING_ROOM_RETRY_MS          1000U
 #define DEV_ERROR_VISIBLE_MS              3000U
 #define DEV_IDLE_WAIT_MS                    50U
-#define DEV_PREBUFFER_PACKETS                3U
-#define DEV_PREBUFFER_TIMEOUT_MS            80U
+/* Trade startup/rebuffer latency for tolerance of uneven packet delivery. */
+#define DEV_PREBUFFER_MS                   200U
+#define DEV_PREBUFFER_TIMEOUT_MS           300U
 #ifdef HWDEMO_GROUP_ROOM_EN
 #define DEV_GROUP_HANDOFF_TIMEOUT_MS     30000U
 #endif
@@ -188,6 +197,27 @@ typedef struct
     uint32_t generation;
     uint8_t payload[DEV_AUDIO_PAYLOAD_MAX];
 } dev_audio_frame_t;
+
+typedef struct
+{
+    uint32_t audio_received;
+    uint32_t pool_fail;
+    uint32_t queue_fail;
+    uint32_t format_reject;
+    uint32_t play_fail;
+    uint32_t max_callback_gap_ms;
+    uint32_t last_callback_ms;
+    uint32_t tail_silence_ms;
+    uint32_t rebuffer_count;
+} dev_rx_session_stats_t;
+
+typedef enum
+{
+    DEV_RX_RECEIVED,
+    DEV_RX_POOL_FAIL,
+    DEV_RX_QUEUE_FAIL,
+    DEV_RX_FORMAT_REJECT,
+} dev_rx_note_e;
 
 typedef struct
 {
@@ -306,6 +336,7 @@ static bool s_contacts_ready;
 static volatile bool s_audio_owned;
 static volatile bool s_recovery_inflight;
 static volatile uint32_t s_audio_queued;
+static volatile uint32_t s_audio_queued_samples;
 static volatile uint32_t s_audio_producers;
 static volatile uint32_t s_room_action_pending;
 static char s_room_action_tombstone[DEV_ROOM_MAX];
@@ -313,10 +344,16 @@ static uint32_t s_room_action_tombstone_until;
 static uint32_t s_rx_frames;
 static uint32_t s_tx_frames;
 static uint32_t s_rx_dropped;
+static dev_rx_session_stats_t s_rx_session;
 static uint32_t s_tx_dropped;
 static uint32_t s_tx_session_queue_full;
 static uint32_t s_tx_session_sdk_busy;
+static uint32_t s_tx_session_expired;
 static uint32_t s_prebuffer_start_ms;
+static uint32_t s_play_tail_ms;
+static uint8_t s_play_tail_fraction;
+static bool s_play_continuing;
+static bool s_prebuffering;
 static bool s_downlink_reject_logged;
 static bool s_playback_error_logged;
 
@@ -352,6 +389,7 @@ static void dev_uplink_reset_session_stats(void)
     liot_rtos_enter_critical();
     s_tx_session_queue_full = 0U;
     s_tx_session_sdk_busy = 0U;
+    s_tx_session_expired = 0U;
     liot_rtos_exit_critical();
 }
 
@@ -388,6 +426,13 @@ static void dev_send_uplink_job(const dev_uplink_job_t *job)
 
     liot_rtos_enter_critical();
     current = dev_uplink_job_current_locked(job);
+    if (current && (uint32_t)(liot_rtos_get_running_time() - job->frame.ts) >
+                       DEV_UPLINK_MAX_AGE_MS)
+    {
+        ++s_tx_dropped;
+        ++s_tx_session_expired;
+        current = false;
+    }
     liot_rtos_exit_critical();
     if (!current)
     {
@@ -1218,14 +1263,79 @@ static void dev_audio_slot_release(uint8_t slot)
     liot_rtos_exit_critical();
 }
 
-static void dev_audio_queued_decrement(void)
+static void dev_audio_queued_decrement(uint8_t slot)
 {
+    uint32_t samples = slot < DEV_AUDIO_QUEUE_DEPTH ?
+                           s_audio_pool[slot].length : 0U;
+
     liot_rtos_enter_critical();
     if (s_audio_queued > 0U)
     {
         --s_audio_queued;
     }
+    s_audio_queued_samples = s_audio_queued_samples >= samples ?
+                                s_audio_queued_samples - samples : 0U;
     liot_rtos_exit_critical();
+}
+
+static void dev_reset_downlink(void)
+{
+    s_prebuffer_start_ms = 0U;
+    s_prebuffering = false;
+    s_play_tail_ms = 0U;
+    s_play_tail_fraction = 0U;
+    s_play_continuing = false;
+}
+
+static void dev_reset_rx_session_stats(void)
+{
+    liot_rtos_enter_critical();
+    memset(&s_rx_session, 0, sizeof(s_rx_session));
+    liot_rtos_exit_critical();
+}
+
+static void dev_rx_note(dev_rx_note_e kind, uint32_t generation)
+{
+    liot_rtos_enter_critical();
+    /* A callback crossing stop/start must not charge a newer call. */
+    if (s_state == DEMO_DEV_CHAT_IN_CALL && s_generation == generation)
+    {
+        if (kind == DEV_RX_RECEIVED)
+        {
+            uint32_t now = liot_rtos_get_running_time();
+            uint32_t gap = now - s_rx_session.last_callback_ms;
+            if (s_rx_session.audio_received != 0U &&
+                gap > s_rx_session.max_callback_gap_ms)
+            {
+                s_rx_session.max_callback_gap_ms = gap;
+            }
+            ++s_rx_session.audio_received;
+            s_rx_session.last_callback_ms = now;
+        }
+        else if (kind == DEV_RX_POOL_FAIL) ++s_rx_session.pool_fail;
+        else if (kind == DEV_RX_QUEUE_FAIL) ++s_rx_session.queue_fail;
+        else if (kind == DEV_RX_FORMAT_REJECT) ++s_rx_session.format_reject;
+    }
+    liot_rtos_exit_critical();
+}
+
+static void dev_snapshot_rx_session(dev_rx_session_stats_t *snapshot)
+{
+    uint32_t now = liot_rtos_get_running_time();
+
+    liot_rtos_enter_critical();
+    *snapshot = s_rx_session;
+    liot_rtos_exit_critical();
+    /* A muted peer or a delayed hangup is not an inter-packet gap. */
+    snapshot->tail_silence_ms = snapshot->audio_received != 0U ?
+                                  now - snapshot->last_callback_ms : 0U;
+}
+
+static bool dev_play_tail_pending(uint32_t now)
+{
+    return s_play_continuing &&
+           ((int32_t)(s_play_tail_ms - now) > 0 ||
+            (s_play_tail_ms == now && s_play_tail_fraction != 0U));
 }
 
 static void dev_drain_audio(void)
@@ -1237,7 +1347,7 @@ static void dev_drain_audio(void)
            liot_rtos_queue_wait(s_audio_queue, &slot, sizeof(slot),
                                 LIOT_NO_WAIT) == LIOT_OSI_SUCCESS)
     {
-        dev_audio_queued_decrement();
+        dev_audio_queued_decrement(slot);
         dev_audio_slot_release(slot);
     }
     liot_rtos_enter_critical();
@@ -1248,6 +1358,7 @@ static void dev_drain_audio(void)
          * producer.  Only this quiescent boundary may reset the pool. */
         memset(s_audio_pool_used, 0, sizeof(s_audio_pool_used));
         s_audio_queued = 0U;
+        s_audio_queued_samples = 0U;
     }
     liot_rtos_exit_critical();
 }
@@ -1514,6 +1625,7 @@ static void dev_on_audio(tirtc_conn_t hconn,
     liot_rtos_enter_critical();
     acquired = hconn != NULL && hconn == (tirtc_conn_t)s_conn &&
                s_state == DEMO_DEV_CHAT_IN_CALL ? 0 : -1;
+    generation = s_generation;
     liot_rtos_exit_critical();
     if (acquired < 0)
     {
@@ -1527,6 +1639,7 @@ static void dev_on_audio(tirtc_conn_t hconn,
         frame->flags != TIRTC_AUDIOSAMPLE_8K16B1C)
     {
         ++s_rx_dropped;
+        dev_rx_note(DEV_RX_FORMAT_REJECT, generation);
         if (frame != NULL && !s_downlink_reject_logged)
         {
             s_downlink_reject_logged = true;
@@ -1540,10 +1653,12 @@ static void dev_on_audio(tirtc_conn_t hconn,
         }
         return;
     }
+    dev_rx_note(DEV_RX_RECEIVED, generation);
     acquired = dev_audio_slot_acquire(hconn, &generation);
     if (acquired < 0)
     {
         ++s_rx_dropped;
+        dev_rx_note(DEV_RX_POOL_FAIL, generation);
         return;
     }
     slot = (uint8_t)acquired;
@@ -1554,15 +1669,17 @@ static void dev_on_audio(tirtc_conn_t hconn,
     memcpy(message->payload, data, frame->length);
     liot_rtos_enter_critical();
     ++s_audio_queued;
+    s_audio_queued_samples += message->length;
     liot_rtos_exit_critical();
     if (s_audio_queue == NULL ||
         liot_rtos_queue_release(s_audio_queue, sizeof(slot), &slot,
                                 LIOT_NO_WAIT) != LIOT_OSI_SUCCESS)
     {
-        dev_audio_queued_decrement();
+        dev_audio_queued_decrement(slot);
         dev_audio_slot_release(slot);
         dev_audio_producer_done();
         ++s_rx_dropped;
+        dev_rx_note(DEV_RX_QUEUE_FAIL, generation);
         return;
     }
     dev_audio_producer_done();
@@ -1857,6 +1974,7 @@ static void dev_finish_session(int result,
                                bool notify_peer)
 {
     tirtc_conn_t connection;
+    dev_rx_session_stats_t rx_stats;
     char room_id[DEV_ROOM_MAX];
     bool caller;
     bool keep_late_incoming_guard;
@@ -1897,6 +2015,8 @@ static void dev_finish_session(int result,
     }
 
     dev_set_state(DEMO_DEV_CHAT_STOPPING, 0);
+    dev_snapshot_rx_session(&rx_stats);
+    dev_reset_downlink();
     dev_drain_uplink();
     memset(room_id, 0, sizeof(room_id));
     liot_rtos_enter_critical();
@@ -2024,12 +2144,25 @@ static void dev_finish_session(int result,
     }
     liot_trace("[DEV] session=%u closed result=%d action_ret=%d "
                "rx_drop=%u tx_drop=%u tx_session_queue_full=%u "
-               "tx_session_sdk_busy=%u\r\n",
+               "tx_session_sdk_busy=%u tx_session_expired=%u\r\n",
                (unsigned int)s_completed_sequence, result, action_ret,
                (unsigned int)s_rx_dropped,
                (unsigned int)s_tx_dropped,
                (unsigned int)s_tx_session_queue_full,
-               (unsigned int)s_tx_session_sdk_busy);
+               (unsigned int)s_tx_session_sdk_busy,
+               (unsigned int)s_tx_session_expired);
+    liot_trace("[DEV-RX] session=%u audio_received=%u pool_fail=%u "
+               "queue_fail=%u format_reject=%u play_fail=%u "
+               "max_callback_gap_ms=%u tail_silence_ms=%u rebuffer_count=%u\r\n",
+               (unsigned int)s_completed_sequence,
+               (unsigned int)rx_stats.audio_received,
+               (unsigned int)rx_stats.pool_fail,
+               (unsigned int)rx_stats.queue_fail,
+               (unsigned int)rx_stats.format_reject,
+               (unsigned int)rx_stats.play_fail,
+               (unsigned int)rx_stats.max_callback_gap_ms,
+               (unsigned int)rx_stats.tail_silence_ms,
+               (unsigned int)rx_stats.rebuffer_count);
 }
 
 static int dev_start_audio(void)
@@ -2084,7 +2217,7 @@ static int dev_start_audio(void)
     liot_rtos_enter_critical();
     s_tx_frames = 0U;
     liot_rtos_exit_critical();
-    s_prebuffer_start_ms = 0U;
+    dev_reset_downlink();
     s_downlink_reject_logged = false;
     s_playback_error_logged = false;
     s_existing_answered_caller = false;
@@ -2118,6 +2251,8 @@ static int dev_play_one(void)
     uint32_t output_samples;
     uint32_t i;
     uint32_t peak = 0U;
+    uint32_t now;
+    uint32_t duration_samples;
     uint8_t input_flags;
     int ret;
 
@@ -2126,7 +2261,7 @@ static int dev_play_one(void)
     {
         return 0;
     }
-    dev_audio_queued_decrement();
+    dev_audio_queued_decrement(slot);
     if (slot >= DEV_AUDIO_QUEUE_DEPTH)
     {
         ++s_rx_dropped;
@@ -2182,6 +2317,9 @@ static int dev_play_one(void)
     if (ret != 0)
     {
         ++s_rx_dropped;
+        liot_rtos_enter_critical();
+        ++s_rx_session.play_fail;
+        liot_rtos_exit_critical();
         if (!s_playback_error_logged)
         {
             s_playback_error_logged = true;
@@ -2191,6 +2329,20 @@ static int dev_play_one(void)
         }
         return 0;
     }
+    /* FINISH is delivered by a separate SDK task and may refer to an older
+     * burst. Track accepted PCM duration as well before restarting buffering.
+     * Keep fractional milliseconds for valid short/coalesced A-law packets. */
+    now = liot_rtos_get_running_time();
+    if (!dev_play_tail_pending(now))
+    {
+        s_play_tail_ms = now;
+        s_play_tail_fraction = 0U;
+    }
+    duration_samples = output_samples + s_play_tail_fraction;
+    s_play_tail_ms += duration_samples / (DEMO_AI_AUDIO_SAMPLE_RATE / 1000U);
+    s_play_tail_fraction = (uint8_t)(duration_samples %
+                                    (DEMO_AI_AUDIO_SAMPLE_RATE / 1000U));
+    s_play_continuing = true;
     ++s_rx_frames;
     if (s_rx_frames == 1U)
     {
@@ -2207,38 +2359,63 @@ static int dev_play_one(void)
 static void dev_service_downlink(void)
 {
     uint32_t queued;
+    uint32_t samples;
     uint32_t now;
+    uint32_t started;
     uint32_t i;
 
     liot_rtos_enter_critical();
     queued = s_audio_queued;
+    samples = s_audio_queued_samples;
     liot_rtos_exit_critical();
+    now = liot_rtos_get_running_time();
+    if (s_play_continuing && !dev_play_tail_pending(now) &&
+        demo_ai_audio_play_done(&s_audio_lease))
+    {
+        s_play_continuing = false;
+        s_prebuffering = false;
+    }
     if (queued == 0U)
     {
-        if (demo_ai_audio_play_done(&s_audio_lease))
-        {
-            s_prebuffer_start_ms = 0U;
-        }
+        s_prebuffering = false;
         return;
     }
-    now = liot_rtos_get_running_time();
-    if (demo_ai_audio_play_done(&s_audio_lease))
+    if (!s_play_continuing)
     {
-        if (s_prebuffer_start_ms == 0U)
+        if (!s_prebuffering)
         {
+            s_prebuffering = true;
             s_prebuffer_start_ms = now;
+            if (s_rx_frames != 0U)
+            {
+                liot_rtos_enter_critical();
+                ++s_rx_session.rebuffer_count;
+                liot_rtos_exit_critical();
+            }
         }
-        if (queued < DEV_PREBUFFER_PACKETS &&
-            (int32_t)(now - s_prebuffer_start_ms) <
-                (int32_t)DEV_PREBUFFER_TIMEOUT_MS)
+        /* All admitted payloads are 8-kHz A-law: one byte is one sample.
+         * Start short packets early when slots, rather than audio duration,
+         * become the limit. Leave one batch of free slots for arrivals while
+         * the worker returns to capture. Normal 20-ms packets still use the
+         * duration threshold. */
+        if (samples < DEV_PREBUFFER_MS * 8U &&
+            queued < DEV_AUDIO_QUEUE_DEPTH - DEV_PLAY_BATCH_MAX &&
+            (uint32_t)(now - s_prebuffer_start_ms) <
+                DEV_PREBUFFER_TIMEOUT_MS)
         {
             return;
         }
     }
-    s_prebuffer_start_ms = 0U;
-    for (i = 0U; i < DEV_AUDIO_QUEUE_DEPTH; ++i)
+    s_prebuffering = false;
+    started = liot_rtos_get_running_time();
+    for (i = 0U; i < DEV_PLAY_BATCH_MAX; ++i)
     {
         if (dev_play_one() <= 0)
+        {
+            break;
+        }
+        if ((uint32_t)(liot_rtos_get_running_time() - started) >=
+            DEV_PLAY_BUDGET_MS)
         {
             break;
         }
@@ -2304,6 +2481,7 @@ static void dev_begin_session(bool caller, const char *peer_id,
         ++s_generation;
     }
     dev_uplink_reset_session_stats();
+    dev_reset_rx_session_stats();
     if (caller && s_request_call_sequence != 0U)
     {
         s_session_sequence = s_request_call_sequence;

@@ -4,7 +4,7 @@
 ##############################################################################
 # TiRTC application build configuration
 ##############################################################################
-APP_VERSION = 02
+APP_VERSION = lite_release
 BUILD_MODE ?= demo
 DEMO_NAME ?= tirtc_app
 

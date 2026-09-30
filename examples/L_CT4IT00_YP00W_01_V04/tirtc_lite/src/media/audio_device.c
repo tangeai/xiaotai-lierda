@@ -26,6 +26,14 @@ static const uint8_t s_speaker_volume_by_level[DEMO_AI_AUDIO_LEVEL_MAX] = {
     30U, 33U, 37U, 40U, 43U, 47U, 50U, 53U, 57U, 60U
 };
 
+/* DEV receives full-range G.711 PCM. The SDK's software volume 10 is unity;
+ * using the UI's codec value here first amplified PCM by 3..6x and clipped
+ * it before the DAC attenuated it. Move that gain to the codec for DEV only.
+ * These values preserve the former small-signal levels within 0.6 dB. */
+static const uint8_t s_dev_codec_volume_by_level[DEMO_AI_AUDIO_LEVEL_MAX] = {
+    38U, 41U, 46U, 50U, 53U, 57U, 61U, 64U, 69U, 72U
+};
+
 static const uint8_t s_mic_gain_by_level[DEMO_AI_AUDIO_LEVEL_MAX] = {
     7U, 7U, 8U, 8U, 8U, 9U, 9U, 9U, 10U, 10U
 };
@@ -164,6 +172,8 @@ int demo_ai_audio_acquire(demo_ai_audio_owner_e owner,
             s_audio_generation++;
         }
         s_audio_owner = owner;
+        /* An unchanged UI level can still require another owner's gain map. */
+        s_levels_dirty = true;
         lease->owner = owner;
         lease->generation = s_audio_generation;
     }
@@ -241,6 +251,7 @@ int demo_ai_audio_apply_levels(const demo_ai_audio_lease_t *lease)
     uint8_t speaker_level;
     uint8_t mic_level;
     uint8_t speaker_volume;
+    uint8_t codec_volume;
     uint8_t mic_gain;
     uint8_t mic_volume;
     Liot_AudErr_e sw_ret;
@@ -264,11 +275,17 @@ int demo_ai_audio_apply_levels(const demo_ai_audio_lease_t *lease)
     mic_level = demo_ai_audio_clamp_level(s_mic_level);
 
     speaker_volume = s_speaker_volume_by_level[speaker_level - 1U];
+    codec_volume = speaker_volume;
+    if (lease->owner == DEMO_AI_AUDIO_OWNER_DEVICE)
+    {
+        speaker_volume = 10U;
+        codec_volume = s_dev_codec_volume_by_level[speaker_level - 1U];
+    }
     mic_gain = s_mic_gain_by_level[mic_level - 1U];
     mic_volume = s_mic_volume_by_level[mic_level - 1U];
 
     sw_ret = Liot_AudioSetVolume(speaker_volume);
-    codec_ret = Liot_AudioSetCodecVolume(speaker_volume);
+    codec_ret = Liot_AudioSetCodecVolume(codec_volume);
     mic_ret = Liot_AudioSetMicVolume(mic_gain, mic_volume);
 
     if (sw_ret != L_AUD_ERR_SUCCESS ||
@@ -282,10 +299,11 @@ int demo_ai_audio_apply_levels(const demo_ai_audio_lease_t *lease)
     }
 
     s_levels_dirty = false;
-    liot_trace("[AI-AUDIO] levels applied: speaker L%u=%u, "
+    liot_trace("[AI-AUDIO] levels applied: speaker L%u sw=%u codec=%u, "
                "mic L%u gain=%u volume=%u\r\n",
                (unsigned int)speaker_level,
                (unsigned int)speaker_volume,
+               (unsigned int)codec_volume,
                (unsigned int)mic_level,
                (unsigned int)mic_gain,
                (unsigned int)mic_volume);
@@ -427,6 +445,7 @@ int demo_ai_audio_record_20ms(
     int16_t pcm[DEMO_AI_AUDIO_FRAME_SAMPLES])
 {
     Liot_AudErr_e ret;
+    int levels_ret;
 
     if (!demo_ai_audio_lease_is_valid(lease))
     {
@@ -437,7 +456,11 @@ int demo_ai_audio_record_20ms(
         return -1;
     }
 
-    (void)demo_ai_audio_apply_levels(lease);
+    levels_ret = demo_ai_audio_apply_levels(lease);
+    if (levels_ret != 0)
+    {
+        return levels_ret;
+    }
     ret = Liot_AudioRecord((uint8_t *)s_record_frame,
                            (int)DEMO_AI_AUDIO_FRAME_BYTES);
     if (ret != L_AUD_ERR_SUCCESS)
@@ -454,6 +477,7 @@ int demo_ai_audio_play(const demo_ai_audio_lease_t *lease,
                        const int16_t *pcm, uint32_t samples)
 {
     Liot_AudErr_e ret;
+    int levels_ret;
     size_t bytes;
 
     if (!demo_ai_audio_lease_is_valid(lease))
@@ -469,7 +493,11 @@ int demo_ai_audio_play(const demo_ai_audio_lease_t *lease,
         return -2;
     }
 
-    (void)demo_ai_audio_apply_levels(lease);
+    levels_ret = demo_ai_audio_apply_levels(lease);
+    if (levels_ret != 0)
+    {
+        return levels_ret;
+    }
     bytes = samples * sizeof(*pcm);
     s_play_done = false;
     ret = Liot_AudioPlay((uint8_t *)(uintptr_t)pcm, (int)bytes);
