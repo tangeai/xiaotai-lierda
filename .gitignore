@@ -1,31 +1,5 @@
-# Build outputs and the compiler extracted on first build.
-/gccout/
-/out/
-/tools/toolchain/gcc/
-
-# Publish only the complete firmware package.
-/firmware/*
-!/firmware/L_CT4IT00_YP00W_01_V04_NT26F6D0_01.binpkg
-!/firmware/lite/
-/firmware/lite/*
-!/firmware/lite/latest.binpkg
-!/firmware/lite/SHA256SUMS.txt
-!/firmware/pro/
-/firmware/pro/*
-!/firmware/pro/latest.binpkg
-!/firmware/pro/SHA256SUMS.txt
-!/firmware/pro/manifest.json
-!/firmware/tirtc_lite/
-/firmware/tirtc_lite/*
-!/firmware/tirtc_lite/TiRTC_lite_NT26F6D0_01.binpkg
-!/firmware/tirtc_lite/SHA256SUMS.txt
-
-# Local diagnostics and editor state.
-/.codex*/
-/.vscode/
-*.log
-Thumbs.db
-Desktop.ini
-
-# Private parameters for the optional Zhongyi reference demo.
-/examples/L_CT4IT00_YP00W_01_V04/demo/src/demo_zhongyi_ai/inc/ai_app_private_config.h
+tools/toolchain/gcc
+gccout
+/firmware/*/*.tmp
+examples/L_CT4IT00_YP00W_01_V04/demo/src/demo_zhongyi_ai/inc/ai_app_private_config.h
+examples/NT26FxDx_OpenKit/demo/src/demo_zhongyi_ai/inc/ai_app_private_config.h

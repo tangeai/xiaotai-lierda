@@ -20,19 +20,17 @@ else
 endif
 
 export GCC_PATH		:= $(TOP)/tools/toolchain/gcc
-export BUILDDIR		:= $(TOP)/gccout/$(PROJECT)
-export BINNAME		:= $(PROJECT)_$(MODEM)
+ifeq ($(PROJECT),NT26FxDx_OpenKit)
+ifneq ($(filter $(APP_VARIANT),lite pro),)
+export BUILDDIR ?= $(TOP)/gccout/tirtc_$(APP_VARIANT)$(if $(filter y,$(TIRTC_ASSET_INSTALLER)),_assets)
+export BINNAME := TiRTC_$(APP_VARIANT)$(if $(filter y,$(TIRTC_ASSET_INSTALLER)),_Assets)_$(MODEM)
+else
+export BUILDDIR ?= $(TOP)/gccout/$(PROJECT)
+endif
+else
+export BUILDDIR ?= $(TOP)/gccout/$(PROJECT)
+endif
 export TOOLCHAIN	:= GCC
-# Explicit product builds never reuse another product's object files.
-# Legacy and official-demo commands keep their original output directory.
-ifeq ($(PROJECT),L_CT4IT00_YP00W_01_V04)
-TIRTC_PRODUCT := $(if $(strip $(APP_VARIANT)),$(APP_VARIANT),$(if $(filter tirtc,$(BUILD_MODE)),pro))
-ifneq ($(strip $(TIRTC_PRODUCT)),)
-TIRTC_OUTPUT_SUFFIX := $(if $(filter y,$(TIRTC_ASSET_INSTALLER)),_assets)
-export BUILDDIR := $(TOP)/gccout/tirtc_$(TIRTC_PRODUCT)$(TIRTC_OUTPUT_SUFFIX)
-export BINNAME := TiRTC_$(TIRTC_PRODUCT)$(if $(TIRTC_OUTPUT_SUFFIX),_Assets)_$(MODEM)
-endif
-endif
 ###########################################################
 # tools
 ###########################################################

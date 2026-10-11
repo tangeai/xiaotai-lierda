@@ -1,0 +1,4 @@
+# Generated files; rebuild with this product's build.bat.
+__pycache__/
+*.py[cod]
+/firmware/

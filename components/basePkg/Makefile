@@ -12,7 +12,6 @@ BASEPKG_MDM_DIR		:= $(BASEPKG_DIR)/$(MODEMPKG)
 
 BASEPKG_PARTITION	:= $(BASEPKG_MDM_DIR)/partition_info.txt
 BASEPKG_MEMMAP		:= $(BASEPKG_MDM_DIR)/mem_map.txt
-APP_PACKAGE_MEMMAP ?= $(BUILDDIR)/mem_map.txt
 BASEPKG_COMDB		:= $(BASEPKG_MDM_DIR)/comdb.txt
 BASEPKG_ELF			:= $(BASEPKG_MDM_DIR)/ap_lierda_app.elf
 
@@ -116,7 +115,7 @@ _Generate_basebinpkg_:
 	-def $(BASEPKG_MEMMAP) \
 	-outfile $(BUILDDIR)/$(MODEMPKG)_base.binpkg
 	
-_Generate_binpkg_: $(BASEPKG_OBJ) $(APP_PACKAGE_MEMMAP)
+_Generate_binpkg_: $(BASEPKG_OBJ) $(BUILDDIR)/mem_map.txt
 	$(Q)$(FCELF) -M -input $(BASEPKG_BL_BIN) -addrname BL_PKGIMG_LNA -flashsize BOOTLOADER_PKGIMG_LIMIT_SIZE \
 	-input $(BASEPKG_AP_BIN) -addrname AP_PKGIMG_LNA -flashsize AP_PKGIMG_LIMIT_SIZE \
 	-input $(BASEPKG_CP_BIN) -addrname CP_PKGIMG_LNA -flashsize CP_PKGIMG_LIMIT_SIZE \
@@ -125,5 +124,5 @@ _Generate_binpkg_: $(BASEPKG_OBJ) $(APP_PACKAGE_MEMMAP)
 	-pkgmode 1 \
 	-banoldtool 1 \
 	-productname $(BASEPKG_PRODUCT) \
-	-def $(APP_PACKAGE_MEMMAP) \
+	-def $(BUILDDIR)/mem_map.txt \
 	-outfile $(BUILDDIR)/$(BINNAME)_$(APP_VERSION).binpkg
