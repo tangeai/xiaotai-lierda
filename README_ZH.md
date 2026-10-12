@@ -1,6 +1,6 @@
 # OpenCPU README_zh
 
-**[English](README.md) | 中文**
+**[English](README_SDK.md) | 中文**
 
 # 1 简介
 

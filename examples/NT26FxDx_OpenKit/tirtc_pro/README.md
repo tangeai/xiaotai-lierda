@@ -1,10 +1,10 @@
 # pro · TiRTC × 利尔达 OpenCPU 触屏音视频示例
 
-[原厂 SDK 说明](../../../README.md)
+[返回产品选择](../../../README.md)
 
 用一台带屏幕、摄像头、麦克风和喇叭的 4G 设备，体验 **AI 对话、AI 呼叫联系人、微信/设备音视频电话、实时查看与远程对讲、多人对讲**。
 
-本项目基于 **NT26FxDx_OpenKit / NT26F6D0（EC718PM）**，展示 TiRTC 如何接入这套 OpenCPU 硬件。先按本文把设备运行起来，再沿文档读懂平台接入、媒体传输和应用代码，最后替换成自己的产品界面与业务。
+本项目基于 **L-CT4IT00-YP00W-01-V04 / NT26F6D0（EC718PM）**，工程目录为 `NT26FxDx_OpenKit`，展示 TiRTC 如何接入这套 OpenCPU 硬件。先按本文把设备运行起来，再沿文档读懂平台接入、媒体传输和应用代码，最后替换成自己的产品界面与业务。
 
 <p>
   <img src="docs/assets/v4-guide/home.png" width="320" alt="当前源码渲染：表情首页">
@@ -59,7 +59,7 @@
 | 多人对讲：创建、加入与房间讲话 | 01:54 | [观看演示](#video-group-intercom) · [下载原始 MP4 · 17.2 MiB](docs/assets/videos/group-intercom.mp4?raw=true) |
 
 
-**演示与当前版本：** 录像未注明对应固件版本；其中 AI 呼叫录像展示的是**语音电话**，当前源码普通 AI 呼叫默认视频、明确要求语音时仍可发起音频通话。录像用于了解操作，不能代替 [发布包验证记录](docs/构建与固件.md)。视频文件的画幅和 30 fps 是录制与分发格式，不是设备摄像头上传参数。
+**演示与当前版本：** 录像未注明对应固件版本；其中 AI 呼叫录像展示的是**语音电话**，当前源码普通 AI 呼叫默认视频、明确要求语音时仍可发起音频通话。录像用于了解操作，不能代替对应固件的实机验收；包用途见 [构建与固件](docs/构建与固件.md)。视频文件的画幅和 30 fps 是录制与分发格式，不是设备摄像头上传参数。
 
 <a id="video-binding"></a>
 <details open>
@@ -151,7 +151,7 @@ https://github.com/user-attachments/assets/c5d0ade8-9627-4e2a-9795-d41af390b7c8
 
 | 项目 | 本示例要求 |
 | --- | --- |
-| 板卡/模组 | NT26FxDx_OpenKit，NT26F6D0 / F6D_D；采购时核对带触屏、摄像头的板型 |
+| 板卡/模组 | L-CT4IT00-YP00W-01-V04（工程名 `NT26FxDx_OpenKit`），NT26F6D0 / F6D_D；采购时核对带触屏、摄像头的板型 |
 | 显示与触摸 | ST7789、FT6336；当前逻辑横屏 320×240 |
 | 摄像头/声音 | GC032A、ES8311、麦克风、喇叭 |
 | 外置资源存储 | P25Q32SH 4 MiB SPI Flash，配套字体/背景资源 |
@@ -173,7 +173,7 @@ https://github.com/user-attachments/assets/c5d0ade8-9627-4e2a-9795-d41af390b7c8
 | 3 | [SDK 快速开始](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/zh_CN/general/quick_start.html) | 工程目录、编译环境、硬件型号选择 |
 | 4 | [固件下载工具说明](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/zh_CN/tools/flash/flash-tool.html) | 选择镜像、进入下载、确认成功与查看日志 |
 
-[利尔达文档首页](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/zh_CN/) · [本仓库保留的原始 SDK 英文说明](../../../README.md) · [原始 SDK 中文说明](../../../README_ZH.md)。
+[利尔达文档首页](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/zh_CN/) · [本仓库保留的原始 SDK 英文说明](../../../README_SDK.md) · [原始 SDK 中文说明](../../../README_ZH.md)。
 
 **板卡应用补充：** [NT26FxDx OpenKit 应用指导（含 V04）](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/zh_CN/examples/NT26FxDx%20OpenKit/NT26FxDx%20OpenKit%20Application%20Guide_Rev0.1.html) · [OpenKit TiRTC 应用开发指导](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/zh_CN/examples/NT26FxDx%20OpenKit%20TiRTC/NT26FxDx%20OpenKit%20TiRTC%20Application%20Guide_Rev0.1.html)。原始 SDK 中的旧 V04 快速开始链接现已失效，改从这些入口查阅；原始 SDK 说明仍保留原文。官方示例的界面和业务可能与本触屏应用不同，编译选项和操作以本文为准。
 
@@ -186,13 +186,13 @@ https://github.com/user-attachments/assets/c5d0ade8-9627-4e2a-9795-d41af390b7c8
 
 当前使用公共官方 SDK 1.7.0 / `F6D_D`，应用位于 `examples/NT26FxDx_OpenKit/tirtc_pro`。从旧 A 底包升级时须完整烧录配套底包与 APP；编译参数和烧录步骤见 [操作说明](docs/当前设备操作.md#build-flash)。
 
-构建会生成根目录 `firmware/pro/YYYY_MM_DD_HH_MM_SS_pro.binpkg` 出厂初始化包，包含 D 底包、应用及外置 Flash 字库/背景；已有正常 UI 资源、需要保留外置文件时，使用 `gccout/tirtc_pro/TiRTC_pro_NT26F6D0_pro_release.binpkg` 普通应用维护包。不能使用旧 A 包更新当前 D 应用。仓库仅保留当前出厂发布包和同目录的 `SHA256SUMS.txt`，维护包、镜像明细及中间产物保留在 `gccout`，不另行上传。先获取包含本产品目录及公共 SDK 的完整工程（仅克隆原厂 SDK 不含本产品），再完成 [Python 环境准备](docs/当前设备操作.md#python-setup)，在工程根目录执行：
+构建会生成根目录 `firmware/pro/YYYY_MM_DD_HH_MM_SS_pro.binpkg` 出厂初始化包，包含 D 底包、应用及外置 Flash 字库/背景；已有正常 UI 资源、需要保留外置文件时，使用 `gccout/tirtc_pro/TiRTC_pro_NT26F6D0_pro_release.binpkg` 普通应用维护包。不能使用旧 A 包更新当前 D 应用。仓库仅保留 [当前出厂发布包](../../../firmware/pro/) 和同目录的 [SHA-256 校验清单](../../../firmware/pro/SHA256SUMS.txt)，维护包、镜像明细及中间产物保留在 `gccout`，不另行上传。先按 [源码准备](../../../README.md#编译与下载)获取包含本产品目录及公共 SDK 的完整工程（仅克隆原厂 SDK 不含本产品），再完成 [Python 环境准备](docs/当前设备操作.md#python-setup)，在工程根目录执行：
 
 ```powershell
 .\examples\NT26FxDx_OpenKit\tirtc_pro\build.bat
 ```
 
-统一入口保留内部 `APP_VERSION=pro_release`，对外生成 `firmware/pro/YYYY_MM_DD_HH_MM_SS_pro.binpkg`，时间取对应 `.bin` 的编译完成时间（UTC+8），不是重新命名的时间；普通应用包为 `gccout/tirtc_pro/TiRTC_pro_NT26F6D0_pro_release.binpkg`。设备日志中的版本字符串带有 SDK 前缀 `appVpro_release`。烧录步骤见 [编译烧录](docs/当前设备操作.md#build-flash)，构建及实机验证范围见 [发布说明](docs/构建与固件.md)。
+统一入口保留内部 `APP_VERSION=pro_release`，对外生成 `firmware/pro/YYYY_MM_DD_HH_MM_SS_pro.binpkg`，时间取对应 `.bin` 的编译完成时间（UTC+8），不是重新命名的时间；普通应用包为 `gccout/tirtc_pro/TiRTC_pro_NT26F6D0_pro_release.binpkg`。设备日志中的版本字符串带有 SDK 前缀 `appVpro_release`。烧录步骤见 [编译烧录](docs/当前设备操作.md#build-flash)，固件用途与构建方式见 [构建与固件](docs/构建与固件.md)。
 
 ### 4.2 一次烧录固件与 UI 资源
 

@@ -1,237 +1,51 @@
-# OpenCPU README_EN
+# TiRTC × 利尔达 OpenCPU
 
-**English | [中文](README_ZH.md)**
+基于利尔达 OpenCPU 的小钛 4G 终端示例，通过 **TiRTC** 实现 AI 对话、微信与设备通话、远程对讲。选择你的产品，跟着演示和操作说明开始体验。
 
-## TiRTC Lite / Pro 产品入口
+## 选择你的产品
 
-两个产品使用 NT26F6D0、官方 SDK 1.7.0 和 `F6D_D` 底包；硬件、功能与操作说明见各自文档。
+### lite · OLED 语音终端
 
-| 产品 | 产品文档 | 当前烧录包 | 校验清单 |
-| --- | --- | --- | --- |
-| Lite 语音终端 | [Lite README](examples/NT26FxDx_OpenKit/tirtc_lite/README.md) | [firmware/lite](firmware/lite/) | [SHA256SUMS.txt](firmware/lite/SHA256SUMS.txt) |
-| Pro 触屏音视频终端 | [Pro README](examples/NT26FxDx_OpenKit/tirtc_pro/README.md) | [firmware/pro](firmware/pro/) | [SHA256SUMS.txt](firmware/pro/SHA256SUMS.txt) |
+128×64 OLED、三个按键，支持 AI 语音对话、AI 呼叫联系人、微信与设备语音电话、远端语音对讲和独立多人房间。音量与麦克风增益重启恢复默认。
 
-从仓库根目录的 PowerShell 执行对应产品的构建入口，生成 `YYYY_MM_DD_HH_MM_SS_lite.binpkg` 或 `YYYY_MM_DD_HH_MM_SS_pro.binpkg`，时间取应用 `.bin` 的编译完成时间（UTC+8）：
+**[进入 lite：看演示、准备硬件、逐步上手 →](examples/NT26FxDx_OpenKit/tirtc_lite/README.md)**
+
+### pro · 触屏音视频终端
+
+320×240 触屏与摄像头，支持 AI 对话和字幕、AI 呼叫联系人、微信与设备音视频电话、摄像头实时查看和远程对讲。支持扬声器音量、麦克风增益与音频开关记忆；支持房间创建/加入、成员列表和按住讲话的多人对讲。
+
+**[进入 pro：看演示、准备硬件、逐步上手 →](examples/NT26FxDx_OpenKit/tirtc_pro/README.md)**
+
+## 编译与下载
+
+也可以直接下载最新固件，按对应入门页完成烧录。需要从源码编译时，在本地磁盘的短英文路径（例如 `C:\dev`，避免空格和中文）打开 Windows PowerShell，获取完整仓库：
 
 ```powershell
-.\examples\NT26FxDx_OpenKit\tirtc_lite\build.bat
-.\examples\NT26FxDx_OpenKit\tirtc_pro\build.bat
+git clone -c core.longpaths=true https://github.com/tangeai/xiaotai-lierda.git
+cd xiaotai-lierda
 ```
 
-Pro 构建需要 Python 3.10 或更新版本；当前 Pro 发布包包含外置字库和背景，烧录会覆盖外置 Flash，详见 [构建与固件](examples/NT26FxDx_OpenKit/tirtc_pro/docs/构建与固件.md)。
+也可下载完整仓库 ZIP 并解压后进入根目录；不要只下载产品子目录。仓库已包含 Windows 编译工具和 GCC 压缩包，首次编译会自动解压到 `tools/toolchain/gcc`，无需另外安装 ARM 编译器。pro 还需按 [Python 环境准备](examples/NT26FxDx_OpenKit/tirtc_pro/docs/当前设备操作.md#python-setup)安装 Python 3.10 或更高版本。准备完成后按产品执行：
 
-原厂 SDK 的 Apache-2.0 许可保留在根目录 [LICENSE](LICENSE)；两产品自有应用采用各产品目录的 MIT 许可，供应 SDK、底包及第三方组件按各自条款，见 [Lite 第三方说明](examples/NT26FxDx_OpenKit/tirtc_lite/THIRD_PARTY_NOTICES.md) / [Pro 第三方说明](examples/NT26FxDx_OpenKit/tirtc_pro/THIRD_PARTY_NOTICES.md)。下方保留原厂 SDK 说明。
-
-# 1 Introduction
-
-OPENSDK is an open SDK development system developed by Lierda for Cat.1 users. The kernel is based on a base package separation architecture built on FreeRTOS, featuring complete task management, memory management, exception management, system clock, and interrupt management. In addition to basic kernel functions, OPENSDK provides rich peripheral management, sleep/wake, secure boot, remote upgrade, and other features for Cat.1 modules, offering developers a "one-stop" complete software platform that effectively lowers the development barrier and shortens the development cycle.
-
-# 2 OPENSDK Architecture
-
-OPENSDK can be divided into three layers in terms of design: Base Package Layer, System Layer, and User Layer.
-
-```text
-+----------------------------------------------------------------+
-| [User Layer]   app        demo        ai        ...            |
-+----------------------------------------------------------------+
-|      stdlibC API | EC API | LIOT API | ThreadPart API          |
-+----------------------------------------------------------------+
-| [System Layer]                                                 |
-|  +-------------------------+  +----------------------------+   |
-|  | TTS  | OTA  | Driver    |  |        ThirdParty           |  |
-|  +------+------+-----------+  |   lwip        CJSON         |  |
-|  | SECBOOT     | PRECFG    |  |   Freertos    websocket     |  |
-|  +-------------+-----------+  |   lvgl        mbedtls       |  |
-|  | LIOTAPI .h  | ECAPI .h  |  |   ...                       |  |
-|  +-------------+-----------+  +-----------------------------+  |
-+----------------------------------------------------------------+
-| [Base Package Layer]                                           |
-|  +--------+------------+------+------+--------------+          |
-|  | PortLib| bootloader |  AP  |  CP  | ELF Parser   |          |
-|  +--------+------------+------+------+--------------+          |
-|  |     LogLib          |    MemoryMap               |          |
-|  +---------------------+----------------------------+          |
-|                                                                |
-+----------------------------------------------------------------+
-| [Module]  NT26FCNB60WNA   NT26K2B1   NT26F6D0   ...            |
-+----------------------------------------------------------------+
-```
-
-1. **Base Package Layer**: The base package layer is not visible to users and is maintained by Lierda. Library files for different module models are packaged and placed in the `components/basePkg/` directory. The base package provides the most fundamental build environment for code execution, integrating the APIs and library files required by the SDK. The SDK is developed based on the APIs exposed by the base package.
-
-2. **System Layer**: The core code that runs the SDK. After power-on, the system first completes base package and kernel initialization, then loads system layer components, starting execution from `components/kernel/core/main.c:main()`. The system layer adopts a modular design including kernel, configuration, drivers, open-source third-party libraries, TTS, OTA upgrade, etc. All modules except Kernel and configuration can be flexibly trimmed.
-
-3. **User Layer**: The area provided for developers to write their code. The system layer `Main()` function creates an independent thread of 10K size that calls the code entry point `void user_main(void)`. User business code typically starts execution from this entry point. Code is mainly located in the `examples` directory. Lierda provides two preset projects for developers. The `app` project is an empty project with no specific functionality — users can develop their own code based on it. The `demo` project is an API interface example demo provided by Lierda for customers as a reference.
-
-# 3 Directory Structure
-
-```text
-──
-├── components                  (Component library, core code is placed here)
-│   ├── basePkg                 (Base package directory, generated by Lierda for different models)
-│   │   └── F6B_A, F7B_A, F6D_A, K2B_A, ...
-│   ├── driver                  (Open low-level drivers)
-│   │   └── lcd, camera, ...
-│   ├── kernel
-│   │   ├── app.ld              (Linker script)
-│   │   ├── core                (System startup entry)
-│   │   ├── ecapi               (Header files for Eigencomm platform APIs)
-│   │   ├── include             (General header file directory)
-│   │   └── lierda_api          (Header files for Lierda APIs)
-│   ├── ota                     (FOTA related code)
-│   ├── precfg                  (Preset config, parameterized by config/default.ini and iodriver.ini)
-│   ├── secboot                 (Secure boot verification related code)
-│   ├── thirdparty              (Open-source third-party source code)
-│   │   └── CJSON, freertos, websockets, lwip, mbedtls, etc.
-│   └── tts                     (TTS related code)
-├── config
-│   ├── default.ini             (Preset config: default UART AT port, default CID, APN, etc.)
-│   └── iodriver.ini            (IO pin config presets for UART/SPI/I2S/I2C/CAN drivers)
-├── docs                        (Related documentation)
-├── examples
-│   ├── app                     (Default project, no actual functionality, add customer code here)
-│   └── demo                    (Default demo project, provides API interface examples)
-├── LICENSE                     (Open-source code license)
-├── build.bat                   (Build entry for Windows)
-├── Makefile                    (Makefile build entry, can compile directly on Linux)
-├── README_EN.md                (English README file)
-├── README.md                   (Chinese README file)
-├── rules                       (Makefile build rules)
-│   └── Makefile, Makefile.defs, Makefile.modem, Makefile.rules, Makefile.tools, Makefile.vars
-└── tools                       (Scripts and tools)
-    └── 7z, appota, fcelf, lfsutil, msys64, precfg, secboot, toolchain
-```
-
-# 4 Supported Models
-
-Module models can be identified by the silkscreen on the module shielding cover. Base packages are split into different versions based on chip and functionality.
-
-| Base Package Version | Chip Description | **FLASH** | **RAM** | **File System** | Compatible Module Models |
-| --- | --- | --- | --- | --- | --- |
-| F6B_A | EC718PM B Series | 812 KB | 1 MB | 780 KB | NT26FCNB30WNA / NT26FCNB60WNA |
-| F6D_A | EC718PM D Series | 812 KB | 1 MB | 780 KB | NT26F6D0 (all series) / NT26F7D0 |
-| F7B_A | EC718PM B Series VoLTE | 452 KB | 1 MB | 168 KB | NT26FCNB70WNA |
-| K2B_A | EC716E B Series | 844 KB | 512 KB | 840 KB | NT26K2B1 / NT26K2B3 |
-| K2E_A | EC716E E Series | 844 KB | 512 KB | 840 KB | NT26K2E0 |
-| K2F_A | EC716E F Series | 844 KB | 512 KB | 840 KB | NT26KCNF20NNA |
-| F6E_A | EC718PM F Series | 844 KB | 512 KB | 840 KB | NT26F6E0 (under development) |
-| F6C_A | EC718PM F Series | 812 KB | 1 MB | 780 KB | NT26F6C0 |
-
-# 5 Peripheral Resources
-
-| Peripheral | K2B_A | F6B/F6D/F7B |
+| 产品 | 编译命令 | 最新固件 |
 | --- | --- | --- |
-| **UART** | 3 channels | 4 channels |
-| | Baud rate: 4.9Kbps, 9.6Kbps, 115.2Kbps, 921.6Kbps, up to 3 Mbps<br>Data bits: 5~8 bits<br>Parity: None, Odd, Even<br>Stop bits: 1, 2<br>Flow control supported<br>UART1 supports LPUART | |
-| **GPIO** | 21 channels | 39 channels |
-| | Includes 9 AONGPIO channels<br>Level: Default 1.8V, software adjustable range: 1.65V~3.30V<br>Configuration mode: Input, Output<br>Interrupt trigger: Low level, High level, Rising edge, Falling edge<br>Internal pull-up/pull-down: Supported on some IOs | |
-| **I2C** | Mode: Supports Master and Slave modes<br>Speed: 100 KHz~1 MHz<br>Addressing: Supports 7/10-bit addressing | |
-| **SPI** | 1 channel | 2 channels |
-| | Mode: Supports Master and Slave modes<br>Speed: Up to 25.6 MHz<br>Data width: 8-bit, 16-bit | |
-| **USP** | 1 channel | 3 channels |
-| | Quantity: 3 channels (I2S/CSPI/LSPI)<br>Mode: Supports Master and Slave modes<br>Supports 8~96k, 16 or 24-bit, 8~48k, 32-bit<br>Supports standard I2S/LJ/RJ mode, PCM mode A/B<br>I2S/PCM supports TXRX/TX/RX<br>CSPI supports slave reception<br>USP0/USP1 have hardware acceleration<br>Newly supports QSPI and 8080 interface (only 718(P_M/P_VM) series) | |
-| **USB** | Supports USB 2.0<br>Supports 480Mbps (HS), 12Mbps (FS) data transfer<br>Supports device mode | |
-| **ADC** | 2 channels | 4 channels |
-| | Analog channels: 4, input range: 0V~3.4V<br>Temperature sensor: 1 channel, input range: -40°C~85°C<br>VBAT voltage: 1 channel, input range: 2.7V~4.5V<br>Resolution: 12-bit AUXADC | |
-| **Timer** | Quantity: Supports 6 hardware timers | |
-| **PWM** | Quantity: Supports 6 channels | |
-| **Low-power Timer** | Quantity: Supports 7 | |
-| **WAKEUP** | Quantity: Supports 6 low-power wake-up sources | |
-| **CAN** | Not supported | Not supported |
+| lite | `.\examples\NT26FxDx_OpenKit\tirtc_lite\build.bat` | [下载 lite 最新固件](firmware/lite/) |
+| pro | `.\examples\NT26FxDx_OpenKit\tirtc_pro\build.bat` | [下载 pro 最新固件](firmware/pro/) |
 
-# 6 Quick Development
+pro 最新固件为出厂初始化包，包含固件、外置 Flash 字库和背景，**一次烧录即可；会覆盖外置 Flash 文件，请先备份需要保留的文件。** 板型要求、烧录步骤和验证范围见 [pro 入门指南](examples/NT26FxDx_OpenKit/tirtc_pro/docs/当前设备操作.md#build-flash)。
 
-Below is a quick development guide. For more detailed development reference, see ["Quick Start Guide"](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/en/general/quick_start.html).
+固件按应用编译完成时间（UTC+8）命名为 `YYYY_MM_DD_HH_MM_SS_lite.binpkg` 或 `YYYY_MM_DD_HH_MM_SS_pro.binpkg`，并分别提供 [lite 校验清单](firmware/lite/SHA256SUMS.txt) / [pro 校验清单](firmware/pro/SHA256SUMS.txt)。操作见 [pro 多人对讲](examples/NT26FxDx_OpenKit/tirtc_pro/docs/多人对讲.md)，包内容和构建方式见 [pro 构建与固件](examples/NT26FxDx_OpenKit/tirtc_pro/docs/构建与固件.md)。
 
-## 6.1 Get Module Model and Confirm Build Project
+## 从使用到开发
 
-- Check the module model on the module silkscreen.
-- Project names are under the `examples/` directory, where the directory name corresponds to the project name, e.g., `examples/demo` -> `demo` project.
+两套产品共用公共 SDK 源码和工具链，应用代码、配置与编译输出各自独立。当前使用官方 SDK 1.7.0 和 `F6D_D` 底包，默认开启利尔达 AEC；AI 对话支持边播边听与插话打断。按产品入门页的“操作 → 架构 → TiRTC 接入 → AI 呼叫配置”继续阅读：[lite 代码架构](examples/NT26FxDx_OpenKit/tirtc_lite/docs/代码与流程详解.md) / [pro 代码架构](examples/NT26FxDx_OpenKit/tirtc_pro/docs/代码与流程详解.md)。
 
-## 6.2 Build
+## 官方资料
 
-The SDK supports both Windows and Linux development.
-On Windows you can use the lierda_upgrade_tool or Makefile to build. Choose the method that suits your situation. For details, refer to: ["Lierda Cellular Firmware Flashing Tool User Guide"](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/en/tools/flash/flash-tool.html)
+- [TiRTC 产品与接入文档](https://docs.tange.ai/products/tirtc/)
+- [小钛体验平台](https://xiaotai.chat/)
+- [利尔达快速上手](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/zh_CN/general/quick_run_demo.html)
+- [利尔达文档首页](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/zh_CN/)
+- 本仓库保留的 [SDK 英文说明](README_SDK.md) / [SDK 中文说明](README_ZH.md)
 
-Below is the main introduction to command-line building from the SDK root directory:
-
-**6.2.1 Linux Build**
-
-Linux recommended system: Ubuntu 20.04 or above. Make, Python3, and 32-bit runtime environment need to be installed.
-
-```bash
-sudo apt update
-sudo apt install -y make
-sudo apt install -y lib32z1 lib32stdc++6
-sudo apt install -y python3.10 python3.10-dev python3.10-distutils
-```
-
-```bash
-# Enter SDK directory
-cd CAT1.bis_OpenCPU
-# Incremental build, unchanged files are not recompiled
-make
-# Clean build, cleans examples then recompiles
-make all
-# Build with parameters: clean build + specify demo project + use F6D_A base package
-make all PROJECT=demo MODEM=NT26F6D0 MODEMPKG=F6D_A
-```
-
-**6.2.2 Windows Build**
-
-```bash
-# Enter SDK directory
-cd CAT1.bis_OpenCPU
-# Incremental build, unchanged files are not recompiled
-./build.bat
-# Clean build, cleans examples then recompiles
-./build.bat all
-# Build with parameters: clean build + specify demo project + use F6D_A base package
-./build.bat all PROJECT=demo MODEM=NT26F6D0 MODEMPKG=F6D_A
-```
-
-## 6.3 Generated Files
-
-Generated files are located in the **gccout/project_name** directory under the root. Taking the demo project + module NT26F6D0 as an example, in the **gccout/demo/** directory:
-
-- `demo_NT26F6D0_01.binpkg`: Combined package of base package + application layer.
-- `demo_NT26F6D0.bin`: Package containing only the application layer.
-- `F6D_A_base.binpkg`: Combined package containing only the base package without the application.
-
-## 6.4 Flashing
-
-We use the lierda_upgrade_tool for flashing. For tool usage documentation, refer to:
-
-["Lierda Cellular Firmware Flashing Tool User Guide"](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/en/tools/flash/flash-tool.html)
-
-## 6.5 Viewing Logs
-
-Open any serial port tool, select baud rate 115200, open the serial port, and you can view the APP logs.
-
-For more log details, refer to: ["Windows Log Capture Guide"](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/en/tools/Packet%20capture/packet-capture.html)
-
-# 7 Documentation
-
-[General Guide](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/en/general/index.html) | [Hardware](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/en/hardware/index.html) | [Software Development](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/en/software/index.html) | [Tools](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/en/tools/index.html)
-
-# 8 More Development Examples
-
-["Based on L-CT4IT00-YP00W-01_V04 Hardware"](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/en/examples/L-CT4IT00-YP00W-01_V04/L-CT4IT00-YP00W-01_V04_quick_start.html)
-
-["Lierda XiaoDa Application Guide"](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/en/examples/XiaoDa/XiaoDa%20Application%20Guide_Rev0.1.html)
-
-# 9 Tools
-
-- ["USB Driver Installation Guide"](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/en/tools/usb/USB_Driver_Installation_Guide.html)
-
-# 10 License
-
-71x OPENSDK follows the Apache License 2.0 open-source license. It can be used freely in commercial products without the need to disclose private code, with no potential commercial risk.
-
-```c
-/*
- * Copyright (c) Lierda Science & Technology Group Co., Ltd.
- *
- * SPDX-License-Identifier: Apache-2.0
- */
-```
+探鸽自有的应用代码与文档采用 MIT 许可证（[lite](examples/NT26FxDx_OpenKit/tirtc_lite/LICENSE) / [pro](examples/NT26FxDx_OpenKit/tirtc_pro/LICENSE)）。利尔达 OpenCPU SDK、原厂派生代码、TiRTC 预编译 SDK、第三方组件及字体资源保留各自授权，具体范围见 [许可与第三方说明](THIRD_PARTY_NOTICES.md)。

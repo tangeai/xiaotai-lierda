@@ -53,4 +53,4 @@ This module only samples status; it does not enable or disable the product audio
 
 Current audio configuration and persistence are owned by media/preferences. `board_compat` selects the official `components/basePkg/$(MODEMPKG)` binaries; this product requires `MODEMPKG=F6D_D`. Identity, resource and status errors must stay visible without blocking UI/media tasks.
 
-See [architecture](../docs/代码与流程详解.md) and the [release record](../docs/构建与固件.md). Static/host checks cannot establish actual RTC accuracy, audio behavior or hardware stability.
+See [architecture](../docs/代码与流程详解.md) and the [build and firmware guide](../docs/构建与固件.md). Static/host checks cannot establish actual RTC accuracy, audio behavior or hardware stability.

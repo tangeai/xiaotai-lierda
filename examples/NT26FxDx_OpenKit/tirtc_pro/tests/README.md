@@ -35,6 +35,7 @@ Pro 默认启用 F6D_D 3A，保留自身 G.711 编解码、音量曲线、视频
 | `run_ai_aec_media_test.py --cc <C编译器> --cjson <cJSON.c>` | AEC 关闭 49 项、开启 94 项；全双工、背压、关麦、告别语排尾、打断时新包保留、尾声静音恢复、取消优先、真实错误及 G.711/业务协议 |
 | `run_calls_aec_backpressure_test.py --cc <C编译器>` | 48 项；微信/设备/LIVE 在 AEC 开关两种模式下的保序重试、上行、静音、真实故障、超时恢复/暂停/回绕时间戳 |
 | `run_group_audio_test.py --cc <C编译器> --cjson <cJSON.c> --aec 1` | 19 项；包含 AEC 暂满时按住讲话仍可上传、FIFO 不重播、0 额外预热及真实错误 |
+| `run_factory_package_test.py` | 15 项；F6D_D 分区/包格式、同名重打包、发布失败回滚、临时文件清理及回滚受阻时保留恢复副本 |
 | `run_aec_build_stamp_test.py` | SDK 自带 make/sh 的 7 项检查；重复配置不重编，AEC 开关及 delay 变化必须重编 |
 | `run_product_include_dependency_test.py --gcc-path <ARM工具链目录>` | SDK make 的 12 项增量检查；产品头文件和 `.inc` 变化重编应用，`lv_conf.h` 同时重编 LVGL，测试桩不触发固件重编 |
 | `run_tirtc_stop_gate_test.py --cc <C编译器>` | 14 项；首个 Stop 前原子复核，保留 Pro 服务占用/待机/代际。SDK Stop 内部晚到回调的 join 窗口单列限制，不计通过 |
@@ -43,7 +44,7 @@ Group 后端已扩为两种 AEC 配置各 48 项；既有协议 5 项、AEC 关�
 
 检查还覆盖打断期间的新音频保留、尾声播放、AEC 时间戳和构建配置切换。
 
-构建与当前占用统一见[发布记录](../docs/构建与固件.md)，避免把静态 RAM 余量当成运行时可用堆。普通维护包不含外置文件系统；出厂包会覆盖外置资源分区。
+构建与内存统计方式见[构建与固件](../docs/构建与固件.md)，避免把静态 RAM 余量当成运行时可用堆。普通维护包不含外置文件系统；出厂包会覆盖外置资源分区。
 
 ## 原生 UI
 

@@ -1,6 +1,6 @@
 # lite · TiRTC × 利尔达 OpenCPU 语音终端
 
-[原厂 SDK 说明](../../../README.md)
+[返回产品选择](../../../README.md)
 
 探鸽智能基于利尔达 OpenCPU SDK 开发的 4G 语音设备开源工程，通过 **TiRTC** 实现 AI 对话、通过 AI 呼叫微信和设备联系人、微信对讲、设备互呼、远端语音对讲和独立多人房间对讲。
 
@@ -137,7 +137,7 @@ https://github.com/user-attachments/assets/2fb17e1b-e6a1-487a-8240-e44c93f56bab
 
 ## 4. 烧录并体验 TiRTC
 
-1. **取得固件**：使用根目录 `firmware/lite/` 中的当前时间戳 `.binpkg`，或按第 5 节从源码构建。包包含底包、应用及多人对讲功能，只需这一个 `.binpkg`，适用于上述硬件配置。烧录前核对同目录的 `SHA256SUMS.txt`。
+1. **取得固件**：使用根目录 [lite 固件目录](../../../firmware/lite/) 中的当前时间戳 `.binpkg`，或按第 5 节从源码构建。包包含底包、应用及多人对讲功能，只需这一个 `.binpkg`，适用于上述硬件配置。烧录前核对同目录的 [SHA-256 校验清单](../../../firmware/lite/SHA256SUMS.txt)。
 2. **烧录设备**：在利尔达烧录工具中选择“自定义镜像”，载入该文件进行**全量烧录**，具体操作见第 3 节的烧录教程。该文件不是 OTA 升级包。
 3. **联网绑定**：接好 SIM 卡与天线后上电，等待 OLED 显示六位绑定码，在[设备演示平台](https://xiaotai.chat/)登录并添加设备，绑定成功后设备进入主页。
 4. **开始对讲**：按 `KEY0` 选择、`KEY1` 确认、`KEY2` 返回。使用 AI 前先配置并绑定平台智能体；使用 WX 时，在微信搜索“探鸽小钛”，登录同一账号并完成设备的 VoIP 授权与上报。详细步骤见[当前设备操作](docs/当前设备操作.md)。
@@ -146,7 +146,7 @@ https://github.com/user-attachments/assets/2fb17e1b-e6a1-487a-8240-e44c93f56bab
 
 ## 5. 从源码接入与二次开发
 
-获取包含本产品目录和公共 SDK 的完整工程；仅克隆原厂 SDK 不包含这两套产品应用。首次编译会自动解压自带工具链。本仓库已包含 lite 应用及其编译所需的官方 SDK 1.7.0、F6D_D 底包和工具。lite 的业务、配置及 TiRTC 库位于独立的 `tirtc_lite` 目录，不引用 pro 的业务代码。在仓库根目录执行 Windows 编译命令：
+按 [源码准备](../../../README.md#编译与下载)获取包含本产品目录和公共 SDK 的完整工程；仅克隆原厂 SDK 不包含这两套产品应用。首次编译会自动解压自带工具链。本仓库已包含 lite 应用及其编译所需的官方 SDK 1.7.0、F6D_D 底包和工具。lite 的业务、配置及 TiRTC 库位于独立的 `tirtc_lite` 目录，不引用 pro 的业务代码。在仓库根目录执行 Windows 编译命令：
 
 ```powershell
 .\examples\NT26FxDx_OpenKit\tirtc_lite\build.bat

@@ -1021,12 +1021,12 @@ drain 等待上限5秒，Stop 事件等待上限10秒；失败后保留状态，
 | `TiRtcSendAudioStream` | [R:2724](../src/core/tirtc_runtime.c#L2724) | `demo_tirtc_send_audio` |
 | `TiRtcSubscribeAudio` | [R:2740](../src/core/tirtc_runtime.c#L2740) | `demo_tirtc_subscribe_audio` |
 | `TiRtcGetSendBufferUsed` | [R:2761](../src/core/tirtc_runtime.c#L2761) | `demo_tirtc_get_send_buffer_used` |
-| `TiRtcServiceRequest` | [W:1128](../src/features/wechat_call.c#L1128) | `wx_reject`；功能性直调例外 |
+| `TiRtcServiceRequest` | [W:1133](../src/features/wechat_call.c#L1133) | `wx_reject`；功能性直调例外 |
 | `TiRtcLogSetCallback` | [R:2111](../src/core/tirtc_runtime.c#L2111) | `runtime_start` |
 | `TiRtcLogSetLevel` | [R:2113](../src/core/tirtc_runtime.c#L2113) | `runtime_start` |
 | `TiRtcGetVersion` | [R:2250](../src/core/tirtc_runtime.c#L2250) | 启动完成后的库版本日志 |
 | `TiRtcGetBuildInfo` | [R:202](../src/core/tirtc_runtime.c#L202) | `runtime_dev_connect_needs_cleanup`，核对失败句柄回收白名单 |
-| `TiRtcGetErrorStr` | [R:2087](../src/core/tirtc_runtime.c#L2087)、[2131](../src/core/tirtc_runtime.c#L2131)、[2221](../src/core/tirtc_runtime.c#L2221)、[3037](../src/core/tirtc_runtime.c#L3037)；[A:2010](../src/features/ai_chat.c#L2010)、[2393](../src/features/ai_chat.c#L2393)、[2878](../src/features/ai_chat.c#L2878)；[D:1931](../src/features/device_call.c#L1931)；[L:438](../src/features/platform_intercom.c#L438)、[1076](../src/features/platform_intercom.c#L1076) | 选项、启动、停止、建连或发送错误的文字日志；A 为 `ai_send_start_session`、`ai_send_uplink_20ms`、`ai_run_session`，D 为 `dev_submit_callee_connect` |
+| `TiRtcGetErrorStr` | [R:2087](../src/core/tirtc_runtime.c#L2087)、[2131](../src/core/tirtc_runtime.c#L2131)、[2221](../src/core/tirtc_runtime.c#L2221)、[3037](../src/core/tirtc_runtime.c#L3037)；[A:2022](../src/features/ai_chat.c#L2022)、[2436](../src/features/ai_chat.c#L2436)、[2930](../src/features/ai_chat.c#L2930)；[D:1936](../src/features/device_call.c#L1936)；[L:445](../src/features/platform_intercom.c#L445)、[1120](../src/features/platform_intercom.c#L1120) | 选项、启动、停止、建连或发送错误的文字日志；A 为 `ai_send_start_session`、`ai_send_uplink_20ms`、`ai_run_session`，D 为 `dev_submit_callee_connect` |
 | `tgtrp.h` / `tgtrp_set_log_callback` | [R:2112](../src/core/tirtc_runtime.c#L2112) | 传输日志 callback 注册 |
 | `tgtrp_set_log_level` | [R:2114](../src/core/tirtc_runtime.c#L2114) | 传输日志级别和统计位 |
 

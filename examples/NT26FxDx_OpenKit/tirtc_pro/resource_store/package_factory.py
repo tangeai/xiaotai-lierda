@@ -85,6 +85,51 @@ def read_package(path: Path) -> list[dict]:
     return images
 
 
+def publish_package(release: Path, package_name: str, package_bytes: bytes) -> None:
+    """Keep the previous package/checksum pair if checksum publication fails."""
+    release.mkdir(parents=True, exist_ok=True)
+    published = release / package_name
+    checksum = release / "SHA256SUMS.txt"
+    temporary_paths: list[Path] = []
+    backup = None
+
+    def stage(content: bytes) -> Path:
+        with tempfile.NamedTemporaryFile(prefix=".pro-", suffix=".tmp", dir=release,
+                                         delete=False) as stream:
+            path = Path(stream.name)
+            temporary_paths.append(path)
+            stream.write(content)
+        return path
+
+    try:
+        expected_hash = digest(package_bytes)
+        staged = stage(package_bytes)
+        if digest(staged.read_bytes()) != expected_hash:
+            raise ValueError("Published package SHA256 mismatch")
+        staged_sums = stage(f"{expected_hash}  {package_name}\n".encode("ascii"))
+        if published.exists():
+            backup = stage(published.read_bytes())
+        staged.replace(published)
+        try:
+            staged_sums.replace(checksum)
+        except OSError:
+            try:
+                if backup is None:
+                    published.unlink()
+                else:
+                    backup.replace(published)
+            except OSError as restore_error:
+                # Retain the recoverable old bytes when the OS also blocks rollback.
+                if backup is not None:
+                    temporary_paths.remove(backup)
+                recovery = backup if backup is not None else published
+                raise OSError(f"Checksum publication and rollback failed; recovery package: {recovery}") from restore_error
+            raise
+    finally:
+        for path in temporary_paths:
+            path.unlink(missing_ok=True)
+
+
 def main() -> None:
     repo = DEFAULT_REPO
     app = Path(__file__).resolve().parent.parent
@@ -169,15 +214,7 @@ def main() -> None:
             "hardware_flash_verified": False,
         }
         # Publish only after the complete package and resource readback pass.
-        release.mkdir(parents=True, exist_ok=True)
-        staged = release / (package_name + ".tmp")
-        staged.write_bytes(package_bytes)
-        if digest(staged.read_bytes()) != report["sha256"]:
-            raise ValueError("Published package SHA256 mismatch")
-        staged_sums = release / "SHA256SUMS.txt.tmp"
-        staged_sums.write_text(f"{report['sha256']}  {package_name}\n", encoding="ascii", newline="\n")
-        staged.replace(release / package_name)
-        staged_sums.replace(release / "SHA256SUMS.txt")
+        publish_package(release, package_name, package_bytes)
         # Retain only this build in the public directory. Keep a recoverable
         # copy of known previous outputs; never remove unrelated files.
         previous = [path for path in release.iterdir() if path.is_file()

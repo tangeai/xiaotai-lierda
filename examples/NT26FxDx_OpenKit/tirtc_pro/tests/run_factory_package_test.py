@@ -6,10 +6,11 @@ import struct
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "resource_store"))
-from package_factory import FIRMWARE_LAYOUT, digest, read_package, validate_firmware_layout
+from package_factory import FIRMWARE_LAYOUT, digest, publish_package, read_package, validate_firmware_layout
 
 
 def make_package() -> bytes:
@@ -84,6 +85,129 @@ class FactoryPackageTest(unittest.TestCase):
         self.package.write_bytes(make_package() + b"trailing")
         with self.assertRaisesRegex(ValueError, "Unexpected bytes"):
             read_package(self.package)
+
+
+class PublishPackageTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="f6dd-publish-test-")
+        self.addCleanup(self.temporary.cleanup)
+        self.release = Path(self.temporary.name) / "release"
+        self.release.mkdir()
+        self.old_name = "2026_10_11_21_26_44_pro.binpkg"
+        self.new_name = "2026_10_12_10_00_00_pro.binpkg"
+        self.old_package = make_package()
+        changed = bytearray(self.old_package)
+        changed[12] = 1  # fcelf can change container metadata without changing images.
+        self.new_package = bytes(changed)
+        (self.release / self.old_name).write_bytes(self.old_package)
+        self.old_sums = f"{digest(self.old_package)}  {self.old_name}\n".encode("ascii")
+        (self.release / "SHA256SUMS.txt").write_bytes(self.old_sums)
+
+    def assert_old_release(self) -> None:
+        self.assertEqual((self.release / self.old_name).read_bytes(), self.old_package)
+        self.assertEqual((self.release / "SHA256SUMS.txt").read_bytes(), self.old_sums)
+        self.assertEqual(sorted(path.name for path in self.release.iterdir()),
+                         sorted([self.old_name, "SHA256SUMS.txt"]))
+
+    def fail_checksum_replace(self, path, target):
+        if Path(target) == self.release / "SHA256SUMS.txt":
+            raise PermissionError("checksum file is locked")
+        return self.original_replace(path, target)
+
+    def test_same_name_repack_updates_package_and_checksum(self):
+        publish_package(self.release, self.old_name, self.new_package)
+        self.assertEqual((self.release / self.old_name).read_bytes(), self.new_package)
+        self.assertEqual((self.release / "SHA256SUMS.txt").read_text(),
+                         f"{digest(self.new_package)}  {self.old_name}\n")
+        self.assertFalse(list(self.release.glob("*.tmp")))
+
+    def test_new_name_success_keeps_previous_package_until_caller_archives(self):
+        publish_package(self.release, self.new_name, self.new_package)
+        self.assertEqual((self.release / self.old_name).read_bytes(), self.old_package)
+        self.assertEqual((self.release / self.new_name).read_bytes(), self.new_package)
+        self.assertEqual((self.release / "SHA256SUMS.txt").read_text(),
+                         f"{digest(self.new_package)}  {self.new_name}\n")
+        self.assertFalse(list(self.release.glob("*.tmp")))
+
+    def test_same_name_checksum_failure_restores_previous_package(self):
+        self.original_replace = Path.replace
+        with patch.object(Path, "replace", lambda path, target: self.fail_checksum_replace(path, target)):
+            with self.assertRaises(PermissionError):
+                publish_package(self.release, self.old_name, self.new_package)
+        self.assert_old_release()
+
+    def test_new_name_checksum_failure_removes_unlisted_package(self):
+        self.original_replace = Path.replace
+        with patch.object(Path, "replace", lambda path, target: self.fail_checksum_replace(path, target)):
+            with self.assertRaises(PermissionError):
+                publish_package(self.release, self.new_name, self.new_package)
+        self.assert_old_release()
+
+    def test_first_publication_checksum_failure_leaves_no_package(self):
+        empty = self.release / "first"
+        original_replace = Path.replace
+
+        def replace(path, target):
+            if Path(target) == empty / "SHA256SUMS.txt":
+                raise PermissionError("checksum file is locked")
+            return original_replace(path, target)
+
+        with patch.object(Path, "replace", replace):
+            with self.assertRaises(PermissionError):
+                publish_package(empty, self.new_name, self.new_package)
+        self.assertEqual(list(empty.iterdir()), [])
+
+    def test_package_replace_failure_preserves_previous_release(self):
+        original_replace = Path.replace
+
+        def replace(path, target):
+            if Path(target) == self.release / self.old_name:
+                raise PermissionError("package file is locked")
+            return original_replace(path, target)
+
+        with patch.object(Path, "replace", replace):
+            with self.assertRaises(PermissionError):
+                publish_package(self.release, self.old_name, self.new_package)
+        self.assert_old_release()
+
+    def test_checksum_staging_failure_does_not_publish_package(self):
+        import package_factory
+        original_temporary_file = package_factory.tempfile.NamedTemporaryFile
+        created = 0
+
+        def temporary_file(*args, **kwargs):
+            nonlocal created
+            created += 1
+            if created == 2:
+                raise PermissionError("cannot stage checksum")
+            return original_temporary_file(*args, **kwargs)
+
+        with patch.object(package_factory.tempfile, "NamedTemporaryFile", temporary_file):
+            with self.assertRaises(PermissionError):
+                publish_package(self.release, self.old_name, self.new_package)
+        self.assert_old_release()
+
+    def test_rollback_failure_retains_recoverable_previous_package(self):
+        original_replace = Path.replace
+        package_replaces = 0
+
+        def replace(path, target):
+            nonlocal package_replaces
+            if Path(target) == self.release / "SHA256SUMS.txt":
+                raise PermissionError("checksum file is locked")
+            if Path(target) == self.release / self.old_name:
+                package_replaces += 1
+                if package_replaces == 2:
+                    raise PermissionError("package rollback is locked")
+            return original_replace(path, target)
+
+        with patch.object(Path, "replace", replace):
+            with self.assertRaisesRegex(OSError, "recovery package"):
+                publish_package(self.release, self.old_name, self.new_package)
+        backups = list(self.release.glob("*.tmp"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), self.old_package)
+        self.assertEqual((self.release / "SHA256SUMS.txt").read_bytes(), self.old_sums)
 
 
 if __name__ == "__main__":
