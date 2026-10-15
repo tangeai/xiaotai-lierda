@@ -3,20 +3,20 @@
  * SPDX-FileCopyrightText: 2026 Shenzhen Tange Intelligent Technology Co., Ltd. <https://tange.ai>
  * SPDX-License-Identifier: MIT
  *
- * WeChat voice calling for NT26F6D0/F6D_A.
+ * WeChat voice calling for NT26F6D0.
  *
  * Architecture:
  *   - formal MQTT callbacks only copy bounded signaling into a fixed pool;
  *   - this worker owns HTTP, call state, WHIP and the ES8311 media loop;
+ *   - a bounded uplink queue moves SDK audio sends to a separate task;
  *   - the OLED UI only sends non-blocking requests and reads a snapshot;
  *   - the process-wide TiRTC runtime is initialized elsewhere exactly once.
  *
  * Network audio is G.711 A-law, 8 kHz, mono, 20 ms (160 bytes).  The board
  * codec remains 16 kHz PCM, so capture is downsampled 2:1 and playback is
- * expanded 1:2.  F6D_A initializes I2S in PLAY_RECORD mode, allowing this
- * single owner task to keep uplink capture active while TX DMA plays the
- * downlink.  Audio stream id 0 and commands 0x2000/0x2001 follow the WX VoIP
- * contract.  Acoustic echo cancellation is outside this minimal port.
+ * expanded 1:2.  The shared audio adapter owns simultaneous capture/playback
+ * and optional vendor 3A processing. Audio stream id 0 and commands
+ * 0x2000/0x2001 follow the WX VoIP contract.
  */
 
 #include "wechat_call.h"
@@ -78,6 +78,11 @@ _Static_assert(DEMO_BIND_TIRTC_ENDPOINT_MAX + sizeof(WX_REJECT_PATH) - 1U <=
 #define WX_PREBUFFER_TIMEOUT_MS          80U
 #define WX_UNWANTED_QUEUE_DEPTH           4U
 #define WX_WHIP_CONTEXT_COUNT             3U
+
+/* Match DEV: buffer brief sender stalls without blocking capture. */
+#define WX_UPLINK_QUEUE_DEPTH              8U
+#define WX_UPLINK_MAX_AGE_MS              300U
+#define WX_UPLINK_TASK_STACK      (12U * 1024U)
 
 #define WX_STREAM_ID                       0U
 #define WX_CMD_ACCEPT                  0x2000U
@@ -167,10 +172,20 @@ typedef struct
     volatile bool pending;
 } wx_whip_context_t;
 
+typedef struct
+{
+    uint32_t generation;
+    uint32_t tirtc_generation;
+    tirtc_conn_t connection;
+    TIRTCFRAMEINFO frame;
+    uint8_t payload[WX_UPLINK_SAMPLES_8K];
+} wx_uplink_job_t;
+
 static liot_sem_t s_event_sem;
 static liot_queue_t s_mqtt_queue;
 static liot_queue_t s_audio_queue;
 static liot_queue_t s_unwanted_queue;
+static liot_queue_t s_uplink_queue;
 
 static wx_mqtt_event_t s_mqtt_pool[WX_MQTT_EVENT_DEPTH];
 static bool s_mqtt_pool_used[WX_MQTT_EVENT_DEPTH];
@@ -244,6 +259,9 @@ static uint32_t s_rx_dropped;
 static uint32_t s_tx_dropped;
 static uint32_t s_rx_frames;
 static uint32_t s_tx_frames;
+static uint32_t s_tx_session_queue_full;
+static uint32_t s_tx_session_sdk_busy;
+static uint32_t s_tx_session_expired;
 static uint32_t s_prebuffer_start_ms;
 #if DEMO_AI_AUDIO_AEC_ENABLE
 #define WX_RECORD_FAILURE_LIMIT_MS 2000U
@@ -270,11 +288,12 @@ static wx_whip_context_t * volatile s_active_whip_context;
 static char s_http_response[4096];
 static __attribute__((aligned(16))) int16_t
     s_capture_pcm[DEMO_AI_AUDIO_FRAME_SAMPLES];
-static uint8_t s_uplink_alaw[WX_UPLINK_SAMPLES_8K];
 static __attribute__((aligned(16))) int16_t
     s_play_pcm[WX_PLAY_PCM_MAX_SAMPLES];
 
 static bool wx_connection_matches_or_claims(tirtc_conn_t hconn);
+static void wx_drain_uplink(void);
+static void wx_uplink_reset_session_stats(void);
 
 static void wx_signal(void)
 {
@@ -1355,12 +1374,12 @@ static int wx_start_whip(const wx_mqtt_event_t *event)
     s_tirtc_session_generation = managed_generation;
     s_tirtc_owned = true;
     s_tirtc_release_error_logged = false;
-    liot_rtos_exit_critical();
     ++s_generation;
     if (s_generation == 0U)
     {
         ++s_generation;
     }
+    liot_rtos_exit_critical();
     s_call = *event;
     s_whip_done = false;
     s_whip_error = 0;
@@ -1494,9 +1513,10 @@ static void wx_cleanup_session(int result, int hangup_reason,
     {
         connection = NULL;
     }
-    ++s_generation; /* invalidates a late WHIP callback */
+    ++s_generation; /* invalidates late WHIP callbacks and queued uplink */
     s_active_whip_context = NULL;
     liot_rtos_exit_critical();
+    wx_drain_uplink();
     if (connection == NULL && hangup_reason != WX_CLOSE_NONE &&
         reject_reason == WX_CLOSE_NONE && s_call.room_id[0] != '\0')
     {
@@ -1583,10 +1603,14 @@ static void wx_cleanup_session(int result, int hangup_reason,
     wx_mark_session_complete(result);
     liot_trace("[WX] session closed result=%d disconnect=%d settled=%u "
                "rx_drop=%u "
-               "tx_drop=%u\r\n",
+               "tx_drop=%u tx_session_queue_full=%u "
+               "tx_session_sdk_busy=%u tx_session_expired=%u\r\n",
                result, disconnect_ret, done ? 1U : 0U,
                (unsigned int)s_rx_dropped,
-               (unsigned int)s_tx_dropped);
+               (unsigned int)s_tx_dropped,
+               (unsigned int)s_tx_session_queue_full,
+               (unsigned int)s_tx_session_sdk_busy,
+               (unsigned int)s_tx_session_expired);
 }
 
 static int wx_start_audio(void)
@@ -1635,7 +1659,6 @@ static int wx_start_audio(void)
         return ret;
     }
     s_rx_frames = 0U;
-    s_tx_frames = 0U;
     s_prebuffer_start_ms = 0U;
     s_downlink_reject_logged = false;
     s_playback_error_logged = false;
@@ -1809,7 +1832,6 @@ static void wx_service_downlink(void)
     }
 }
 
-#if DEMO_AI_AUDIO_AEC_ENABLE
 static bool wx_uplink_is_current_locked(tirtc_conn_t connection,
                                          uint32_t generation,
                                          uint32_t tirtc_generation)
@@ -1821,47 +1843,134 @@ static bool wx_uplink_is_current_locked(tirtc_conn_t connection,
            !s_request_hangup && !s_remote_hangup_pending &&
            !s_conn_error_pending && !s_disconnected_pending;
 }
-#endif
+
+static void wx_uplink_reset_session_stats(void)
+{
+    liot_rtos_enter_critical();
+    s_tx_frames = 0U;
+    s_tx_session_queue_full = 0U;
+    s_tx_session_sdk_busy = 0U;
+    s_tx_session_expired = 0U;
+    liot_rtos_exit_critical();
+}
+
+static void wx_drain_uplink(void)
+{
+    wx_uplink_job_t job;
+    while (s_uplink_queue != NULL &&
+           liot_rtos_queue_wait(s_uplink_queue, (uint8 *)&job,
+                                sizeof(job), LIOT_NO_WAIT) == LIOT_OSI_SUCCESS)
+    {
+        /* Only the call worker produces jobs; start/stop cannot enqueue here. */
+    }
+}
+
+static void wx_send_uplink_job(const wx_uplink_job_t *job)
+{
+    bool current;
+    bool signal = false;
+    bool first = false;
+    int ret;
+
+    liot_rtos_enter_critical();
+    current = wx_uplink_is_current_locked(job->connection, job->generation,
+                                          job->tirtc_generation);
+    if (current && (uint32_t)(liot_rtos_get_running_time() - job->frame.ts) >
+                       WX_UPLINK_MAX_AGE_MS)
+    {
+        ++s_tx_dropped;
+        ++s_tx_session_expired;
+        current = false;
+    }
+    liot_rtos_exit_critical();
+    if (!current) return;
+
+    /* The runtime pins the matching session during the SDK call. The job
+     * owns its bytes, so capture and hangup never overwrite its payload. */
+    ret = demo_tirtc_send_audio(DEMO_TIRTC_OWNER_WECHAT,
+                                job->tirtc_generation, &job->frame, job->payload);
+    liot_rtos_enter_critical();
+    if (wx_uplink_is_current_locked(job->connection, job->generation,
+                                    job->tirtc_generation))
+    {
+        if (ret == TIRTC_E_BUSY)
+        {
+            ++s_tx_dropped;
+            ++s_tx_session_sdk_busy;
+        }
+        else if (ret < 0)
+        {
+            s_conn_error = ret;
+            s_conn_error_pending = true;
+            signal = true;
+        }
+        else
+        {
+            first = ++s_tx_frames == 1U;
+        }
+    }
+    liot_rtos_exit_critical();
+    if (first)
+    {
+        liot_trace("[WX] first uplink ALAW bytes=%u\r\n",
+                   (unsigned int)job->frame.length);
+    }
+    if (signal) wx_signal();
+}
+
+static void wx_uplink_task(void *argv)
+{
+    wx_uplink_job_t job;
+    (void)argv;
+    while (1)
+    {
+        if (liot_rtos_queue_wait(s_uplink_queue, (uint8 *)&job,
+                                 sizeof(job), LIOT_WAIT_FOREVER) == LIOT_OSI_SUCCESS)
+        {
+            wx_send_uplink_job(&job);
+        }
+    }
+}
 
 static int wx_send_uplink(void)
 {
-    TIRTCFRAMEINFO frame;
+    wx_uplink_job_t job;
     uint32_t i;
     int ret;
-#if DEMO_AI_AUDIO_AEC_ENABLE
-    tirtc_conn_t connection;
-    uint32_t generation;
-    uint32_t tirtc_generation;
     bool current;
 
+    memset(&job, 0, sizeof(job));
     liot_rtos_enter_critical();
-    connection = (tirtc_conn_t)s_conn;
-    generation = s_generation;
-    tirtc_generation = s_tirtc_session_generation;
-    current = wx_uplink_is_current_locked(connection, generation,
-                                           tirtc_generation);
+    job.connection = (tirtc_conn_t)s_conn;
+    job.generation = s_generation;
+    job.tirtc_generation = s_tirtc_session_generation;
+    current = wx_uplink_is_current_locked(job.connection, job.generation,
+                                           job.tirtc_generation);
     liot_rtos_exit_critical();
     if (!current)
     {
+#if DEMO_AI_AUDIO_AEC_ENABLE
         s_record_failure_active = false;
+#endif
         memset(s_capture_pcm, 0, sizeof(s_capture_pcm));
         return 0;
     }
-#endif
 
     ret = demo_ai_audio_record_20ms(&s_audio_lease, s_capture_pcm);
-#if DEMO_AI_AUDIO_AEC_ENABLE
     /* A key/callback may cancel while capture waits for its next PCM frame. */
     liot_rtos_enter_critical();
-    current = wx_uplink_is_current_locked(connection, generation,
-                                           tirtc_generation);
+    current = wx_uplink_is_current_locked(job.connection, job.generation,
+                                           job.tirtc_generation);
     liot_rtos_exit_critical();
     if (!current)
     {
+#if DEMO_AI_AUDIO_AEC_ENABLE
         s_record_failure_active = false;
+#endif
         memset(s_capture_pcm, 0, sizeof(s_capture_pcm));
         return 0;
     }
+#if DEMO_AI_AUDIO_AEC_ENABLE
     if (ret == DEMO_AI_AUDIO_ERR_CAPTURE_TIMEOUT)
     {
         uint32_t now = liot_rtos_get_running_time();
@@ -1883,54 +1992,43 @@ static int wx_send_uplink(void)
     {
         int32_t mixed = (int32_t)s_capture_pcm[i * 2U] +
                         (int32_t)s_capture_pcm[i * 2U + 1U];
-        s_uplink_alaw[i] =
+        job.payload[i] =
             demo_g711_alaw_encode_sample((int16_t)(mixed / 2));
     }
-    memset(&frame, 0, sizeof(frame));
-    frame.stream_id = WX_STREAM_ID;
-    frame.media = TIRTC_AUDIO_ALAW;
-    frame.flags = TIRTC_AUDIOSAMPLE_8K16B1C;
-    frame.ts = liot_rtos_get_running_time();
-    frame.length = WX_UPLINK_SAMPLES_8K;
-#if DEMO_AI_AUDIO_AEC_ENABLE
+    job.frame.stream_id = WX_STREAM_ID;
+    job.frame.media = TIRTC_AUDIO_ALAW;
+    job.frame.flags = TIRTC_AUDIOSAMPLE_8K16B1C;
+    job.frame.ts = liot_rtos_get_running_time();
+    job.frame.length = WX_UPLINK_SAMPLES_8K;
     liot_rtos_enter_critical();
-    current = wx_uplink_is_current_locked(connection, generation,
-                                           tirtc_generation);
+    current = wx_uplink_is_current_locked(job.connection, job.generation,
+                                           job.tirtc_generation);
     liot_rtos_exit_critical();
     if (!current)
     {
         memset(s_capture_pcm, 0, sizeof(s_capture_pcm));
-        memset(s_uplink_alaw, 0, sizeof(s_uplink_alaw));
         return 0;
     }
-#endif
-    ret = demo_tirtc_send_audio(DEMO_TIRTC_OWNER_WECHAT,
-#if DEMO_AI_AUDIO_AEC_ENABLE
-                                tirtc_generation,
-#else
-                                s_tirtc_session_generation,
-#endif
-                                &frame, s_uplink_alaw);
-    if (ret == TIRTC_E_BUSY)
+    ret = liot_rtos_queue_release(s_uplink_queue, sizeof(job),
+                                  (uint8 *)&job, LIOT_NO_WAIT);
+    if (ret != LIOT_OSI_SUCCESS)
     {
-        ++s_tx_dropped;
-        return 0;
-    }
-    if (ret < 0)
-    {
-        return ret;
-    }
-    ++s_tx_frames;
-    if (s_tx_frames == 1U)
-    {
-        liot_trace("[WX] first uplink ALAW bytes=%u\r\n",
-                   (unsigned int)WX_UPLINK_SAMPLES_8K);
+        liot_rtos_enter_critical();
+        if (wx_uplink_is_current_locked(job.connection, job.generation,
+                                        job.tirtc_generation))
+        {
+            ++s_tx_dropped;
+            ++s_tx_session_queue_full;
+        }
+        liot_rtos_exit_critical();
     }
     return 0;
 }
 
 static void wx_new_session_sequence(void)
 {
+    wx_drain_uplink();
+    wx_uplink_reset_session_stats();
     ++s_session_sequence;
     if (s_session_sequence == 0U)
     {
@@ -2651,6 +2749,7 @@ static void wx_group_process_pending(void)
 
 void demo_wechat_task(void *argv)
 {
+    liot_task_t uplink_handle = NULL;
     uint32_t sync_retry_at = 0U;
     bool mqtt_registered = false;
     bool transport_was_ready = false;
@@ -2678,6 +2777,18 @@ void demo_wechat_task(void *argv)
     }
     if (liot_rtos_queue_create(&s_unwanted_queue, sizeof(tirtc_conn_t),
                                WX_UNWANTED_QUEUE_DEPTH) != LIOT_OSI_SUCCESS)
+    {
+        goto init_failed;
+    }
+    if (liot_rtos_queue_create(&s_uplink_queue, sizeof(wx_uplink_job_t),
+                               WX_UPLINK_QUEUE_DEPTH) != LIOT_OSI_SUCCESS)
+    {
+        goto init_failed;
+    }
+    /* Match DEV priority: capture runs first, then sleeps for the next frame. */
+    if (liot_rtos_task_create(&uplink_handle, WX_UPLINK_TASK_STACK,
+                              LIOT_APP_TASK_PRIORITY - 1U, "wx_call_tx",
+                              wx_uplink_task, NULL) != LIOT_OSI_SUCCESS)
     {
         goto init_failed;
     }
@@ -2786,6 +2897,15 @@ void demo_wechat_task(void *argv)
     }
 
 init_failed:
+    if (uplink_handle != NULL)
+    {
+        (void)liot_rtos_task_delete(uplink_handle);
+    }
+    if (s_uplink_queue != NULL)
+    {
+        (void)liot_rtos_queue_delete(s_uplink_queue);
+        s_uplink_queue = NULL;
+    }
     if (mqtt_registered)
     {
         demo_formal_mqtt_unregister_handler(wx_formal_mqtt_handler, NULL);

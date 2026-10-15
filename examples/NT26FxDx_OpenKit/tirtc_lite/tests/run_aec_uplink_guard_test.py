@@ -219,7 +219,7 @@ static void check(unsigned mode,unsigned phase,unsigned expect_send){
     unsigned i;int16_t *pcm;
     reset();event_mode=mode;event_phase=phase;run();assert(captures==1 && sends==expect_send);
     pcm=TEST_KIND==2 ? s_capture : s_capture_pcm;
-#if DEMO_AI_AUDIO_AEC_ENABLE
+#if DEMO_AI_AUDIO_AEC_ENABLE || TEST_KIND == 0
     if(expect_send==0)for(i=0;i<320;i++)assert(pcm[i]==0);
 #else
     (void)i;(void)pcm;
@@ -305,7 +305,7 @@ int main(void){
 #else
         for(mode=1;mode<=7;mode++){
             if(mode==6 || (TEST_KIND==0 && (mode==4 || mode==5)))continue;
-            check(mode,phase,DEMO_AI_AUDIO_AEC_ENABLE ? 0 : 1);
+            check(mode,phase,(DEMO_AI_AUDIO_AEC_ENABLE || TEST_KIND==0) ? 0 : 1);
         }
 #endif
     }
@@ -318,8 +318,8 @@ int main(void){
     s_mic_gate=false;
 #endif
     run();
-    assert(captures==((DEMO_AI_AUDIO_AEC_ENABLE || TEST_KIND==2) ? 0U : 1U));
-    assert(sends==((DEMO_AI_AUDIO_AEC_ENABLE || TEST_KIND==2) ? 0U : 1U));
+    assert(captures==((DEMO_AI_AUDIO_AEC_ENABLE || TEST_KIND!=1) ? 0U : 1U));
+    assert(sends==((DEMO_AI_AUDIO_AEC_ENABLE || TEST_KIND!=1) ? 0U : 1U));
     printf("PASS feature=%d AEC=%d: normal, before/during capture, during encode, generation and permission gates\n",TEST_KIND,DEMO_AI_AUDIO_AEC_ENABLE);
     return 0;
 }
@@ -345,8 +345,24 @@ def main():
         for kind, (filename, sender, guard) in enumerate(groups):
             source = (app / "src/features" / filename).read_text(encoding="utf-8")
             helper = function(source, guard)
-            if kind != 2:
+            if kind == 1:
                 helper = "#if DEMO_AI_AUDIO_AEC_ENABLE\n" + helper + "#endif\n"
+            if kind == 0:
+                job = re.search(r'typedef struct\s*\{\s*uint32_t generation;\s*uint32_t tirtc_generation;.*?\} wx_uplink_job_t;', source, re.S).group()
+                # This suite probes capture/encode cancellation at enqueue.
+                # Real queue ownership and delayed sending have their own test.
+                helper = job + r'''
+#define LIOT_NO_WAIT 0
+#define LIOT_OSI_SUCCESS 0
+typedef uint8_t uint8;
+static void *s_uplink_queue=(void *)3;
+static unsigned s_tx_session_queue_full;
+static int liot_rtos_queue_release(void *q,unsigned size,uint8 *bytes,unsigned timeout){
+    const wx_uplink_job_t *job=(const wx_uplink_job_t *)bytes;
+    assert(q==s_uplink_queue && size==sizeof(*job) && timeout==LIOT_NO_WAIT && !critical_depth);
+    return demo_tirtc_send_audio(DEMO_TIRTC_OWNER_WECHAT,job->tirtc_generation,&job->frame,job->payload);
+}
+''' + helper
             limit = re.search(r"^#define \w+_RECORD_FAILURE_LIMIT_MS[^\n]*", source, re.M).group()
             if kind == 1:
                 helper += function(source, "live_on_subscribe_audio") + function(source, "live_on_unsubscribe_audio") + function(source, "live_on_command")

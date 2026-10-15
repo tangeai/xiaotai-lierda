@@ -45,13 +45,14 @@ static const uint8_t s_dev_codec_volume_by_level[DEMO_AI_AUDIO_LEVEL_MAX] = {
     38U, 41U, 46U, 50U, 53U, 57U, 61U, 64U, 69U, 72U
 };
 
+/* Keep L1 at 7/160; cap L10 at the previous L6 (9/199). */
 static const uint8_t s_mic_gain_by_level[DEMO_AI_AUDIO_LEVEL_MAX] = {
-    7U, 7U, 8U, 8U, 8U, 9U, 9U, 9U, 10U, 10U
+    7U, 7U, 7U, 8U, 8U, 8U, 8U, 9U, 9U, 9U
 };
 
 static const uint8_t s_mic_volume_by_level[DEMO_AI_AUDIO_LEVEL_MAX] = {
-    160U, 168U, 176U, 183U, 191U,
-    199U, 207U, 214U, 222U, 230U
+    160U, 164U, 169U, 173U, 177U,
+    182U, 186U, 190U, 195U, 199U
 };
 
 /* The driver DMA path requires aligned storage for capture. */
@@ -597,9 +598,9 @@ int demo_ai_audio_init(const demo_ai_audio_lease_t *lease)
 
 #if DEMO_AI_AUDIO_AEC_ENABLE
     if (!s_aec_hw_ready) {
-        /* Preserve manual gain/volume: enable AEC only, not AGC/ANS.
+        /* Preserve manual gain/volume: enable AEC and ANS, keep AGC bypassed.
          * Setters persist SDK parameters; configure once before VEM starts. */
-        Liot_AudAnsConfig_t ans = { .bypass = 1, .mode = 1 };
+        Liot_AudAnsConfig_t ans = { .bypass = 0, .mode = 1 };
         Liot_AudAgcConfig_t agc = { .bypass = 1, .targetLevel = 3,
                                   .compressionGain = 6, .limiterEnable = 1 };
         Liot_AudAecConfig_t aec = { .bypass = 0, .delay = DEMO_AI_AUDIO_AEC_DELAY,

@@ -288,7 +288,7 @@ Liot_AudErr_e Liot_AudioSetAec(Liot_AudAecConfig_t *config)
     return s_fail_aec ? L_AUD_ERR_EXECUTE : L_AUD_ERR_SUCCESS;
 }
 Liot_AudErr_e Liot_AudioSetAns(Liot_AudAnsConfig_t *config)
-{ assert(s_depth == 0 && config != NULL && config->bypass == 1); ++s_ans_calls; return L_AUD_ERR_SUCCESS; }
+{ assert(s_depth == 0 && config != NULL && config->bypass == 0 && config->mode == 1); ++s_ans_calls; return L_AUD_ERR_SUCCESS; }
 Liot_AudErr_e Liot_AudioSetAgc(Liot_AudAgcConfig_t *config)
 { assert(s_depth == 0 && config != NULL && config->bypass == 1); ++s_agc_calls; return L_AUD_ERR_SUCCESS; }
 Liot_AudErr_e Liot_AudioSetVolume(int volume)
@@ -970,14 +970,14 @@ static void test_volume_reset(unsigned delay)
                            device_codec[which] : codec[which];
             s_accepted_bytes = 0;
             assert(demo_ai_audio_set_levels(&lease, (uint8_t)levels[which], 7) == 0);
-            assert(s_codec_volume == expected && s_mic_volume_actual == 207);
+            assert(s_codec_volume == expected && s_mic_volume_actual == 186);
             assert(demo_ai_audio_play(&lease, input, FRAME_SAMPLES * 6U) == 0);
             /* No record, play, or explicit apply call from here. Even a
              * final short reply needs the worker to repair first-TX init. */
             pump(500);
             assert(s_volume_resets == resets + 1U);
             assert(s_codec_volume == expected);
-            assert(s_mic_gain_actual == 9 && s_mic_volume_actual == 207);
+            assert(s_mic_gain_actual == 8 && s_mic_volume_actual == 186);
             assert(s_volume_reads > reads && s_volume_reads - reads <= 6U);
             unsigned writes = s_level_calls;
             pump(300);
@@ -1006,7 +1006,7 @@ static void test_volume_read_retry(void)
     s_mic_gain_actual = 8;
     s_mic_volume_actual = 191;
     pump(105);
-    assert(s_codec_volume == 30 && s_mic_volume_actual == 207);
+    assert(s_codec_volume == 30 && s_mic_volume_actual == 186);
     close_session(&lease);
 }
 
@@ -1033,7 +1033,7 @@ static void test_volume_stop_owner(void)
     s_codec_volume = 65;
     s_mic_volume_actual = 191;
     pump(105);
-    assert(s_codec_volume == 72 && s_mic_volume_actual == 207);
+    assert(s_codec_volume == 72 && s_mic_volume_actual == 186);
     close_session(&lease);
 }
 

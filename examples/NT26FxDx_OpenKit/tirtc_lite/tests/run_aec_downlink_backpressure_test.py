@@ -92,6 +92,9 @@ def main():
             types += "#if DEMO_AI_AUDIO_AEC_ENABLE\n" + "\n".join(capture_limit + capture_state) + "\n#endif\n"
             if kind == 1:
                 types += typedef(source, "dev_rx_session_stats_t") + "\n" + typedef(source, "dev_uplink_job_t")
+            wx_queued = kind == 0 and "} wx_uplink_job_t;" in source
+            if wx_queued:
+                types += "#define TEST_WX_QUEUED_UPLINK 1\n" + typedef(source, "wx_uplink_job_t") + "\n"
             if kind != 3:
                 depth = prefix + ("_RX_QUEUE_DEPTH" if kind == 2 else "_AUDIO_QUEUE_DEPTH")
                 types += f"\n#define RX_FRAME {frame_type}\n#define RX_DEPTH {depth}\n"
@@ -103,7 +106,7 @@ def main():
             funcs = []
             for name in names:
                 code = function(source, name)
-                if name in ("wx_uplink_is_current_locked", "live_uplink_is_current_locked"):
+                if name == "live_uplink_is_current_locked" or (name == "wx_uplink_is_current_locked" and not wx_queued):
                     code = "#if DEMO_AI_AUDIO_AEC_ENABLE\n" + code + "#endif\n"
                 funcs.append(code)
             (out / "backpressure_types.inc").write_text(types, encoding="utf-8")

@@ -13,8 +13,8 @@
 
 static const int s_original_volume[] = {30,33,37,40,43,47,50,53,57,60};
 static const int s_device_codec[] = {38,41,46,50,53,57,61,64,69,72};
-static const int s_mic_gain[] = {7,7,8,8,8,9,9,9,10,10};
-static const int s_mic_volume[] = {160,168,176,183,191,199,207,214,222,230};
+static const int s_mic_gain[] = {7,7,7,8,8,8,8,9,9,9};
+static const int s_mic_volume[] = {160,164,169,173,177,182,186,190,195,199};
 static unsigned s_init_calls, s_sw_calls, s_codec_calls, s_mic_calls;
 static unsigned s_play_calls, s_record_calls, s_stop_calls;
 static unsigned s_pause_calls, s_resume_calls, s_power_calls;

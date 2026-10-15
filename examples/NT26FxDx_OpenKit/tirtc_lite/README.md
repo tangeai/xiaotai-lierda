@@ -158,7 +158,9 @@ https://github.com/user-attachments/assets/2fb17e1b-e6a1-487a-8240-e44c93f56bab
 
 当前使用官方 SDK 1.7.0 和 `F6D_D` 底包。Lite 与 Pro 共用公共 SDK，各自保留独立应用与构建配置；从旧 A 底包升级时须完整烧录配套底包与 APP。
 
-Lite 默认开启 `TIRTC_AUDIO_AEC_EN=y`，通过利尔达 3A 接口启用 AEC，ANS/AGC 保持旁路。AI 播放期间持续收音上传，配合云端语音检测支持插话打断；微信、设备互呼、LIVE 和 GROUP 使用同一 AEC 音频适配，保留原有接听、开关麦和按键操作。AI 语音结束时保留告别语播放收尾。
+Lite 默认开启 `TIRTC_AUDIO_AEC_EN=y`，通过利尔达 3A 接口启用 AEC 和 ANS（`bypass=0, mode=1`，沿用原厂示例参数），AGC 保持旁路。AI 播放期间持续收音上传，配合云端语音检测支持插话打断；微信、设备互呼、LIVE 和 GROUP 使用同一音频适配和降噪配置，保留原有接听、开关麦和按键操作。AI 语音结束时保留告别语播放收尾。
+
+微信上行使用独立的 8 帧发送队列（每帧 20 ms，约 160 ms 容量），缓冲 SDK 短时发送阻塞；不等待队列填满，发送前丢弃已超过 300 ms 的旧帧。喇叭与麦克风默认均为 L8；麦克风 L1 保持原值，L10 降至原 L6 的增益，其他档位同步降低。设置和重启行为见 [音频设置](docs/当前设备操作.md#9-set-音频设置)。
 
 AEC 配置位于 `config/tirtc_config.mk`，默认 `TIRTC_AUDIO_AEC_DELAY=10`。详细音频调试日志默认关闭（`src/media/audio_device.c` 中的 `DEMO_AI_AUDIO_DEBUG=0`），保留初始化和错误日志。调试时可执行 `examples\NT26FxDx_OpenKit\tirtc_lite\build_app.bat TIRTC_AUDIO_AEC_EN=n` 关闭 AEC，恢复普通录放音和 AI 半双工；该入口仅更新 `gccout/tirtc_lite` 中的包。
 

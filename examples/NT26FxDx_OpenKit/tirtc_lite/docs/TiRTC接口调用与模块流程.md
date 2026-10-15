@@ -502,7 +502,7 @@ GROUP 页面收到真实微信来电时，先用带 ticket 的预约让 GROUP �
 | 同步 / 呼叫业务 | `wx_fetch_contacts`、`wx_sync_profile`、`wx_start_outgoing_call` | Binding HTTP；不直接调用 TiRtc 连接 API |
 | 主动建立实时连接 | `wx_start_whip` | `demo_tirtc_whip_connect` → `TiRtcWhipConnect` |
 | 订阅下行 | `wx_start_audio` | `demo_tirtc_subscribe_audio(0)` → `TiRtcSubscribeAudio` |
-| 发送上行 | `wx_send_uplink` | `demo_tirtc_send_audio` → `TiRtcSendAudioStream` |
+| 发送上行 | `wx_send_uplink` 入队 → `wx_uplink_task` / `wx_send_uplink_job` | `demo_tirtc_send_audio` → `TiRtcSendAudioStream` |
 | 已连接时通知挂断 | `wx_cleanup_session` | `demo_tirtc_send_command(0x2001, reason JSON)` → `TiRtcSendCommand` |
 | 关闭 / 取消连接 | `wx_cleanup_session`；延迟回收 `wx_drain_unwanted` | `demo_tirtc_disconnect` |
 | 归还 owner | `wx_release_tirtc_session` | `demo_tirtc_session_release` |
@@ -532,10 +532,11 @@ TiRtcServiceRequest(WX_REJECT_PATH, json, NULL,
 ### 7.4 媒体与命令
 
 - 上下行使用 stream0。设备上行：16 kHz PCM 两点平均降为 8 kHz，再编码 A-law，160 B / 20 ms。
+- 上行独立队列最多 8 帧（约 160 ms），不等待填满；发送前丢弃超过 300 ms 的旧帧，挂断或会话变化后停止发送旧帧。挂断日志的 `tx_session_queue_full/sdk_busy/expired` 分别统计本次队列满、SDK 忙和过期丢弃；`rx_drop/tx_drop` 为开机累计值，不能当作网络丢包率。
 - 下行只接受 A-law，兼容 8 kHz / 16 kHz；8 kHz 解码后重复采样到板端 16 kHz。
 - `wx_command_is()` 兼容完整命令、低 16 位及去相应标志后的低 15 位；不要把此兼容规则套用到 AI 或 DEV。
 - `on_unsubscribe_audio` 当前为空操作；没有调用 `TiRtcUnsubscribeAudio()`。
-- WX 为同时收发；共享音频层开启 AEC 时先处理麦克风 PCM 再沿用 A-law 编码，关闭时保持普通录放音。AEC 效果尚待实板验证。
+- WX 为同时收发；共享音频层开启 AEC 时先处理麦克风 PCM，再沿用 A-law 编码；ANS 使用原厂示例参数 `bypass=0, mode=1`，AGC 保持旁路。关闭 AEC 构建开关时保持普通录放音。实际声学效果需实板验证。
 
 ## 8. 模块五：DEV 设备互呼
 

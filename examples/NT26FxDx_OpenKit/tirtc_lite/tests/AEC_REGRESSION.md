@@ -10,9 +10,12 @@ Run from the repository root with a host C compiler:
 ```powershell
 python examples/NT26FxDx_OpenKit/tirtc_lite/tests/run_audio_aec_test.py --cc gcc
 python examples/NT26FxDx_OpenKit/tirtc_lite/tests/run_dev_playback_gain_test.py --cc gcc
+python examples/NT26FxDx_OpenKit/tirtc_lite/tests/run_wechat_uplink_test.py --cc gcc
 ```
 
-Both runners also accept `--cc "zig cc"` or an absolute compiler/wrapper path.
+The runners accept an absolute compiler path, including `zig.exe`.
+The WX uplink runner covers copied payloads, queue pressure, stale sessions,
+SDK failures and the 300-ms age limit with AEC enabled and disabled.
 The AEC runner accepts repeatable `--scenario` arguments for a focused check.
 Every scenario runs in a fresh process, with Group both enabled and disabled.
 The existing gain runner explicitly sets `DEMO_AI_AUDIO_AEC_ENABLE=0`; the AEC

@@ -60,6 +60,8 @@ static dev_rx_session_stats_t s_rx_session;
 static uint32_t s_play_tail_ms;
 static uint8_t s_play_tail_fraction;
 static bool s_prebuffering, s_play_continuing;
+#endif
+#if TEST_KIND == 1 || defined(TEST_WX_QUEUED_UPLINK)
 static void *s_uplink_queue = (void *)2;
 #endif
 #else
@@ -88,12 +90,20 @@ static int liot_rtos_queue_wait(void *q, void *item, unsigned size, unsigned tim
     memmove(queue, queue + 1, --queue_count);
     return LIOT_OSI_SUCCESS;
 }
-#if TEST_KIND == 1
+#if TEST_KIND == 1 || defined(TEST_WX_QUEUED_UPLINK)
 static int liot_rtos_queue_release(void *q, unsigned size, uint8 *item, unsigned timeout)
 {
+#if TEST_KIND == 0
+    wx_uplink_job_t *job = (wx_uplink_job_t *)item;
+    assert(job->generation == s_generation && job->tirtc_generation == s_tirtc_session_generation);
+    assert(job->connection == s_conn);
+#else
     dev_uplink_job_t *job = (dev_uplink_job_t *)item;
-    assert(q == s_uplink_queue && size == sizeof(*job) && !critical_depth && !timeout);
     assert(job->generation == s_generation && job->tirtc_generation == s_tirtc_generation);
+#endif
+    /* Check capture can still enqueue while playback is busy. The separate
+     * uplink queue tests exercise delayed SDK sending and payload ownership. */
+    assert(q == s_uplink_queue && size == sizeof(*job) && !critical_depth && !timeout);
     assert(job->frame.length == 160 && job->frame.flags == TIRTC_AUDIOSAMPLE_8K16B1C);
     ++sends; return 0;
 }
