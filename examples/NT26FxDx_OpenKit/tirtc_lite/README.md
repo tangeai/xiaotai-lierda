@@ -101,7 +101,7 @@ https://github.com/user-attachments/assets/2fb17e1b-e6a1-487a-8240-e44c93f56bab
 <details>
 <summary>通过 AI 对话呼叫微信和其他设备</summary>
 
-![通过 AI 对话呼叫微信和其他设备](docs/assets/videos/ai-call-contacts.mp4)
+https://github.com/user-attachments/assets/bdd30f9a-2e56-4314-9d2e-484731b4b1ed
 
 [下载原视频](docs/assets/videos/ai-call-contacts.mp4) · [配置与操作步骤](docs/AI呼叫微信与设备配置详解.md)
 
@@ -111,7 +111,7 @@ https://github.com/user-attachments/assets/2fb17e1b-e6a1-487a-8240-e44c93f56bab
 <details>
 <summary>创建房间多人对讲</summary>
 
-![创建房间多人对讲](docs/assets/videos/group-intercom.mp4)
+https://github.com/user-attachments/assets/c50d1b5e-5ee8-42e2-9fe3-c2f724e4d636
 
 [下载原视频](docs/assets/videos/group-intercom.mp4) · [网页建房、加入与按键操作](docs/当前设备操作.md#10a-独立多人对讲group)
 
