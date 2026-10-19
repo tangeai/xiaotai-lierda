@@ -100,7 +100,7 @@ Liot_AudErr_e Liot_AudioInit(Liot_AudHwConfig_t *config)
 Liot_AudErr_e Liot_AudioSetAec(Liot_AudAecConfig_t *c)
 { assert(!depth && c->bypass == 0 && c->delay == DEMO_AI_AUDIO_AEC_DELAY); return L_AUD_ERR_SUCCESS; }
 Liot_AudErr_e Liot_AudioSetAns(Liot_AudAnsConfig_t *c)
-{ assert(!depth && c->bypass == 1); return L_AUD_ERR_SUCCESS; }
+{ assert(!depth && c->bypass == 0 && c->mode == 1); return L_AUD_ERR_SUCCESS; }
 Liot_AudErr_e Liot_AudioSetAgc(Liot_AudAgcConfig_t *c)
 { assert(!depth && c->bypass == 1); return L_AUD_ERR_SUCCESS; }
 Liot_AudErr_e Liot_AudioSetVolume(int v)

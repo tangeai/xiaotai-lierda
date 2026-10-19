@@ -1,4 +1,4 @@
-# OpenCPU README_zh
+# OpenKit README_zh
 
 **[English](README_SDK.md) | 中文**
 

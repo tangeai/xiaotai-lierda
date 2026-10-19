@@ -1,6 +1,6 @@
-# TiRTC × 利尔达 OpenCPU
+# TiRTC × 利尔达 OpenKit
 
-基于利尔达 OpenCPU 的小钛 4G 终端示例，通过 **TiRTC** 实现 AI 对话、微信与设备通话、远程对讲。选择你的产品，跟着演示和操作说明开始体验。
+基于利尔达 OpenKit 的小钛 4G 终端示例，通过 **TiRTC** 实现 AI 对话、微信与设备通话、远程对讲。选择你的产品，跟着演示和操作说明开始体验。
 
 ## 选择你的产品
 
@@ -48,4 +48,4 @@ pro 最新固件为出厂初始化包，包含固件、外置 Flash 字库和背
 - [利尔达文档首页](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/zh_CN/)
 - 本仓库保留的 [SDK 英文说明](README_SDK.md) / [SDK 中文说明](README_ZH.md)
 
-探鸽自有的应用代码与文档采用 MIT 许可证（[lite](examples/NT26FxDx_OpenKit/tirtc_lite/LICENSE) / [pro](examples/NT26FxDx_OpenKit/tirtc_pro/LICENSE)）。利尔达 OpenCPU SDK、原厂派生代码、TiRTC 预编译 SDK、第三方组件及字体资源保留各自授权，具体范围见 [许可与第三方说明](THIRD_PARTY_NOTICES.md)。
+探鸽自有的应用代码与文档采用 MIT 许可证（[lite](examples/NT26FxDx_OpenKit/tirtc_lite/LICENSE) / [pro](examples/NT26FxDx_OpenKit/tirtc_pro/LICENSE)）。利尔达 OpenKit SDK、原厂派生代码、TiRTC 预编译 SDK、第三方组件及字体资源保留各自授权，具体范围见 [许可与第三方说明](THIRD_PARTY_NOTICES.md)。

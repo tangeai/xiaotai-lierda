@@ -531,6 +531,7 @@ TiRtcServiceRequest(WX_REJECT_PATH, json, NULL,
 
 ### 7.4 媒体与命令
 
+- 设备主叫 `POST /v1/voip/device/call` 使用 `wx_version_type=0`，呼叫正式版微信小程序。
 - 上下行使用 stream0。设备上行：16 kHz PCM 两点平均降为 8 kHz，再编码 A-law，160 B / 20 ms。
 - 上行独立队列最多 8 帧（约 160 ms），不等待填满；发送前丢弃超过 300 ms 的旧帧，挂断或会话变化后停止发送旧帧。挂断日志的 `tx_session_queue_full/sdk_busy/expired` 分别统计本次队列满、SDK 忙和过期丢弃；`rx_drop/tx_drop` 为开机累计值，不能当作网络丢包率。
 - 下行只接受 A-law，兼容 8 kHz / 16 kHz；8 kHz 解码后重复采样到板端 16 kHz。

@@ -14,6 +14,6 @@
     "Shared rail remains owned by display port",
     "Static retained codec configuration, no deinit",
     "Lease in-flight guards,0..10 true mute and restored Pro user levels",
-    "F6D_D 3A AEC enabled by default; ANS/AGC bypassed; bounded PCM submissions"
+    "F6D_D 3A AEC and ANS (mode=1) enabled by default; AGC bypassed; bounded PCM submissions"
   ]
 }

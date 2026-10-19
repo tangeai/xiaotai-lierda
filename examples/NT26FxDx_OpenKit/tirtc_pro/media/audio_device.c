@@ -476,7 +476,7 @@ static int init_audio(void)
         s_audio_config.callback = audio_callback;
         s_audio_config.use3A = 1;
         if (!s_aec_hw_ready) {
-            Liot_AudAnsConfig_t ans = { .bypass = 1, .mode = 1 };
+            Liot_AudAnsConfig_t ans = { .bypass = 0, .mode = 1 };
             Liot_AudAgcConfig_t agc = { .bypass = 1, .targetLevel = 3,
                                       .compressionGain = 6, .limiterEnable = 1 };
             Liot_AudAecConfig_t aec = { .bypass = 0, .delay = DEMO_AI_AUDIO_AEC_DELAY,

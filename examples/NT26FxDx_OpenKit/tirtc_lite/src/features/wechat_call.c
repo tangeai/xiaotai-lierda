@@ -2104,7 +2104,7 @@ static int wx_start_outgoing_call(void)
         !cJSON_AddStringToObject(body, "wx_user_openid", contact.open_id) ||
         !cJSON_AddStringToObject(body, "wx_model_id", contact.model_id) ||
         !cJSON_AddStringToObject(body, "wx_room_type", "voice") ||
-        !cJSON_AddNumberToObject(body, "wx_version_type", 2) ||
+        !cJSON_AddNumberToObject(body, "wx_version_type", 0) ||
         !cJSON_AddNumberToObject(body, "wx_caller_camera_status", 1) ||
         !cJSON_AddNumberToObject(body, "wx_listener_camera_status", 1) ||
         !cJSON_AddNumberToObject(body, "calling_timeout_sec", 30))

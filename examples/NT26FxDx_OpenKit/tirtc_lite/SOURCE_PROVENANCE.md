@@ -8,7 +8,7 @@
 
 ## 1. 本地产品代码
 
-本目录由探鸽智能基于利尔达 NT26F6D0 OpenCPU SDK 完成板级适配，并接入探鸽
+本目录由探鸽智能基于利尔达 NT26F6D0 OpenKit SDK 完成板级适配，并接入探鸽
 TiRTC、ThingConnect、AI、微信通话、设备通话、平台 LIVE 及独立 GROUP 多人对讲能力。
 
 文件实际许可证以文件头的 `SPDX-License-Identifier` 为准：
@@ -20,7 +20,7 @@ TiRTC、ThingConnect、AI、微信通话、设备通话、平台 LIVE 及独立 
 
 ## 2. 利尔达派生文件
 
-以下文件基于本 OpenCPU SDK 中的板级示例修改，保留原始利尔达归属：
+以下文件基于本 OpenKit SDK 中的板级示例修改，保留原始利尔达归属：
 
 | 本地文件 | 上游文件 | 本地修改范围 |
 | --- | --- | --- |

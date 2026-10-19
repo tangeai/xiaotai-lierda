@@ -304,7 +304,7 @@ int __wrap_freertos_ThreadCreateWithStackSize(
  * rtc_thread emits an unconditional timing diagnostic when a connection
  * callback takes more than 100 ms.  The archive formats that prefix through
  * app_log_time(), whose gettimeofday()/localtime_r() path enters newlib's
- * timezone allocator.  That allocator does not share the OpenCPU RTOS heap
+ * timezone allocator.  That allocator does not share the OpenKit RTOS heap
  * and can reset the module during the first WHIP negotiation.
  *
  * Keep the diagnostic itself usable, but provide an empty, valid prefix and
@@ -396,7 +396,7 @@ static bool runtime_log_is_sensitive(const char *data, size_t length)
  * Several TiRTC objects bypass the SDK log callback and call newlib printf()
  * directly.  The first WHIP offer unconditionally prints
  * "peer_connection state change ..." from the SDK call path. Raw newlib stdout is
- * not compatible with the F6D_A OpenCPU logging context and can reset the
+ * not compatible with the F6D_A OpenKit logging context and can reset the
  * module before TiRtcWhipConnect() returns.
  *
  * Drop the two noisy internal timing/state messages and route every other raw
@@ -440,7 +440,7 @@ int __wrap_printf(const char *format, ...)
 }
 
 /*
- * Route the SDK callback directly to the OpenCPU logger.  SDK strings are not
+ * Route the SDK callback directly to the OpenKit logger.  SDK strings are not
  * guaranteed to be NUL terminated, so copy bounded chunks before printing.
  * Keeping this callback avoids the archive's default stdout/file logger and
  * its incompatible gettimeofday()/localtime_r() path on NT26F6D0.
@@ -509,7 +509,7 @@ static void tirtc_transport_log_callback(const char *format, va_list args)
 /*
  * Some objects in libTiRTC.a call Logf directly.  The linker redirects those
  * calls here so verbose logging remains usable without entering the SDK's
- * non-OpenCPU-safe timestamp formatter.  This changes no code in libTiRTC.a.
+ * non-OpenKit-safe timestamp formatter.  This changes no code in libTiRTC.a.
  */
 void __wrap_Logf(int level, const char *module, const char *format, ...)
 {
@@ -599,7 +599,7 @@ static bool runtime_is_default_endpoint(const char *endpoint)
 
 /*
  * libTiRTC's EC71x port calls strdup()/strndup(). newlib-nano implements
- * those via _malloc_r()/sbrk, while this OpenCPU image owns an RTOS heap via
+ * those via _malloc_r()/sbrk, while this OpenKit image owns an RTOS heap via
  * malloc()/free(). These global ABI shims keep all TiRTC allocations on the
  * platform heap without modifying the supplied libTiRTC.a.
  */
@@ -2105,7 +2105,7 @@ static int runtime_start(const demo_binding_tirtc_identity_t *identity)
         return DEMO_TIRTC_ERR_NOT_READY;
     }
 
-    /* Install both OpenCPU-safe sinks before enabling the configured TiRTC
+    /* Install both OpenKit-safe sinks before enabling the configured TiRTC
      * library level.  Production builds normally keep this below verbose
      * transport tracing because serial output competes with media work. */
     TiRtcLogSetCallback(tirtc_sdk_log_callback);

@@ -5,7 +5,7 @@
 
 ## 当前基线（2026-10-09）
 
-- 公共 SDK 使用利尔达官方 OpenCPU `1.7.0`。Lite、Pro 均使用公共 `components/basePkg/F6D_D` 及公共头文件，不再使用 Pro 私有 `1.6.04_beta` 底包。
+- 公共 SDK 使用利尔达官方 OpenKit `1.7.0`。Lite、Pro 均使用公共 `components/basePkg/F6D_D` 及公共头文件，不再使用 Pro 私有 `1.6.04_beta` 底包。
 - 原 `basePkg`、`include`、`ecapi` 和 `lvgl.mk` 已退出当前构建并从发布工程移除；发布工程不需要另行准备旧 SDK。
 - `tirtc_app.mk`、`runtime/runtime.mk` 保留精确哈希门禁，并在反汇编和结构布局审计后更新到本次官方 D 基线。底包 ELF SHA-256：`9553cae08079eab350557b86d5474464ffabb3086e7055739c7b57fccc930c3d`。
 - Pro 使用 `CODE_REGION_ADJUST=0x4B000`：程序区 `0x2A6000..0x3BC000`（1112 KiB），内部文件系统仍为 `0x3BC000..0x3E4000`（160 KiB）。应用及底包必须成套重新构建，不能混刷 A 的旧应用镜像。
