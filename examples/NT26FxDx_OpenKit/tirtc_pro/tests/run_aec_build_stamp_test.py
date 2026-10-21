@@ -40,17 +40,18 @@ def main():
     dependency = '$(CUSTOM_COBJS): $(TIRTC_AEC_STAMP)'
     assert source.splitlines().count(dependency) == 1
     fragment = '\n'.join(declaration(source, name) for name in ('TIRTC_AEC_STAMP', 'TIRTC_AEC_STAMP_UPDATE'))
+    guard_default = next(line for line in source.splitlines() if line.startswith('TIRTC_AUDIO_FREE_GUARD_EN ?='))
     makefile = ('SHELL := ' + shell.as_posix() + '\n'
                 'BUILDDIR := out\n'
                 'TIRTC_AUDIO_AEC_EN ?= y\n'
-                'TIRTC_AUDIO_AEC_DELAY ?= 10\n' + fragment + '\n'
+                'TIRTC_AUDIO_AEC_DELAY ?= 10\n' + guard_default + '\n' + fragment + '\n'
                 '.DEFAULT_GOAL := all\n'
                 'CUSTOM_COBJS := $(BUILDDIR)/consumer.o\n' + dependency + '\n'
                 '.PHONY: all\n'
                 'all: $(CUSTOM_COBJS)\n'
                 '$(CUSTOM_COBJS):\n'
                 '\t@printf "rebuilt\\n" >> "$(BUILDDIR)/consumer.log"\n'
-                '\t@printf "%s\\n" "$(TIRTC_AUDIO_AEC_EN) $(TIRTC_AUDIO_AEC_DELAY)" > "$@"\n')
+                '\t@printf "%s\\n" "$(TIRTC_AUDIO_AEC_EN) $(TIRTC_AUDIO_AEC_DELAY) $(TIRTC_AUDIO_FREE_GUARD_EN)" > "$@"\n')
     # Do not let a separately installed Git/Cygwin supply missing SDK tools.
     env = os.environ.copy()
     env['PATH'] = str(sdk_bin) + os.pathsep + str(Path(os.environ.get('SystemRoot', 'C:/Windows')) / 'System32')
@@ -67,14 +68,17 @@ def main():
             consumer = work / 'out/consumer.o'
             log = work / 'out/consumer.log'
             rebuilds = 0
-            for label, enabled, delay, change in (
-                ('first-create', 'y', '10', True),
-                ('same-y10', 'y', '10', False),
-                ('disable', 'n', '10', True),
-                ('same-n10', 'n', '10', False),
-                ('delay-change', 'n', '11', True),
-                ('enable', 'y', '11', True),
-                ('same-y11', 'y', '11', False),
+            for label, enabled, delay, guard, change in (
+                ('first-create', 'y', '10', None, True),
+                ('same-y10', 'y', '10', None, False),
+                ('disable', 'n', '10', None, True),
+                ('same-n10', 'n', '10', None, False),
+                ('delay-change', 'n', '11', None, True),
+                ('enable', 'y', '11', None, True),
+                ('same-y11', 'y', '11', None, False),
+                ('guard-disable', 'y', '11', 'n', True),
+                ('same-guard-disabled', 'y', '11', 'n', False),
+                ('guard-enable', 'y', '11', 'y', True),
             ):
                 previous = None
                 if stamp.exists():
@@ -84,9 +88,12 @@ def main():
                     os.utime(stamp, (past, past))
                     os.utime(consumer, (past + 60, past + 60))
                     previous = (stamp.stat().st_mtime_ns, consumer.stat().st_mtime_ns)
-                result = subprocess.run([str(make), '--no-print-directory', '--silent',
+                command = [str(make), '--no-print-directory', '--silent',
                                          'TIRTC_AUDIO_AEC_EN=' + enabled,
-                                         'TIRTC_AUDIO_AEC_DELAY=' + delay],
+                                         'TIRTC_AUDIO_AEC_DELAY=' + delay]
+                if guard is not None:
+                    command.append('TIRTC_AUDIO_FREE_GUARD_EN=' + guard)
+                result = subprocess.run(command,
                                         cwd=work, env=env, text=True, capture_output=True, timeout=15)
                 actual_rebuilds = len(log.read_text().splitlines()) if log.exists() else 0
                 current = ((stamp.stat().st_mtime_ns, consumer.stat().st_mtime_ns)
@@ -97,7 +104,8 @@ def main():
                 if result.stderr:
                     print(result.stderr, end='', file=sys.stderr)
                 assert result.returncode == 0, label + ': bundled make failed'
-                assert stamp.read_bytes() == (enabled + ' ' + delay + '\n').encode(), label + ': wrong stamp content'
+                expected_guard = enabled if guard is None else guard
+                assert stamp.read_bytes() == (enabled + ' ' + delay + ' ' + expected_guard + '\n').encode(), label + ': wrong stamp content'
                 rebuilds += int(change)
                 assert actual_rebuilds == rebuilds, label + ': unchanged config unexpectedly rebuilt the consumer'
                 assert consumer.read_bytes() == stamp.read_bytes(), label + ': changed flags did not reach the consumer'
@@ -115,7 +123,7 @@ def main():
         args.report.write_text(json.dumps(report, indent=2), encoding='utf-8')
     if error:
         raise SystemExit('FAIL: ' + error)
-    print('PASS: 7 Pro AEC stamp cases using production declarations and SDK tools')
+    print('PASS: 10 Pro AEC/guard stamp cases using production declarations and SDK tools')
 
 
 if __name__ == '__main__':

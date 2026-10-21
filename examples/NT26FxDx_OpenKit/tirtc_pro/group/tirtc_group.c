@@ -334,18 +334,16 @@ static void room_audio_diag_tick_end(uint32_t started) {
         s_audio_diag.window.tick_work=elapsed;
     liot_rtos_exit_critical();
 }
-/* One worker owns reports. Copy/reset a small window under the lock; printing
- * occurs outside callbacks/critical sections. Preserve gap/TS history between
- * windows, then clear it only after all producers have drained at cleanup. */
+/* One worker resets local windows under the lock without serial output.
+ * Preserve gap/TS history between windows, then clear it only after all
+ * producers have drained at cleanup. */
 static void room_audio_diag_report(bool stopped) {
-    room_audio_diag_window_t w;
     uint32_t now=liot_rtos_get_running_time(), elapsed;
     liot_rtos_enter_critical();
     elapsed=now-s_audio_diag.window_at;
     if (!s_audio_diag.active || (!stopped && elapsed<5000U)) {
         liot_rtos_exit_critical(); return;
     }
-    w=s_audio_diag.window;
     if (stopped) memset(&s_audio_diag,0,sizeof(s_audio_diag));
     else {
         memset(&s_audio_diag.window,0,sizeof(s_audio_diag.window));
@@ -354,19 +352,6 @@ static void room_audio_diag_report(bool stopped) {
         s_audio_diag.window.peak_bytes=s_rx_bytes;
     }
     liot_rtos_exit_critical();
-    liot_trace("[ROOM-AUDIO51] rx%s ms=%lu packets=%lu bytes=%lu len=%lu/%lu fmt(s/m/f)=%u/%u/%u bad=%lu over640=%lu "
-               "qpeak=%lu/%lu drop(slot/bytes/age)=%lu/%lu/%lu cbgap=%lu ts(repeat/back)=%lu/%lu\r\n",
-        stopped?" stop":"",(unsigned long)elapsed,(unsigned long)w.packets,(unsigned long)w.bytes,
-        (unsigned long)w.length_min,(unsigned long)w.length_max,(unsigned)w.observed_stream,
-        (unsigned)w.observed_media,(unsigned)w.observed_flags,(unsigned long)w.bad_format,
-        (unsigned long)w.oversized,(unsigned long)w.peak_slots,(unsigned long)w.peak_bytes,
-        (unsigned long)w.drop_slot,(unsigned long)w.drop_bytes,(unsigned long)w.drop_age,
-        (unsigned long)w.callback_gap,(unsigned long)w.timestamp_repeat,(unsigned long)w.timestamp_back);
-    liot_trace("[ROOM-AUDIO51] play%s ms=%lu pcm=%lu blocks=%lu warm=%lu/%lums busy=%lu errors=%lu "
-               "tick(gap/work)=%lu/%lums\r\n",stopped?" stop":"",(unsigned long)elapsed,
-        (unsigned long)w.pcm_samples,(unsigned long)w.plays,(unsigned long)w.warm,
-        (unsigned long)w.warm_ms,(unsigned long)w.busy,(unsigned long)w.errors,
-        (unsigned long)w.tick_gap,(unsigned long)w.tick_work);
 }
 #endif
 

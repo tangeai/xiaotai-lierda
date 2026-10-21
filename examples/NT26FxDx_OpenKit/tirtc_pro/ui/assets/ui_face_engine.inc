@@ -39,6 +39,7 @@ typedef struct {
     (((c)>>16)&255)*16,(((c)>>8)&255)*16,((c)&255)*16
 /* Approved 23-face family. Keep broad silhouettes even in resting squints.
  * Accent channels are independent of eyelids; hearts/glasses never blink flat. */
+#ifndef TIRTC_EXTERNAL_UI_ASSETS
 static const s3_face_pose_t s3_face_poses[] = {
     {"neutral", {EL(64,42,21,0,0), ER(64,42,21,0,0), MP(36,10,5,-1), FX(0,0,0,0,0,0,0xECF5F1)}, 520},
     {"happy", {EL(62,26,13,0,3), ER(62,26,13,0,3), MP(44,13,6,-3), FX(0,0,0,0,0,0,0xD7F6E9)}, 520},
@@ -64,12 +65,14 @@ static const s3_face_pose_t s3_face_poses[] = {
     {"listening", {EL(64,42,21,0,0), ER(64,42,21,0,0), MP(32,10,5,0), FX(0,0,0,0,0,0,0xDFEFF4), [FACE_LISTEN]=256*16, [FACE_GAZE_X]=-2*16}, 520},
     {"ambient", {EL(62,28,14,-1,0), ER(62,28,14,1,0), MP(36,12,6,-2), FX(0,0,0,0,0,0,0xDCEEE8), [FACE_LEAN]=16, [FACE_GAZE_X]=16}, 820},
 };
+#endif
 /* Approved B concept: broad beans/folds, shallow coloured lips and readable props. */
 #define BL(w,h,r,s,b) FP(58-(w)/2,48-(h)/2,w,h,r,s,b)
 #define BR(w,h,r,s,b) FP(162-(w)/2,48-(h)/2,w,h,r,s,b)
 #define BM(w,h,r,b) FP(110-(w)/2,83-(h)/2,w,h,r,0,b)
 #define BX(tear,think,blush,heart,tongue,tilt,c) \
     FX(tear,think,blush,heart,tongue,tilt,c), [FACE_STYLE_B]=256*16
+#ifndef TIRTC_EXTERNAL_UI_ASSETS
 static const s3_face_pose_t s3_face_alternate_poses[] = {
     {"neutral", {BL(68,40,18,0,0), BR(68,40,18,0,0), BM(48,12,6,0), BX(0,0,0,0,0,0,0xECF8F5)}, 560},
     {"happy", {BL(64,24,12,-1,9), BR(64,26,13,0,9), BM(50,14,7,-4), BX(0,0,0,0,0,0,0xD5F8EE), [FACE_MOUTH_PINK]=256*16, [FACE_LEAN]=-16}, 560},
@@ -95,11 +98,14 @@ static const s3_face_pose_t s3_face_alternate_poses[] = {
     {"listening", {BL(64,42,20,0,0), BR(64,42,20,0,0), BM(36,11,5,0), BX(0,0,0,0,0,0,0xE1F4F8), [FACE_LISTEN]=256*16, [FACE_GAZE_X]=-2*16, [FACE_LEAN]=2*16}, 560},
     {"ambient", {BL(64,28,14,-3,1), BR(64,28,14,3,1), FP(87,76,50,14,7,0,-4), BX(0,0,0,0,0,1,0xDBF5ED), [FACE_MOUTH_PINK]=128*16, [FACE_LEAN]=-2*16}, 880},
 };
+#endif
 #undef BL
 #undef BR
 #undef BM
 #undef BX
+#ifndef TIRTC_EXTERNAL_UI_ASSETS
 typedef char ui_face_table_assert_1[(sizeof(s3_face_alternate_poses) == sizeof(s3_face_poses)) ? 1 : -1];
+#endif
 #undef FP
 #undef FX
 #undef EL
@@ -125,6 +131,7 @@ typedef struct {
 /* Each clip starts/ends at zero offset: anticipation, expression, recovery.
  * The selected clip plays once, then the existing quiet idle cues take over. */
 #define MK(t,gx,gy,eh,eb,mw,mh,my,mt,lean) {t,{gx,gy,eh,eb,mw,mh,my,mt,lean}}
+#ifndef TIRTC_EXTERNAL_UI_ASSETS
 static const s3_face_sequence_t s3_face_sequences[] = {
     {"neutral", {
         {1400, {MK(240,1,0,1,0,0,0,0,0,0), MK(640,1,0,1,0,0,0,0,0,0), MK(920,0,0,0,0,0,0,0,0,0), MK(1120,0,0,0,0,0,0,0,0,0)}},
@@ -217,7 +224,131 @@ static const s3_face_sequence_t s3_face_sequences[] = {
         {2800, {MK(520,-1,1,0,0,0,0,0,0,-1), MK(1280,-1,1,-1,0,0,0,0,0,-1), MK(1920,0,0,0,0,0,0,0,0,0), MK(2320,0,0,0,0,0,0,0,0,0)}},
     }},
 };
+#endif
 #undef MK
+
+#ifdef TIRTC_EXTERNAL_UI_ASSETS
+#include "../../resource_store/asset_io.h"
+#include "../../resource_store/asset_manifest.h"
+enum { S3_FACE_RESOURCE_COUNT = 23, S3_FACE_POSE_RECORD = 116,
+       S3_FACE_SEQUENCE_RECORD = 104, S3_FACE_RESOURCE_FOOTER = 16 };
+typedef struct {
+    s3_face_pose_t poses[S3_FACE_RESOURCE_COUNT];
+    s3_face_pose_t alternate[S3_FACE_RESOURCE_COUNT];
+    s3_face_sequence_t sequences[S3_FACE_RESOURCE_COUNT];
+} s3_face_resource_tables_t;
+/* One permanent allocation. File records contain key indices, not pointers.
+ * Expand from the end into aligned native structs; only one small record is
+ * copied to the stack. No second raw-data allocation or heap is required. */
+static union {
+    s3_face_resource_tables_t tables;
+    uint8_t raw[TIRTC_FACE_DATA_BYTES];
+} s3_face_resource;
+static bool s3_face_resources_ready;
+static const char *const s3_face_resource_keys[S3_FACE_RESOURCE_COUNT] = {
+    "neutral", "happy", "laughing", "funny", "sad", "angry", "crying",
+    "loving", "embarrassed", "surprised", "shocked", "thinking", "winking",
+    "cool", "relaxed", "delicious", "kissy", "confident", "sleepy", "silly",
+    "confused", "listening", "ambient"
+};
+#define s3_face_poses (s3_face_resource.tables.poses)
+#define s3_face_alternate_poses (s3_face_resource.tables.alternate)
+#define s3_face_sequences (s3_face_resource.tables.sequences)
+typedef char ui_face_resource_layout_check[
+    (S3_FACE_POSE_VALUES == 55 && S3_FACE_MOTION_VALUES == 9 &&
+     S3_FACE_VARIANTS == 2 && S3_FACE_MOTION_STEPS == 4 &&
+     sizeof(s3_face_pose_t) >= S3_FACE_POSE_RECORD &&
+     sizeof(s3_face_sequence_t) >= S3_FACE_SEQUENCE_RECORD &&
+     TIRTC_FACE_DATA_BYTES == S3_FACE_RESOURCE_COUNT *
+         (2U * S3_FACE_POSE_RECORD + S3_FACE_SEQUENCE_RECORD) +
+         S3_FACE_RESOURCE_FOOTER) ? 1 : -1];
+
+static uint16_t s3_face_read_u16(const uint8_t *p)
+{ return (uint16_t)((uint16_t)p[0] | (uint16_t)p[1] << 8); }
+static uint32_t s3_face_read_u32(const uint8_t *p)
+{ return (uint32_t)s3_face_read_u16(p) | (uint32_t)s3_face_read_u16(p + 2) << 16; }
+static int16_t s3_face_read_s16(const uint8_t *p)
+{
+    uint16_t value = s3_face_read_u16(p);
+    return (int16_t)((int32_t)value - ((value & 0x8000U) ? 65536 : 0));
+}
+
+/* Sole resource worker, before publishing assets READY. CRC/length failures
+ * may leave partial BSS bytes, which are never consumed by the guarded UI.
+ * A retry replaces them completely; successful tables remain immutable. */
+int ui_face_load_external(void (*progress)(uint32_t))
+{
+    uint8_t record[S3_FACE_POSE_RECORD];
+    const uint8_t *footer;
+    int result;
+    if (s3_face_resources_ready) {
+        if (progress) progress(TIRTC_FACE_DATA_BYTES);
+        return 0;
+    }
+    result = tirtc_asset_read_verified("/ui-face-v1.bin", s3_face_resource.raw,
+                                      TIRTC_FACE_DATA_BYTES, TIRTC_FACE_DATA_CRC32, progress);
+    if (result) return result;
+    footer = s3_face_resource.raw + TIRTC_FACE_DATA_BYTES - S3_FACE_RESOURCE_FOOTER;
+    if (memcmp(footer, "FACEv1\0\0", 8U) ||
+        s3_face_read_u16(footer + 8) != S3_FACE_RESOURCE_COUNT ||
+        s3_face_read_u16(footer + 10) != S3_FACE_POSE_VALUES ||
+        s3_face_read_u16(footer + 12) != S3_FACE_VARIANTS ||
+        s3_face_read_u16(footer + 14) != S3_FACE_MOTION_STEPS)
+        return TIRTC_ASSET_E_MISMATCH;
+    for (unsigned left = S3_FACE_RESOURCE_COUNT; left; --left) {
+        unsigned i = left - 1U;
+        s3_face_sequence_t *sequence = &s3_face_sequences[i];
+        memcpy(record, s3_face_resource.raw + 2U * S3_FACE_RESOURCE_COUNT *
+               S3_FACE_POSE_RECORD + i * S3_FACE_SEQUENCE_RECORD, S3_FACE_SEQUENCE_RECORD);
+        if (s3_face_read_u32(record) != i) return TIRTC_ASSET_E_MISMATCH;
+        memset(sequence, 0, sizeof(*sequence));
+        sequence->key = s3_face_resource_keys[i];
+        for (unsigned variant = 0; variant < S3_FACE_VARIANTS; ++variant) {
+            const uint8_t *track_data = record + 4U + variant * 50U;
+            s3_face_track_t *track = &sequence->variant[variant];
+            bool absent = variant == 1U && (i == 11U || i == 14U);
+            uint16_t previous = 0;
+            track->end_ms = s3_face_read_u16(track_data);
+            if (absent ? track->end_ms != 0U : track->end_ms == 0U)
+                return TIRTC_ASSET_E_MISMATCH;
+            for (unsigned frame = 0; frame < S3_FACE_MOTION_STEPS; ++frame) {
+                const uint8_t *frame_data = track_data + 2U + frame * 12U;
+                s3_face_keyframe_t *keyframe = &track->frame[frame];
+                keyframe->at_ms = s3_face_read_u16(frame_data);
+                if (frame_data[11] || (absent ? keyframe->at_ms != 0U :
+                    (keyframe->at_ms <= previous || keyframe->at_ms >= track->end_ms)))
+                    return TIRTC_ASSET_E_MISMATCH;
+                previous = keyframe->at_ms;
+                for (unsigned value = 0; value < S3_FACE_MOTION_VALUES; ++value) {
+                    uint8_t raw = frame_data[2U + value];
+                    if (absent && raw) return TIRTC_ASSET_E_MISMATCH;
+                    keyframe->value[value] = (int8_t)((int)raw - (raw & 0x80U ? 256 : 0));
+                }
+            }
+        }
+    }
+    for (unsigned left = 2U * S3_FACE_RESOURCE_COUNT; left; --left) {
+        unsigned i = left - 1U, index = i % S3_FACE_RESOURCE_COUNT;
+        bool absent = i >= S3_FACE_RESOURCE_COUNT && (index == 11U || index == 14U);
+        s3_face_pose_t *pose = i >= S3_FACE_RESOURCE_COUNT ?
+            &s3_face_alternate_poses[index] : &s3_face_poses[index];
+        memcpy(record, s3_face_resource.raw + i * S3_FACE_POSE_RECORD, S3_FACE_POSE_RECORD);
+        if (s3_face_read_u32(record) != (absent ? UINT32_MAX : index))
+            return TIRTC_ASSET_E_MISMATCH;
+        memset(pose, 0, sizeof(*pose));
+        pose->key = absent ? NULL : s3_face_resource_keys[index];
+        for (unsigned value = 0; value < S3_FACE_POSE_VALUES; ++value) {
+            pose->value[value] = s3_face_read_s16(record + 4U + value * 2U);
+            if (absent && pose->value[value]) return TIRTC_ASSET_E_MISMATCH;
+        }
+        pose->transition_ms = s3_face_read_u16(record + 4U + 2U * S3_FACE_POSE_VALUES);
+        if (absent ? pose->transition_ms != 0U : pose->transition_ms == 0U)
+            return TIRTC_ASSET_E_MISMATCH;
+    }
+    s3_face_resources_ready = true;
+    return 0;
+}
+#endif
 typedef char ui_face_table_assert_2[(sizeof(s3_face_sequences) / sizeof(s3_face_sequences[0]) ==
                sizeof(s3_face_poses) / sizeof(s3_face_poses[0])) ? 1 : -1];
 typedef struct { int16_t x0, y0, x1, y1; } s3_face_bounds_t;
@@ -323,12 +454,21 @@ static void s3_face_base(int64_t now, int32_t *pose)
 static uint16_t s3_face_pose_index(const char *key)
 {
     for (size_t i = 0; i < sizeof(s3_face_poses) / sizeof(s3_face_poses[0]); ++i)
+#ifdef TIRTC_EXTERNAL_UI_ASSETS
+        if (strcmp(key, s3_face_resource_keys[i]) == 0) return (uint16_t)i;
+#else
         if (strcmp(key, s3_face_poses[i].key) == 0) return (uint16_t)i;
+#endif
     return 0;
 }
 static unsigned s3_face_variant_count(uint16_t index)
 {
+#ifdef TIRTC_EXTERNAL_UI_ASSETS
+    /* Public menu queries are safe before startup has loaded pose pointers. */
+    return index == 11U || index == 14U ? 1U : S3_FACE_VARIANTS;
+#else
     return s3_face_alternate_poses[index].key != NULL ? S3_FACE_VARIANTS : 1U;
+#endif
 }
 static const s3_face_pose_t *s3_face_pose_for_variant(uint16_t index, unsigned variant)
 {

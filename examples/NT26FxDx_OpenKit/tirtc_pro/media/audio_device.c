@@ -19,8 +19,9 @@
  * so capture is also zeroed and AI suppresses its upload at mic level 0. */
 static const uint8_t s_speaker_volume[] = {0, 30, 33, 37, 40, 43, 47, 50, 53, 57, 60};
 static const uint8_t s_dev_codec_volume[] = {0, 38, 41, 46, 50, 53, 57, 61, 64, 69, 72};
-static const uint8_t s_mic_gain[] = {0, 7, 7, 8, 8, 8, 9, 9, 9, 10, 10};
-static const uint8_t s_mic_volume[] = {0, 160, 168, 176, 183, 191, 199, 207, 214, 222, 230};
+/* Match Lite's lower capture curve; retain Pro's explicit L0 mute. */
+static const uint8_t s_mic_gain[] = {0, 7, 7, 7, 8, 8, 8, 8, 9, 9, 9};
+static const uint8_t s_mic_volume[] = {0, 160, 164, 169, 173, 177, 182, 186, 190, 195, 199};
 /* Match Lite: one 20 ms SDK transaction per public frame. */
 #define CAPTURE_BATCH_FRAMES 1U
 #define CAPTURE_BATCH_SAMPLES (DEMO_AI_AUDIO_FRAME_SAMPLES * CAPTURE_BATCH_FRAMES)
@@ -264,10 +265,9 @@ static void audio_callback(Liot_AudEvent_e event, void *context)
 static void playback_diagnostic(const int16_t *pcm, uint32_t samples, bool final)
 {
     uint32_t peak = 0, nonzero = 0;
-    uint32_t starts, finishes, errors, closes;
     /* The audited F6D_D tick wrapper returns milliseconds. */
     uint32_t now_ms = liot_rtos_get_running_time();
-    int pa = -1, volume = -1;
+    int pa = -1;
     for (uint32_t i = 0; i < samples; ++i) {
         int32_t value = pcm[i];
         uint32_t absolute = (uint32_t)(value < 0 ? -value : value);
@@ -287,20 +287,6 @@ static void playback_diagnostic(const int16_t *pcm, uint32_t samples, bool final
     }
     if (!s_diagnostic.submissions || (!final && s_diagnostic.logged &&
         (uint32_t)(now_ms - s_diagnostic.last_log_ms) < 5000U)) return;
-    liot_rtos_enter_critical();
-    starts = s_diagnostic.starts; finishes = s_diagnostic.finishes;
-    errors = s_diagnostic.errors; closes = s_diagnostic.closes;
-    liot_rtos_exit_critical();
-    (void)Liot_AudioGetVolume(&volume);
-    TIRTC_LOG_DEBUG("[AI-AUDIO] playback%s frames=%lu samples=%lu nonzero=%lu peak=%lu "
-               "pa=%d high/low/unknown=%lu/%lu/%lu events(start/finish/error/close)=%lu/%lu/%lu/%lu sw=%d warm=%lu/%lums\r\n",
-               final ? " stop" : "", (unsigned long)s_diagnostic.submissions,
-               (unsigned long)s_diagnostic.samples, (unsigned long)s_diagnostic.nonzero,
-               (unsigned long)s_diagnostic.peak, pa, (unsigned long)s_diagnostic.pa_high,
-               (unsigned long)s_diagnostic.pa_low, (unsigned long)s_diagnostic.pa_unknown,
-               (unsigned long)starts, (unsigned long)finishes, (unsigned long)errors,
-               (unsigned long)closes, volume, (unsigned long)s_diagnostic.warm_starts,
-               (unsigned long)s_diagnostic.warm_ms);
     s_diagnostic.peak = 0;
     s_diagnostic.last_log_ms = now_ms;
     s_diagnostic.logged = true;
@@ -311,20 +297,6 @@ static void capture_report(uint32_t now_ms, bool final)
 {
     if (!s_capture_diagnostic.reads || (!final && s_capture_diagnostic.logged &&
         (uint32_t)(now_ms - s_capture_diagnostic.last_log_ms) < 5000U)) return;
-    /* Debug-only periodic PCM statistics; no samples or dialog content are logged. */
-    TIRTC_LOG_DEBUG("[AI-AUDIO] capture%s batches=%lu errors=%lu window_batches=%lu samples=%lu "
-               "peak=%lu meanabs=%lu near_clip=%lu zero=%lu read_ms(avg/max)=%lu/%lu "
-               "gap_ms(avg/max)=%lu/%lu mic=%u\r\n", final ? " stop" : "",
-               (unsigned long)s_capture_diagnostic.frames, (unsigned long)s_capture_diagnostic.errors,
-               (unsigned long)s_capture_diagnostic.window_frames, (unsigned long)s_capture_diagnostic.window_samples,
-               (unsigned long)s_capture_diagnostic.peak,
-               (unsigned long)(s_capture_diagnostic.window_samples ?
-                   s_capture_diagnostic.absolute_sum / s_capture_diagnostic.window_samples : 0),
-               (unsigned long)s_capture_diagnostic.near_clip, (unsigned long)s_capture_diagnostic.zero_frames,
-               (unsigned long)(s_capture_diagnostic.read_sum_ms / s_capture_diagnostic.reads),
-               (unsigned long)s_capture_diagnostic.read_max_ms,
-               (unsigned long)(s_capture_diagnostic.gaps ? s_capture_diagnostic.gap_sum_ms / s_capture_diagnostic.gaps : 0),
-               (unsigned long)s_capture_diagnostic.gap_max_ms, s_mic_level);
     s_capture_diagnostic.window_frames = s_capture_diagnostic.window_samples = 0;
     s_capture_diagnostic.near_clip = s_capture_diagnostic.zero_frames = 0;
     s_capture_diagnostic.peak = s_capture_diagnostic.reads = s_capture_diagnostic.read_sum_ms = 0;

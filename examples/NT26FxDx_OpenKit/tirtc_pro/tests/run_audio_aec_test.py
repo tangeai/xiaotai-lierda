@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import tempfile
 
-SCENARIOS = ("capture", "capture-timeout", "inflight", "gain", "mute",
+SCENARIOS = ("capture", "capture-timeout", "inflight", "gain", "mute", "mic-levels",
              "warm-contract", "backpressure", "pacing", "stop-restart",
              "slow-stop", "stop-timeout", "record-stop-failure", "stream-failure",
              "volume-1", "volume-40", "volume-120", "volume-read-retry", "volume-contention",

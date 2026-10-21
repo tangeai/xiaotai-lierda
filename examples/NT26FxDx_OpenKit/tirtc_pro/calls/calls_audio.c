@@ -56,9 +56,8 @@ static bool s_tx_failing, s_record_failing;
 static uint32_t s_tx_failure_at, s_record_failure_at;
 static uint32_t s_last_log, s_play_failure_at;
 static bool s_play_failing;
-/* DEV-only counters: PCM is inspected without changing it. The control task
- * prints at most two lines per five seconds and once after a completed stop.
- * Snapshot/reset under critical, but scan PCM and print outside critical. */
+/* DEV-only local counters; PCM is inspected without changing it.
+ * Preserve bounded window resets without periodic serial output. */
 typedef struct {
     uint32_t generation, started_at, reported_at;
     uint32_t record_try, record_ok, record_busy, record_error, record_stale;
@@ -148,37 +147,16 @@ static void dev_diagnostic_tx_locked(const call_tx_job_t *job,bool attempted,
 }
 static void dev_diagnostic_report(demo_tirtc_owner_e owner,uint32_t generation,bool final)
 {
-    dev_audio_diagnostic_t d;uint32_t stamp=now(),gate,revision,applied,rx,played,drops,queued;
-    uint8_t mic;int error;
+    uint32_t stamp=now();
     if(owner!=DEMO_TIRTC_OWNER_DEV_CHAT)return;
     liot_rtos_enter_critical();
     if(s_dev_diagnostic.generation!=generation||
        (!final&&(uint32_t)(stamp-s_dev_diagnostic.reported_at)<5000U)){
         liot_rtos_exit_critical();return;
     }
-    d=s_dev_diagnostic;s_dev_diagnostic.reported_at=stamp;
+    s_dev_diagnostic.reported_at=stamp;
     s_dev_diagnostic.pcm_samples=s_dev_diagnostic.pcm_peak=0;s_dev_diagnostic.pcm_absolute=0;
-    /* Bits: running, owned, error, record-busy, global-mic, mic-level>0,
-     * session-mic, uplink-subscribed. Normal active capture is 0xf3. */
-    gate=(s_running?1U:0U)|(s_owned?2U:0U)|(s_error?4U:0U)|(s_record_busy?8U:0U)|
-         (s_microphone?16U:0U)|(s_mic?32U:0U)|(s_session_microphone?64U:0U)|(s_uplink_subscribed?128U:0U);
-    revision=s_config_revision;applied=s_applied_revision;mic=effective_mic_level_locked();error=s_error;
-    rx=s_received;played=s_played;drops=s_drops;queued=s_count;
     liot_rtos_exit_critical();
-    liot_trace("[DEV-AUD]%s gen=%lu wall_ms=%lu rec_try/ok/busy/err/stale=%lu/%lu/%lu/%lu/%lu "
-               "ret=%d read_max=%lu pcm_win_n/peak/mean=%lu/%lu/%lu q_ok/fail=%lu/%lu q_ret=%d\r\n",
-        final?" stop":"",(unsigned long)generation,(unsigned long)(stamp-d.started_at),
-        (unsigned long)d.record_try,(unsigned long)d.record_ok,(unsigned long)d.record_busy,
-        (unsigned long)d.record_error,(unsigned long)d.record_stale,d.record_ret,(unsigned long)d.record_max_ms,
-        (unsigned long)d.pcm_samples,(unsigned long)d.pcm_peak,
-        (unsigned long)(d.pcm_samples?d.pcm_absolute/d.pcm_samples:0),
-        (unsigned long)d.queue_ok,(unsigned long)d.queue_fail,d.queue_ret);
-    liot_trace("[DEV-NET]%s gen=%lu tx_ok/busy/err/stale=%lu/%lu/%lu/%lu ret=%d send_max=%lu "
-               "rx/play/drop=%lu/%lu/%lu rx_q=%lu gate=%02lx cfg/applied=%lu/%lu mic_target=%u error=%d\r\n",
-        final?" stop":"",(unsigned long)generation,(unsigned long)d.tx_ok,(unsigned long)d.tx_busy,
-        (unsigned long)d.tx_error,(unsigned long)d.tx_stale,d.tx_ret,(unsigned long)d.tx_max_ms,
-        (unsigned long)rx,(unsigned long)played,(unsigned long)drops,(unsigned long)queued,
-        (unsigned long)gate,(unsigned long)revision,(unsigned long)applied,(unsigned)mic,error);
 }
 static void revise_config_locked(void)
 {if(!++s_config_revision)++s_config_revision;}

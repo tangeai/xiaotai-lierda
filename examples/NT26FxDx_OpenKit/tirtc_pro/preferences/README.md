@@ -1,6 +1,6 @@
 # Audio preferences
 
-The default is speaker volume **8**, microphone gain **10**, and both
+The default is speaker volume **8**, microphone gain **8**, and both
 speaker/microphone enabled. This module does not initialize or change audio
 hardware. The application loads it before starting the UI, then applies the
 configuration through its normal audio/UI controls.

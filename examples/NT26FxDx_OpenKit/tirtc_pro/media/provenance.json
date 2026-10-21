@@ -10,9 +10,10 @@
     "docs/reference/ai_13/lierda/LICENSES/Apache-2.0.txt": "5711e1aa6db98b19c596e290801c4654d2cde9bd5c42c91341da46b02854f9f3"
   },
   "adaptation": [
-    "16k mono PCM16,320 samples per 20ms; G.711 A-law network audio remains 8k",
+    "16k mono PCM16,320 samples per 20ms; AI uses Opus/16k mono,20ms uplink,target 24kbps; other features retain G.711 A-law",
+    "Opus adapter copied from sibling tirtc_lite/src/media/opus_codec.c and include/opus_codec.h under MIT; added packet-duration inspection and decoder-only reset; algorithm uses shared components/thirdparty/opus/opus-1.4 under its upstream license",
     "Shared rail remains owned by display port",
-    "Static retained codec configuration, no deinit",
+    "ES8311 hardware codec configuration remains statically retained; the AI Opus encoder/decoder are released after session cleanup",
     "Lease in-flight guards,0..10 true mute and restored Pro user levels",
     "F6D_D 3A AEC and ANS (mode=1) enabled by default; AGC bypassed; bounded PCM submissions"
   ]

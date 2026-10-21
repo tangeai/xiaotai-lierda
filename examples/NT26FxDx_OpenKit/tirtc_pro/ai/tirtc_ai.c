@@ -8,7 +8,7 @@
 #include "../calls/tirtc_calls.h"
 #include "tirtc_runtime.h"
 #include "audio_device.h"
-#include "g711_codec.h"
+#include "opus_codec.h"
 #include "device_binding.h"
 #include "formal_mqtt.h"
 #include "tirtc_network.h"
@@ -24,15 +24,16 @@
 #define AI_STANDBY_SETTLE_MS 500U
 #define AI_ACCESS_TTL_MS 15000U
 #define AI_OWNER_WAIT_MS 12000U
-/* Cold pre-roll peaks at 9120 B for 160 ms packets; reserve another 519 ms
- * of A-law input (4152 B) for the measured scheduling delay, rounded upward. */
-#define AI_RX_BYTES 15360U /* 1920 ms A-law; bounded independently of packets. */
+/* Bound encoded bytes, complete packets and decoded duration separately. */
+#define AI_RX_BYTES 15360U
+#define AI_RX_PACKETS 96U
+#define AI_RX_MAX_SAMPLES 30720U /* Retain the original 1.92 s capacity. */
 #define AI_CMD_COUNT 3U
 #define AI_CMD_BYTES 4608U
 #define AI_PLAY_BATCH 24U
 #define AI_PLAY_AHEAD_MS 480U
 #define AI_PLAY_BUDGET_MS 20U
-#define AI_PREROLL_BYTES 1920U /* 240 ms at 8 kHz; bounded short-tail wait below. */
+#define AI_PREROLL_SAMPLES 3840U /* 240 ms at 16 kHz, independent of Opus bitrate. */
 #define AI_PREROLL_WAIT_MS 120U
 #define AI_PLAY_POLL_MS 5U
 #define AI_AUDIO_CLEANUP_RETRY_MS 1000U
@@ -53,7 +54,6 @@
 #define AI_ERR_LOST (-1406)
 #define AI_ERR_AUDIO_CLEANUP (-1407)
 #define AI_ERR_UPLINK (-1408)
-#define AI_NETWORK_SAMPLES_8K (DEMO_AI_AUDIO_FRAME_SAMPLES / 2U)
 typedef enum { AI_IDLE, AI_TOKEN, AI_CONNECT, AI_NEGOTIATE, AI_ACTIVE, AI_STOPPING, AI_ERROR, AI_BLOCKED, AI_IDLE_FETCH, AI_WAIT_OWNER, AI_IDLE_CONNECT, AI_IDLE_READY } ai_phase_t;
 typedef struct { uint8_t used; uint32_t order, epoch, received_at; uint16_t length; char data[AI_CMD_BYTES + 1U]; } ai_cmd_t;
 
@@ -71,7 +71,12 @@ static bool s_runtime_owned, s_audio_owned, s_audio_started, s_restart_requested
 static demo_ai_audio_lease_t s_lease = DEMO_AI_AUDIO_LEASE_INIT;
 static tirtc_network_snapshot_t s_route;
 static demo_binding_ai_access_t s_access;
-static uint8_t s_rx[AI_RX_BYTES], s_play_alaw[AI_NETWORK_SAMPLES_8K];
+typedef struct { uint16_t length, samples; } ai_rx_packet_t;
+static uint8_t s_rx[AI_RX_BYTES], s_play_opus[DEMO_AI_OPUS_MAX_PACKET];
+static ai_rx_packet_t s_rx_packets[AI_RX_PACKETS];
+static uint32_t s_rx_head, s_rx_count, s_rx_samples;
+static int16_t s_decode_pcm[DEMO_AI_OPUS_MAX_DECODE_SAMPLES];
+static uint16_t s_decode_samples, s_decode_offset;
 static uint32_t s_rx_read, s_rx_queued, s_rx_peak, s_rx_drop_bytes, s_rx_bad_frames, s_cmd_drops, s_play_errors;
 static uint32_t s_media_step_at, s_media_gap_max, s_rebuffers;
 static bool s_media_step_seen;
@@ -79,7 +84,7 @@ static ai_cmd_t s_commands[AI_CMD_COUNT];
 static ai_call_request_t s_call_request;
 static uint32_t s_call_ticket, s_call_started, s_call_epoch;
 static int16_t s_pcm[DEMO_AI_AUDIO_FRAME_SAMPLES], s_record[DEMO_AI_AUDIO_FRAME_SAMPLES];
-static uint8_t s_alaw[AI_NETWORK_SAMPLES_8K];
+static uint8_t s_uplink_opus[DEMO_AI_OPUS_MAX_PACKET];
 static char s_device_id[DEMO_BIND_DEVICE_ID_MAX], s_role[DEMO_BIND_AI_ROLE_ID_MAX], s_rpc_id[40];
 static uint32_t s_tx, s_rx_frames, s_played, s_rx_drops, s_tx_drops, s_suppressed, s_capture;
 static uint32_t s_play_audio_until, s_preroll_since;
@@ -90,8 +95,6 @@ static bool s_capture_paused;
 /* UI changes only latch intent; the worker drains old SDK PCM while muted. */
 static bool s_speaker_mute_pending, s_speaker_draining;
 static uint8_t s_play_sample_remainder;
-static bool s_partial_waiting;
-static uint32_t s_partial_since;
 static uint32_t s_capture_pause_at, s_capture_pause_remainder;
 static bool s_play_retry;
 static uint32_t s_play_retry_since;
@@ -171,7 +174,7 @@ static bool text_copy(char *dst, size_t cap, const char *src)
 }
 void tirtc_ai_publish(void)
 {
-    /* Copy belongs to this caller. The 20 KiB AI task publishes periodically;
+    /* Copy belongs to this caller. The AI task publishes periodically;
      * callers on a small main/UI stack must not invoke this function. */
     tirtc_ui_ai_t copy;
     liot_rtos_enter_critical(); copy = s_ui; liot_rtos_exit_critical();
@@ -225,8 +228,13 @@ static void clear_caption(void)
 }
 static void discard_audio_queue(void)
 {
-    liot_rtos_enter_critical(); s_rx_read=s_rx_queued=0; liot_rtos_exit_critical();
-    s_play_retry=false; s_play_continuing=s_preroll_waiting=s_partial_waiting=false;
+    liot_rtos_enter_critical();
+    s_rx_read=s_rx_queued=s_rx_head=s_rx_count=s_rx_samples=0;
+    liot_rtos_exit_critical();
+    s_decode_samples=s_decode_offset=0;
+    /* Worker-only: interruption/mute must not replay codec history. */
+    demo_ai_opus_reset_decoder();
+    s_play_retry=false; s_play_continuing=s_preroll_waiting=false;
 }
 static void discard_queues(void)
 {
@@ -274,25 +282,33 @@ static void disconnected(tirtc_conn_t conn) {
 }
 static void audio_received(tirtc_conn_t conn, const TIRTCFRAMEINFO *frame, void *data)
 {
-    uint32_t write, first;
+    uint32_t write, first, tail; int samples;
     if (!frame || !data || !frame->length) return;
+    samples=(frame->length<=DEMO_AI_OPUS_MAX_PACKET) ?
+        demo_ai_opus_packet_samples(data,(int)frame->length) : -1;
     liot_rtos_enter_critical();
     /* ACK and first PCM can arrive before the worker consumes the ACK.
      * Cache the current connection's valid format; playback starts only after
      * successful negotiation, and finish() discards failed/cancelled attempts. */
     if (!callback_current(conn) || (s_phase!=AI_NEGOTIATE && s_phase!=AI_ACTIVE)) { liot_rtos_exit_critical(); return; }
-    if (frame->stream_id!=1U || frame->media!=TIRTC_AUDIO_ALAW || frame->flags!=TIRTC_AUDIOSAMPLE_8K16B1C || frame->length>AI_RX_BYTES) {
+    if (frame->stream_id!=1U || frame->media!=TIRTC_AUDIO_OPUS || frame->flags!=TIRTC_AUDIOSAMPLE_16K16B1C ||
+        samples<=0 || samples>DEMO_AI_OPUS_MAX_DECODE_SAMPLES || (samples&1)) {
         s_rx_drops++; s_rx_bad_frames++; liot_rtos_exit_critical(); return;
     }
     /* Mute is intentional: do not preserve old speech for a later unmute. */
     if (!s_ui.speaker_enabled || !s_ui.volume || s_speaker_mute_pending || s_speaker_draining) { liot_rtos_exit_critical(); return; }
-    if (frame->length>AI_RX_BYTES-s_rx_queued) {
+    if (frame->length>AI_RX_BYTES-s_rx_queued || s_rx_count>=AI_RX_PACKETS ||
+        (uint32_t)samples>AI_RX_MAX_SAMPLES-s_rx_samples) {
         s_rx_drops++; s_rx_drop_bytes+=frame->length;
     } else {
         write=(s_rx_read+s_rx_queued)%AI_RX_BYTES;
         first=AI_RX_BYTES-write; if(first>frame->length)first=frame->length;
         memcpy(s_rx+write,data,first);
         if(first<frame->length)memcpy(s_rx,(const uint8_t *)data+first,frame->length-first);
+        tail=(s_rx_head+s_rx_count)%AI_RX_PACKETS;
+        s_rx_packets[tail].length=(uint16_t)frame->length;
+        s_rx_packets[tail].samples=(uint16_t)samples;
+        s_rx_count++; s_rx_samples+=(uint32_t)samples;
         s_rx_queued+=frame->length; s_rx_frames++;
         if(!s_first_rx_seen) { s_first_rx_seen=true; s_first_rx_at=tick(); }
         if(s_rx_queued>s_rx_peak)s_rx_peak=s_rx_queued;
@@ -402,6 +418,9 @@ static void cleanup_step(void)
         s_audio_cleanup_retry = false;
         s_audio_owned = s_audio_started = false;
     }
+    /* No codec work can follow finish() on this single worker. Return its
+     * heap before releasing the RTC owner to a pending video call. */
+    demo_ai_opus_deinit();
     if (s_runtime_owned) {
         (void)demo_tirtc_disconnect(DEMO_TIRTC_OWNER_AI, s_generation);
         result = demo_tirtc_session_release(DEMO_TIRTC_OWNER_AI, s_generation);
@@ -445,8 +464,8 @@ static int start_command(void)
     ok = root && params && input && output && cJSON_AddStringToObject(root,"jsonrpc","2.0") &&
          cJSON_AddStringToObject(root,"id",s_rpc_id) && cJSON_AddStringToObject(root,"method","start_session") &&
          cJSON_AddStringToObject(params,"device_id",s_device_id) && cJSON_AddStringToObject(params,"role_id",s_role) &&
-         cJSON_AddStringToObject(input,"codec","alaw") && cJSON_AddNumberToObject(input,"sample_rate",8000) && cJSON_AddNumberToObject(input,"channels",1) &&
-         cJSON_AddStringToObject(output,"codec","alaw") && cJSON_AddNumberToObject(output,"sample_rate",8000) && cJSON_AddNumberToObject(output,"channels",1);
+         cJSON_AddStringToObject(input,"codec","opus") && cJSON_AddNumberToObject(input,"sample_rate",16000) && cJSON_AddNumberToObject(input,"channels",1) &&
+         cJSON_AddStringToObject(output,"codec","opus") && cJSON_AddNumberToObject(output,"sample_rate",16000) && cJSON_AddNumberToObject(output,"channels",1);
     if (ok) { ok = cJSON_AddItemToObject(params,"input_audio",input); if (ok) input = NULL; }
     if (ok) { ok = cJSON_AddItemToObject(params,"output_audio",output); if (ok) output = NULL; }
     if (ok) { ok = cJSON_AddItemToObject(root,"params",params); if (ok) params = NULL; }
@@ -469,9 +488,9 @@ static bool profile(const cJSON *o)
 {
     const char *codec = json_string(o,"codec"); const cJSON *rate = cJSON_GetObjectItemCaseSensitive(o,"sample_rate"), *channels = cJSON_GetObjectItemCaseSensitive(o,"channels");
     /* Older services omit optional negotiated formats; retain our explicit
-     * G.711A/8-kHz/mono request, but reject an explicit incompatible profile. */
+     * Opus/16-kHz/mono request, but reject an explicit incompatible profile. */
     if (o == NULL) return true;
-    return codec && (!strcmp(codec,"alaw") || !strcmp(codec,"g711a")) && cJSON_IsNumber(rate) && rate->valuedouble == 8000 && cJSON_IsNumber(channels) && channels->valuedouble == 1;
+    return codec && !strcmp(codec,"opus") && cJSON_IsNumber(rate) && rate->valuedouble == 16000 && cJSON_IsNumber(channels) && channels->valuedouble == 1;
 }
 static void caption(const cJSON *params)
 {
@@ -696,31 +715,61 @@ static int command_slot(void)
     if (found >= 0) s_commands[found].used = 2;
     liot_rtos_exit_critical(); return found;
 }
-/* The callback is the producer, this worker the only consumer. Peek leaves
- * bytes reserved until the SDK accepts its copy; failed playback loses none. */
-static uint32_t queued_audio_bytes(void)
+/* Only this worker consumes/resets packets. Keep the head reserved until all
+ * decoded PCM is accepted, including when the audio queue reports BUSY. */
+static uint32_t queued_audio_samples(void)
 {
-    uint32_t bytes; liot_rtos_enter_critical(); bytes=s_rx_queued; liot_rtos_exit_critical(); return bytes;
+    uint32_t samples;
+    liot_rtos_enter_critical(); samples=s_rx_samples; liot_rtos_exit_critical();
+    return samples-s_decode_offset;
+}
+static void consume_rx_packet(void)
+{
+    liot_rtos_enter_critical();
+    if(s_rx_count) {
+        const ai_rx_packet_t *packet=&s_rx_packets[s_rx_head];
+        s_rx_read=(s_rx_read+packet->length)%AI_RX_BYTES;
+        s_rx_queued-=packet->length; s_rx_samples-=packet->samples;
+        s_rx_head=(s_rx_head+1U)%AI_RX_PACKETS; s_rx_count--;
+    }
+    liot_rtos_exit_critical();
+    s_decode_samples=s_decode_offset=0;
 }
 static uint16_t peek_audio(void)
 {
-    uint32_t samples, first;
-    liot_rtos_enter_critical();
-    samples=s_rx_queued; if(samples>AI_NETWORK_SAMPLES_8K)samples=AI_NETWORK_SAMPLES_8K;
-    first=AI_RX_BYTES-s_rx_read; if(first>samples)first=samples;
-    memcpy(s_play_alaw,s_rx+s_rx_read,first);
-    if(first<samples)memcpy(s_play_alaw+first,s_rx,samples-first);
-    liot_rtos_exit_critical(); return (uint16_t)samples;
+    uint32_t first, samples; ai_rx_packet_t packet; int decoded;
+    if(s_decode_offset==s_decode_samples) {
+        liot_rtos_enter_critical();
+        if(!s_rx_count) { liot_rtos_exit_critical(); return 0; }
+        packet=s_rx_packets[s_rx_head];
+        first=AI_RX_BYTES-s_rx_read; if(first>packet.length)first=packet.length;
+        memcpy(s_play_opus,s_rx+s_rx_read,first);
+        if(first<packet.length)memcpy(s_play_opus+first,s_rx,packet.length-first);
+        liot_rtos_exit_critical();
+        /* Decode a complete packet once, outside callbacks/critical sections.
+         * A 120 ms packet can feed six 20 ms HAL blocks. */
+        decoded=demo_ai_opus_decode(s_play_opus,packet.length,s_decode_pcm,
+                                   DEMO_AI_OPUS_MAX_DECODE_SAMPLES);
+        if(decoded!=packet.samples) {
+            liot_rtos_enter_critical(); s_rx_drops++; s_rx_bad_frames++;
+            s_rx_drop_bytes+=packet.length; liot_rtos_exit_critical();
+            consume_rx_packet(); demo_ai_opus_reset_decoder(); return 0;
+        }
+        s_decode_samples=(uint16_t)decoded; s_decode_offset=0;
+    }
+    samples=s_decode_samples-s_decode_offset;
+    if(samples>DEMO_AI_AUDIO_FRAME_SAMPLES)samples=DEMO_AI_AUDIO_FRAME_SAMPLES;
+    memcpy(s_pcm,s_decode_pcm+s_decode_offset,samples*sizeof(s_pcm[0]));
+    return (uint16_t)samples;
 }
 static void consume_audio(uint16_t samples)
 {
-    liot_rtos_enter_critical();
-    s_rx_read=(s_rx_read+samples)%AI_RX_BYTES; s_rx_queued-=samples;
-    liot_rtos_exit_critical();
+    s_decode_offset+=samples;
+    if(s_decode_offset==s_decode_samples)consume_rx_packet();
 }
 static bool playback_buffer_ready(bool speaker, uint8_t volume)
 {
-    uint32_t bytes, now=tick();
+    uint32_t samples, now=tick();
     if(!speaker || !volume) {
         s_play_continuing=s_preroll_waiting=false;
         return true; /* Muted data is discarded by the normal bounded drain. */
@@ -730,15 +779,15 @@ static bool playback_buffer_ready(bool speaker, uint8_t volume)
     if(s_play_continuing && (int32_t)(s_play_audio_until-now)<=0 &&
        demo_ai_audio_play_done(&s_lease)) {
         s_play_continuing=false; s_preroll_waiting=false;
-        if(queued_audio_bytes())s_rebuffers++;
+        if(queued_audio_samples())s_rebuffers++;
     }
     if(s_play_continuing) return true;
-    bytes=queued_audio_bytes();
-    if(!bytes) { s_preroll_waiting=false; return false; }
-    if(!s_preroll_waiting) { s_preroll_waiting=true; s_preroll_since=s_partial_waiting ? s_partial_since : now; }
+    samples=queued_audio_samples();
+    if(!samples) { s_preroll_waiting=false; return false; }
+    if(!s_preroll_waiting) { s_preroll_waiting=true; s_preroll_since=now; }
     /* A short utterance/tail must not wait forever for another network packet.
      * Capture, commands, cancellation and identity checks continue every turn. */
-    return bytes>=AI_PREROLL_BYTES || (uint32_t)(now-s_preroll_since)>=AI_PREROLL_WAIT_MS;
+    return samples>=AI_PREROLL_SAMPLES || (uint32_t)(now-s_preroll_since)>=AI_PREROLL_WAIT_MS;
 }
 static bool submit_playback(bool speaker, uint8_t volume)
 {
@@ -755,32 +804,17 @@ static bool submit_playback(bool speaker, uint8_t volume)
         if(controls_changed)return false;
         if(submitted && (uint32_t)(tick()-began)>=AI_PLAY_BUDGET_MS)break;
         samples=peek_audio(); if(!samples)break;
-        /* Coalesce short network tails with the next packet for at most the
-         * existing prebuffer wait. Each A-law sample is duplicated below,
-         * so even the final lone sample yields four aligned PCM bytes. */
-        if(samples>1U && (samples&1U))samples--;
-        if(samples==1U) {
-            if(!s_partial_waiting) {
-                s_partial_waiting=true;
-                s_partial_since=s_preroll_waiting ? s_preroll_since : tick();
-            }
-            if((uint32_t)(tick()-s_partial_since)<AI_PREROLL_WAIT_MS)break;
-        } else s_partial_waiting=false;
-        play_samples=(uint16_t)(2U*samples);
+        /* Opus decoding can be preempted by STOP, mute or a route change.
+         * Leave the decoded head for the existing cleanup/control path. */
+        if(!requested() || !ready() || !route_current())return false;
+        liot_rtos_enter_critical(); controls_changed=s_controls_dirty; liot_rtos_exit_critical();
+        if(controls_changed)return false;
+        play_samples=samples;
         fractional=play_samples+(s_play_continuing ? s_play_sample_remainder : 0U);
         duration=fractional/16U; now=tick();
         ahead=s_play_guard ? (int32_t)(s_play_audio_until-now) : 0;
         if(ahead>0 && (uint32_t)ahead+duration+(fractional%16U!=0)+
            (s_play_continuing ? 0U : DEMO_AI_AUDIO_WARMUP_MS)>AI_PLAY_AHEAD_MS)break;
-        (void)demo_g711_alaw_decode(s_play_alaw,s_pcm,samples);
-        {
-            uint32_t sample;
-            for(sample=samples; sample>0U; --sample) {
-                int16_t value=s_pcm[sample-1U];
-                s_pcm[(sample-1U)*2U]=value;
-                s_pcm[(sample-1U)*2U+1U]=value;
-            }
-        }
         result=s_play_continuing ? demo_ai_audio_play(&s_lease,s_pcm,play_samples) :
             demo_ai_audio_play_warm(&s_lease,s_pcm,play_samples,&extra);
 #if DEMO_AI_AUDIO_AEC_ENABLE
@@ -811,7 +845,7 @@ static bool submit_playback(bool speaker, uint8_t volume)
             if(s_prime_wait_hint) { s_prime_wait_hint=false; show(TIRTC_AI_SPEAKING,"AI 回复中"); }
             s_played++; s_play_guard=true; s_play_until=s_play_audio_until+120U;
             s_play_continuing=true; s_preroll_waiting=false;
-            consume_audio(samples); s_play_retry=false; s_partial_waiting=false;
+            consume_audio(samples); s_play_retry=false;
 #if DEMO_AI_AUDIO_AEC_ENABLE
             if(s_remote_tail) { s_remote_tail_progress=now; s_remote_tail_quiet=false; }
 #endif
@@ -931,7 +965,7 @@ static void media_step(void)
     suppress_capture=!mic || !mic_gain;
 #if !DEMO_AI_AUDIO_AEC_ENABLE
     suppress_capture=suppress_capture || (speaker && volume &&
-        (s_play_guard || s_preroll_waiting || queued_audio_bytes()!=0));
+        (s_play_guard || s_preroll_waiting || queued_audio_samples()!=0));
 #endif
     if(suppress_capture) { (void)pause_capture(); return; }
     if(s_capture_paused) {
@@ -949,7 +983,7 @@ static void media_step(void)
         account_capture_pause();
         if(result) { finish(AI_ERR_AUDIO); return; }
         s_capture_paused=false;
-        if(s_prime_wait_hint && requested() && ready() && route_current() && !s_play_guard && !queued_audio_bytes()) {
+        if(s_prime_wait_hint && requested() && ready() && route_current() && !s_play_guard && !queued_audio_samples()) {
             bool enabled;
             liot_rtos_enter_critical(); enabled=s_ui.mic_enabled && s_ui.mic_gain!=0; liot_rtos_exit_critical();
             if(enabled) { s_prime_wait_hint=false; show(TIRTC_AI_LISTENING,"正在聆听"); }
@@ -1004,7 +1038,7 @@ static void media_step(void)
     liot_rtos_enter_critical(); s_ui.audio_level=(uint8_t)(!mic || peak<512U ? 0U : peak<4096U ? 1U : peak<12288U ? 2U : 3U); liot_rtos_exit_critical();
     if (!mic || suppress_capture
 #if !DEMO_AI_AUDIO_AEC_ENABLE
-        || (speaker && volume && (s_play_guard || queued_audio_bytes()!=0))
+        || (speaker && volume && (s_play_guard || queued_audio_samples()!=0))
 #endif
        ) {
         /* Do not upload stale captured data after protection/mute expires. */
@@ -1017,15 +1051,11 @@ static void media_step(void)
     }
     if(s_suppression_hint || s_prime_wait_hint) { s_suppression_hint=s_prime_wait_hint=false; show(TIRTC_AI_LISTENING,"正在聆听"); }
     {
-        unsigned int sample;
-        for (sample=0U; sample<AI_NETWORK_SAMPLES_8K; ++sample) {
-            int32_t mixed=(int32_t)s_record[sample*2U]+(int32_t)s_record[sample*2U+1U];
-            s_alaw[sample]=demo_g711_alaw_encode_sample((int16_t)(mixed/2));
-        }
-    }
-    {
-        TIRTCFRAMEINFO frame; size_t used=0U; memset(&frame,0,sizeof(frame));
-        frame.stream_id=1; frame.media=TIRTC_AUDIO_ALAW; frame.flags=TIRTC_AUDIOSAMPLE_8K16B1C;
+        TIRTCFRAMEINFO frame; size_t used=0U;
+        int encoded=demo_ai_opus_encode_20ms(s_record,s_uplink_opus,sizeof(s_uplink_opus));
+        if(encoded<=0 || encoded>DEMO_AI_OPUS_MAX_PACKET) { finish(AI_ERR_AUDIO); return; }
+        memset(&frame,0,sizeof(frame));
+        frame.stream_id=1; frame.media=TIRTC_AUDIO_OPUS; frame.flags=TIRTC_AUDIOSAMPLE_16K16B1C;
 #if DEMO_AI_AUDIO_AEC_ENABLE
         /* Fresh AEC capture can skip callbacks while the worker is busy. Use
          * its real completion time rather than compressing those gaps to 20ms. */
@@ -1045,8 +1075,8 @@ static void media_step(void)
             s_tx_drops++; s_timestamp+=DEMO_AI_AUDIO_FRAME_MS;
             s_tx_failure_active=false; return;
         }
-        frame.ts=s_timestamp; frame.length=AI_NETWORK_SAMPLES_8K;
-        if(result==0) result=demo_tirtc_send_audio(DEMO_TIRTC_OWNER_AI,s_generation,&frame,s_alaw);
+        frame.ts=s_timestamp; frame.length=(uint32_t)encoded;
+        if(result==0) result=demo_tirtc_send_audio(DEMO_TIRTC_OWNER_AI,s_generation,&frame,s_uplink_opus);
     }
     s_timestamp+=DEMO_AI_AUDIO_FRAME_MS;
     /* Native SendAudioStream returns >0 bytes queued, <0 an error. Do not
@@ -1081,13 +1111,16 @@ static void reset_attempt(uint32_t attempt, uint32_t credential, uint32_t clicke
     s_speaker_mute_pending=s_speaker_draining=false;
     s_running_clicked_at=s_request==attempt && s_want ? s_clicked_at : clicked; s_first_rx_seen=s_first_rx_logged=s_first_pcm_logged=s_first_signal_logged=false;
     liot_rtos_exit_critical();
-    s_play_guard=s_play_continuing=s_preroll_waiting=s_partial_waiting=false;
+    s_play_guard=s_play_continuing=s_preroll_waiting=false;
     s_start_sent=s_access_ready=s_promoted_attempt=false;
     tirtc_network_get_snapshot(&s_route);
 }
 static bool prepare_audio(void)
 {
     int result; uint32_t prewarm_ms=0; uint8_t speaker_level, mic_level;
+    result=demo_ai_opus_init();
+    if(result) { finish(AI_ERR_AUDIO); return false; }
+    demo_ai_opus_reset();
     result=demo_ai_audio_acquire(DEMO_AI_AUDIO_OWNER_AI,&s_lease);
     if(result) { finish(AI_ERR_AUDIO); return false; } s_audio_owned=true;
     liot_rtos_enter_critical(); speaker_level=s_ui.speaker_enabled ? s_ui.volume : 0;
@@ -1228,7 +1261,7 @@ static void diagnostics(void)
     liot_rtos_enter_critical(); rx_frames=s_rx_frames; rx_drops=s_rx_drops;
     queued=s_rx_queued; peak=s_rx_peak; dropped_bytes=s_rx_drop_bytes; bad=s_rx_bad_frames; cmd_drops=s_cmd_drops;
     liot_rtos_exit_critical();
-    (void)snprintf(text,sizeof(text),"AI 8k 单声道 A-law\n采集 %lu / 发送 %lu\n接收 %lu / 播放 %lu\n音频丢包 上行 %lu 下行 %lu\n上行抑制 %lu帧（静音/播放防回声）",
+    (void)snprintf(text,sizeof(text),"AI 16k 单声道 Opus\n采集 %lu / 发送 %lu\n接收 %lu / 播放 %lu\n音频丢包 上行 %lu 下行 %lu\n上行抑制 %lu帧（静音/播放防回声）",
         (unsigned long)s_capture,(unsigned long)s_tx,(unsigned long)rx_frames,(unsigned long)s_played,
         (unsigned long)s_tx_drops,(unsigned long)rx_drops,(unsigned long)s_suppressed);
     liot_rtos_enter_critical(); (void)text_copy(s_ui.diagnostic_audio,sizeof(s_ui.diagnostic_audio),text); s_ui.audio_valid=true; liot_rtos_exit_critical();
@@ -1320,7 +1353,7 @@ static void worker(void *arg)
 #if DEMO_AI_AUDIO_AEC_ENABLE
             || s_remote_tail
 #else
-            || queued_audio_bytes()
+            || queued_audio_samples()
 #endif
             ))
             liot_rtos_task_sleep_ms(AI_PLAY_POLL_MS); /* Yield even with queued wake tokens. */
@@ -1332,7 +1365,8 @@ int tirtc_ai_start_service(void)
     liot_task_t task=NULL; int result;
     liot_rtos_enter_critical(); if(s_available || s_starting) { liot_rtos_exit_critical(); return 0; } s_starting=true; liot_rtos_exit_critical();
     result=s_sem ? 0 : (int)liot_rtos_semaphore_create(&s_sem,0);
-    if(!result) result=(int)liot_rtos_task_create(&task,20U*1024U,13,"tirtc_ai",worker,NULL);
+    /* Match Lite's Opus worker stack: the fixed-point codec uses nested VLAs. */
+    if(!result) result=(int)liot_rtos_task_create(&task,96U*1024U,13,"tirtc_ai",worker,NULL);
     liot_rtos_enter_critical(); s_starting=false; if(!result && task) { s_task=task; s_available=true; } liot_rtos_exit_critical();
     return !result && task ? 0 : -1;
 }

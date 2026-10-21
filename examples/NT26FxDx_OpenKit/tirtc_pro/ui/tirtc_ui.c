@@ -1,6 +1,7 @@
 /* Modern product UI based on starter_product (f7186630), not legacy main/ui.
  * One LVGL owner, fixed copy-in mailboxes; hardware remains in ../port. */
 #include "ui_internal.h"
+#include "font/tirtc_font_digits_48.h"
 #include "ui_face.h"
 #include "tirtc_video_draw.h"
 #include "assets/modern_icons.h"
@@ -714,7 +715,7 @@ static void render_home(void)
     lv_label_set_long_mode(state_label, LV_LABEL_LONG_DOT); lv_obj_set_height(state_label, 20);
     if (ui_page == TIRTC_PAGE_CLOCK) {
         clock_face = ui_label(ui_screen, "--:--", 24, 70, 272, UI_TEXT);
-        lv_obj_set_style_text_font(clock_face, &lv_font_montserrat_48, 0);
+        lv_obj_set_style_text_font(clock_face, &tirtc_font_digits_48, 0);
         lv_obj_set_style_text_align(clock_face, LV_TEXT_ALIGN_CENTER, 0);
         date_label = ui_label(ui_screen, "", 40, 132, 240, UI_MUTED);
         lv_obj_set_style_text_align(date_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -938,7 +939,7 @@ static void render_binding(void)
     else ui_header("绑定设备", TIRTC_PAGE_MENU);
     binding_network = ui_label(ui_screen, "", 16, 50, 240, UI_ACCENT);
     binding_code = ui_label(ui_screen, "------", 16, 90, 288, UI_TEXT);
-    lv_obj_set_style_text_font(binding_code, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_font(binding_code, &tirtc_font_digits_48, 0);
     lv_obj_set_style_text_align(binding_code, LV_TEXT_ALIGN_CENTER, 0);
     (void)ui_label(ui_screen, "在体验平台输入上方 6 位验证码", 16, 166, 288, UI_TEXT);
     binding_status = ui_label(ui_screen, "", 16, 202, 288, UI_MUTED);

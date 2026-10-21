@@ -7,4 +7,4 @@
 - 固件不会自动修改云端角色；角色、插件、参数默认值和设备关联都需生效。
 - 先验证通讯录手动呼叫，再验证 AI 的真实拨号和接听。
 
-实现入口是 `tirtc_ai.c`、`ai_call_protocol.c` 和原 contacts/calls 模块。47 版兼容审核的历史结果保留在 [AI_CALL_REVIEW.md](AI_CALL_REVIEW.md)；它不是新一次实机验收。
+实现入口是 `tirtc_ai.c`、`ai_call_protocol.c` 和原 contacts/calls 模块；当前功能与验证入口见 [AI 模块说明](README.md)。

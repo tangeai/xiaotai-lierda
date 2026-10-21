@@ -119,6 +119,9 @@ lv_obj_t *ui_face_background(lv_obj_t *parent)
 lv_obj_t *ui_face_create(lv_obj_t *parent, int32_t x, int32_t y)
 {
     int64_t now;
+#ifdef TIRTC_EXTERNAL_UI_ASSETS
+    if (!s3_face_resources_ready) return NULL;
+#endif
     if (parent == NULL || !face_room_available()) return NULL;
     ui_face_detach();
     memset(&s3_face, 0, sizeof(s3_face));
@@ -179,7 +182,11 @@ uint8_t ui_face_key_count(void)
 
 const char *ui_face_key_at(uint8_t index)
 {
+#ifdef TIRTC_EXTERNAL_UI_ASSETS
+    return index < ui_face_key_count() ? s3_face_resource_keys[index] : NULL;
+#else
     return index < ui_face_key_count() ? s3_face_poses[index].key : NULL;
+#endif
 }
 
 uint8_t ui_face_variant_count(const char *key)

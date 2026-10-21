@@ -17,12 +17,15 @@ import subprocess
 import tempfile
 import os
 import shutil
+import sys
 
 UI_ROOT = Path(__file__).resolve().parent.parent
 SOURCE_ROOT = Path(__file__).resolve().parent / "font-sources"
 COMMIT = "f7186630ed63f1e26838b8394e3e83a7e032646c"
 PROJECT_ROOT = UI_ROOT.parents[3]
 LVGL_ROOT = PROJECT_ROOT / "components/thirdparty/lvgl/lvgl-8.3.10"
+sys.path.insert(0, str(UI_ROOT.parent / "resource_store"))
+from font_resources import externalize_chinese
 TOKEN = re.compile(r'"(?:\\.|[^"\\])*"|/\*.*?\*/|//[^\n]*', re.S)
 NUMBER = re.compile(r'-?0x[0-9a-fA-F]+|-?\d+')
 FIELDS = ("bitmap_index", "adv_w", "box_w", "box_h", "ofs_x", "ofs_y")
@@ -320,8 +323,8 @@ def build_font(args) -> dict:
                 'int tirtc_font_set_bitmap(const uint8_t *bitmap, uint32_t length)', '{',
                 f'    if (!bitmap || length != {len(new_bitmap)}U) return -1;',
                 '    external_bitmap_reader = NULL;', '    font_dsc.glyph_bitmap = bitmap;', '    return 0;', '}', '#endif', ''])
-    write(UI_ROOT / "font/tirtc_font_14.c", '\n'.join(out))
-    write(UI_ROOT / "font/tirtc_font_14.h", '#pragma once\n#include "lvgl.h"\n#ifdef __cplusplus\nextern "C" {\n#endif\nLV_FONT_DECLARE(tirtc_font_14);\n#ifdef TIRTC_EXTERNAL_UI_ASSETS\ntypedef const uint8_t *(*tirtc_font_bitmap_reader_t)(uint32_t offset, uint32_t bytes);\n/* LVGL owner only; install once before attaching Chinese labels. */\nint tirtc_font_set_reader(tirtc_font_bitmap_reader_t reader, uint32_t length);\nint tirtc_font_set_bitmap(const uint8_t *bitmap, uint32_t length);\n#endif\n#ifdef __cplusplus\n}\n#endif\n')
+    write(UI_ROOT / "font/tirtc_font_14.c", externalize_chinese('\n'.join(out)))
+    write(UI_ROOT / "font/tirtc_font_14.h", '#pragma once\n#include "lvgl.h"\n#ifdef __cplusplus\nextern "C" {\n#endif\nLV_FONT_DECLARE(tirtc_font_14);\n#ifdef TIRTC_EXTERNAL_UI_ASSETS\n/* Resource worker only, before exposing this font to LVGL. */\nint tirtc_font_load_external(void (*progress)(uint32_t));\ntypedef const uint8_t *(*tirtc_font_bitmap_reader_t)(uint32_t offset, uint32_t bytes);\n/* LVGL owner only; install once before attaching Chinese labels. */\nint tirtc_font_set_reader(tirtc_font_bitmap_reader_t reader, uint32_t length);\nint tirtc_font_set_bitmap(const uint8_t *bitmap, uint32_t length);\n#endif\n#ifdef __cplusplus\n}\n#endif\n')
     write(UI_ROOT / "font/included_characters.txt", ''.join(map(chr, selected)) + '\n')
     return {"font_glyphs": len(selected), "font_bitmap_bytes": len(new_bitmap),
             "font_bpp": 4, "font_bitmap_format": "uncompressed",

@@ -1,4 +1,4 @@
-# 多人对讲主机检查
+# Pro 主机检查
 
 测试不参与固件构建，也不访问平台、串口或设备。需要 Python 3 和主机 C 编译器；后端、协议、音频、设置页、预热及生命周期脚本可直接使用 Zig，房间 UI 与增益脚本可使用 TinyCC 或调用 `zig cc` 的编译器包装。固件仍使用仓库原有 ARM 工具链。
 
@@ -18,25 +18,27 @@
 
 `--source <冻结旧源码> --scenario fragmented` 可作负对照。旧源码编译成功后，在总空闲 1,179,732 B、最大连续块 256 KiB 的模拟场景中分配失败；当前源码通过。这里的连续块大小是测试输入，真实设备需从新 `[VIDEO41]` 日志读取。此测试不访问串口，也不证明实板 DMA 或长时间音视频稳定性。
 
-## 当前 Pro AEC 适配检查（2026-10-09）
+## 当前 Pro AEC / AI Opus 适配检查（2026-10-20）
 
-`run_ai_aec_media_test.py` 支持 `--case capture-timeout`、`--case negotiation-audio`、`--case uplink-backpressure`；不带 `--case` 时执行全部场景，覆盖采集恢复、会话确认、收发与播放、关麦、打断及退出。
+`run_ai_aec_media_test.py` 支持 `--case opus-packets`、`--case capture-timeout`、`--case negotiation-audio`、`--case uplink-backpressure`；不带 `--case` 时执行全部场景，覆盖 Opus 包边界与按时长缓冲、采集恢复、会话确认、收发与播放、关麦、打断及退出。编解码使用可控桩，包时长解析直接提取原厂 Opus 1.4 和产品适配层的函数；真实编解码另由 `run_ai_opus_codec_test.py` 验证。
 
-`run_group_backend_test.py --cc <C编译器> --cjson <cJSON.c> --aec 0` 与 `--aec 1` 各执行 48 个场景，新增 PTT 采集超时、成功复位、持续失败、松手/抢占/关麦/重新按下、关闭及回绕检查。AEC 关闭保留原有录音错误处理。两组 AI 与两组后端比原场景新增共 88 项边界。
+`run_group_backend_test.py --cc <C编译器> --cjson <cJSON.c> --aec 0` 与 `--aec 1` 各执行 48 个场景，新增 PTT 采集超时、成功复位、持续失败、松手/抢占/关麦/重新按下、关闭及回绕检查。AEC 关闭保留原有录音错误处理。AI 当前场景数量与覆盖范围见下表。
 
 主机检查验证接口与业务流程，不访问真实平台或设备。
 
 
-Pro 默认启用 F6D_D 3A，保留自身 G.711 编解码、音量曲线、视频及界面业务。以下主机回归验证真实生产函数与接口边界，不证明实际喇叭音质、DMA 时序或长时间音视频并行稳定性。
+Pro 默认启用 F6D_D 3A；AI 上下行使用 Opus / 16 kHz / 单声道，微信、设备电话、LIVE 和 Room 保留 G.711。音量曲线、视频及界面业务保持原流程。以下主机回归验证真实生产函数与接口边界，不证明实际喇叭音质、DMA 时序或长时间音视频并行稳定性。
 
 | 检查入口 | 结果与范围 |
 | --- | --- |
-| `run_audio_aec_test.py --cc <C编译器>` | 21 场景 × Group 开关：42 项；录音、停止重建、0 档静音、增益、队列、音量恢复和失败保护 |
-| `run_ai_aec_media_test.py --cc <C编译器> --cjson <cJSON.c>` | AEC 关闭 49 项、开启 94 项；全双工、背压、关麦、告别语排尾、打断时新包保留、尾声静音恢复、取消优先、真实错误及 G.711/业务协议 |
+| `run_audio_aec_test.py --cc <C编译器>` | 22 场景 × Group 开关：44 项；录音、停止重建、0 档静音、增益、队列、音量恢复和失败保护 |
+| `run_ai_aec_media_test.py --cc <C编译器> --cjson <cJSON.c>` | AEC 关闭 71 项、开启 116 项，共 187 项；保留全双工、背压、关麦、告别语排尾、打断新包、取消与错误处理，新增 Opus 可变包长、120 ms 分块、三种队列上限、坏包恢复、BUSY 不重复解码和按时长预缓冲；同步解码期间停止、静音、断网和路由变化时禁止新增播放提交 |
+| `run_ai_opus_codec_test.py --cc <C编译器>` | 原厂 Opus 1.4 定点编解码与当前产品适配层：9 组，含 100 帧 20 ms 编解码、120 ms 多帧包、重复初始化/重置/释放、无效输入、容量不足及缓冲哨兵；只模拟日志，不模拟编解码 |
+| `run_ai_opus_cleanup_test.py --cc <C编译器>` | 8 场景 × AEC 开关，共 16 项；HAL 未停止/释放时不销毁 codec、先归还 codec 堆再释放 RTC、重复清理幂等、下一会话重新初始化，以及采集初始化失败后的清理 |
 | `run_calls_aec_backpressure_test.py --cc <C编译器>` | 48 项；微信/设备/LIVE 在 AEC 开关两种模式下的保序重试、上行、静音、真实故障、超时恢复/暂停/回绕时间戳 |
 | `run_group_audio_test.py --cc <C编译器> --cjson <cJSON.c> --aec 1` | 19 项；包含 AEC 暂满时按住讲话仍可上传、FIFO 不重播、0 额外预热及真实错误 |
 | `run_factory_package_test.py` | 15 项；F6D_D 分区/包格式、同名重打包、发布失败回滚、临时文件清理及回滚受阻时保留恢复副本 |
-| `run_aec_build_stamp_test.py` | SDK 自带 make/sh 的 7 项检查；重复配置不重编，AEC 开关及 delay 变化必须重编 |
+| `run_aec_build_stamp_test.py` | SDK 自带 make/sh 的 10 项检查；重复配置不重编，AEC、退出保护开关及 delay 变化必须重编 |
 | `run_product_include_dependency_test.py --gcc-path <ARM工具链目录>` | SDK make 的 12 项增量检查；产品头文件和 `.inc` 变化重编应用，`lv_conf.h` 同时重编 LVGL，测试桩不触发固件重编 |
 | `run_tirtc_stop_gate_test.py --cc <C编译器>` | 14 项；首个 Stop 前原子复核，保留 Pro 服务占用/待机/代际。SDK Stop 内部晚到回调的 join 窗口单列限制，不计通过 |
 
@@ -114,7 +116,7 @@ python run_audio_group_gain_test.py --cc <tcc可执行文件路径>
 
 此检查直接编译生产 `media/audio_device.c`，仅模拟 SDK 和 RTOS 接口，分别验证开启、关闭 Room 编译选项的行为。各业务使用公共保存的用户档位；设备电话与 Room 固定软件音量为 10（单位增益），用户 1～10 档使用 codec 38～72 的映射，0 档静音；AI、微信和实时查看保留原来的公共曲线。
 
-检查遍历扬声器 0～10 档，并覆盖限幅、静音、重复设置，以及 Room 与 AI/微信之间的释放、重新获取和增益恢复。播放模拟按仓库 SDK 的 Q8 软件增益及饱和规则处理 PCM，检查大幅 A-law 解码值和 PCM16 正负满幅在设备电话、Room 中保持原值，不发生软件削顶；0 档不提交语音。麦克风固定为 10 档，检查 gain=10、数字音量=230，没有遍历全部麦克风档位。测试不访问真实录音和喇叭，不能替代实机响度和失真试听。
+检查遍历扬声器 0～10 档，并覆盖限幅、静音、重复设置，以及 Room 与 AI/微信之间的释放、重新获取和增益恢复。播放模拟按仓库 SDK 的 Q8 软件增益及饱和规则处理 PCM，检查大幅 A-law 解码值和 PCM16 正负满幅在设备电话、Room 中保持原值，不发生软件削顶；0 档不提交语音。麦克风遍历 0～10 档，逐项核对与 Lite 相同的增益表，L0 静音，L10 为 gain=9、数字音量=199。测试不访问真实录音和喇叭，不能替代实机响度和失真试听。
 
 ## HAL 预热失败与入队边界
 
@@ -139,21 +141,23 @@ python run_calls_audio_lifecycle_test.py --cc <zig或其他编译器路径>
 
 ### 多人对讲实机音频诊断
 
-当前本地应用通过 `ROOM_AUDIO_DIAGNOSTICS` 观测接收和播放，日志沿用 `[ROOM-AUDIO51]` 标识；Room 音量跟随公共用户设置。开始准备 Room 媒体会话后，每约 5 秒输出两条 `[ROOM-AUDIO51]`，退出时补充最后不足 5 秒的窗口。所有计数均属于当前窗口。
-
-- `rx`：收到的包数、字节数、包长范围；`fmt(s/m/f)` 是 stream/media/flags，优先显示首个错误格式；`bad` 和 `over640` 是格式不符、大包拒收次数。
-- `qpeak`：缓存峰值槽数/字节数；队列最多 16 个槽、单包最多 640 字节，总缓存另限 4096 字节。`drop(slot/bytes/age)` 分别表示槽数耗尽、字节容量耗尽和超过 500 ms 的丢包次数。
-- `cbgap`：接收间隔最大值；`ts(repeat/back)` 是相邻房间音频时间戳重复/倒退次数，不代表已证实的网络丢包率。
-- `play`：`pcm` 为成功提交给音频适配层的 16 kHz 语音样本数（不包含预热静音），不是喇叭实际发声计数；`warm` 为播放段开始时的预热调用次数/附加静音毫秒数，不包含连接阶段 `prewarm_session()` 的 1200 ms；`busy/errors` 为播放提交的忙碌/错误次数。
-- `tick(gap/work)`：播放处理的最大调用间隔/最大单次耗时。连续有效 Room 语音每秒约 8000 字节 8 kHz A-law，扩展后 `play pcm` 约为 16000 个 16 kHz PCM 样本；起止静音、队列积压及窗口边界须一并考虑。
-
-实测时仅让电脑连续讲话 20～30 秒，设备不按住讲话，同时保留听感描述。应先确认平台和房间连接正常；只有连接错误时，无法用零收包数据判断播放音质。诊断不打印音频内容或连接凭证，设 `ROOM_AUDIO_DIAGNOSTICS=0` 可关闭。
-
+常态保留连接和音频错误，房间连接、成员及讲话状态通过设备界面查看；实机检查方法见 [多人对讲操作与验收](../docs/当前设备操作.md#group)。
 
 ### F6D_D 信号采集限制（2026-10-10）
 
-本轮 Pro 实板上，三次 `AT+LGETSTATUS?` 后约 1～2 秒出现重启；重启后状态原因是 `LIOT_PWRUP_PANIC`。F6D_D 官方底包的状态查询 worker 存在“小区查询成功但没有服务小区时直接返回”的分支，跳过任务删除并进入 FreeRTOS 的任务返回断言。静态缺陷已确认，本次 COM10 尚未恢复该断言现场，不能把具体分支写成已经实板确认。
-
-**当前 F6D_D 测试请勿使用 `AT+LGETSTATUS?` 自动轮询。** 它不仅复制缓存，还会创建任务并查询网络状态。本轮停止查询后改为只接收 COM9/COM10；可从匹配底包的 comdb 解码已有服务小区测量记录，或读取设备已有信号页面，无需改变网络配置。不得把通话期间的网络错误和查询触发的重启混为一谈。
+**当前 F6D_D 测试请勿使用 `AT+LGETSTATUS?` 自动轮询。** 它不仅复制缓存，还会创建任务并查询网络状态，存在触发底包异常的风险。信号信息可读取设备已有页面，或只读采集实际应用和底层串口日志；不得把查询触发的重启与通话网络错误混为一谈。
 
 应用 `liot_nw_get_signal_strength` 的 RSSI/RSRP/RSRQ 是索引，按 `network/tirtc_network_signal.h` 检查范围并换算，SINR 字段已为 dB。底层 CERRC 服务小区日志的 RSRP/RSRQ/SNR 已分别为 dBm/dB/dB，不能再套用 CESQ 索引换算。无效默认值、未完成的状态响应，以及状态 JSON 固定写出的 `Network: 4G` 都不能证明当前信号有效或网络已注册。
+
+
+## 外置 UI 资源迁移验证
+
+```text
+python run_external_assets_test.py --cc <本机C编译器或zig.exe>
+python run_external_fonts_test.py --cc <本机C编译器或zig.exe>
+python run_visual_resources_test.py --cc <本机C编译器或zig.exe>
+```
+
+资源流测试编译实际读取、启动及安装器代码，检查完整资源集、CRC/长度、缺失、暂时读失败、内存失败、关闭忙和安装失败；UI模块以受控读取桩连接。字体验证另用真实 LVGL 比较全部 7010 个字符、数字字形和排版；图标/表情验证比较原始像素、23 组 A/B 姿态及全部动画时序。`run_visual_resources_test.py --target x86-windows-gnu` 可用 Zig 补充 32 位布局检查，`--negative-control` 会故意破坏临时资源并预期非零退出。
+
+这些检查不访问设备。最终全量包仍须实机检查启动、中文与动态字幕、绑定码/二维码、A/B 表情，以及 AI、设备互呼、微信、多人对讲、LIVE 和视频切换。旧设备只有两项资源时，须同步更新配套资源，不能只刷新版应用维护包。

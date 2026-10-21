@@ -2,6 +2,10 @@
 
 基于利尔达 OpenKit 的小钛 4G 终端示例，通过 **TiRTC** 实现 AI 对话、微信与设备通话、远程对讲。选择你的产品，跟着演示和操作说明开始体验。
 
+> **首次烧录先看：[Lite / Pro 简明全量烧录图解（含两张操作截图）](examples/NT26FxDx_OpenKit/docs/全量烧录.md)**
+>
+> 下载配套固件后按图操作。Lite 全量下载一次；Pro 首次安装先资源包、再正式应用包。官方工具与详细教程保留在图解末尾及下方资料区。
+
 ## 选择你的产品
 
 ### lite · OLED 语音终端
@@ -32,9 +36,9 @@ cd xiaotai-lierda
 | lite | `.\examples\NT26FxDx_OpenKit\tirtc_lite\build.bat` | [下载 lite 最新固件](firmware/lite/) |
 | pro | `.\examples\NT26FxDx_OpenKit\tirtc_pro\build.bat` | [下载 pro 最新固件](firmware/pro/) |
 
-pro 最新固件为出厂初始化包，包含固件、外置 Flash 字库和背景，**一次烧录即可；会覆盖外置 Flash 文件，请先备份需要保留的文件。** 板型要求、烧录步骤和验证范围见 [pro 入门指南](examples/NT26FxDx_OpenKit/tirtc_pro/docs/当前设备操作.md#build-flash)。
+pro 使用官方原版工具时，推荐按顺序烧录两个配套包：**先烧录 `_pro_assets.binpkg` 资源安装包，运行并确认 `INSTALL_OK`，再烧录 `_pro_app.binpkg` 正式应用包。** 两次均选择“自定义镜像 → 全量下载”；烧录前备份绑定、设置和需要保留的文件。包的选择、成功日志及故障处理见 [pro 两次烧录说明](firmware/pro/README.md)，板型要求见 [pro 入门指南](examples/NT26FxDx_OpenKit/tirtc_pro/docs/当前设备操作.md#build-flash)。
 
-固件按应用编译完成时间（UTC+8）命名为 `YYYY_MM_DD_HH_MM_SS_lite.binpkg` 或 `YYYY_MM_DD_HH_MM_SS_pro.binpkg`，并分别提供 [lite 校验清单](firmware/lite/SHA256SUMS.txt) / [pro 校验清单](firmware/pro/SHA256SUMS.txt)。操作见 [pro 多人对讲](examples/NT26FxDx_OpenKit/tirtc_pro/docs/多人对讲.md)，包内容和构建方式见 [pro 构建与固件](examples/NT26FxDx_OpenKit/tirtc_pro/docs/构建与固件.md)。
+固件按对应应用或资源安装程序的编译完成时间（UTC+8）命名，分别提供 [lite 校验清单](firmware/lite/SHA256SUMS.txt) / [pro 校验清单](firmware/pro/SHA256SUMS.txt)。pro 的 `_pro.binpkg` 是包含外置资源镜像的合并包，只有已验证支持本板外置 Flash 写入的工具才能使用，官方原版工具请按上述两次烧录流程选择文件。操作见 [pro 多人对讲](examples/NT26FxDx_OpenKit/tirtc_pro/docs/多人对讲.md)，包内容和构建方式见 [pro 构建与固件](examples/NT26FxDx_OpenKit/tirtc_pro/docs/构建与固件.md)。
 
 ## 从使用到开发
 
@@ -45,6 +49,7 @@ pro 最新固件为出厂初始化包，包含固件、外置 Flash 字库和背
 - [TiRTC 产品与接入文档](https://docs.tange.ai/products/tirtc/)
 - [小钛体验平台](https://xiaotai.chat/)
 - [利尔达快速上手](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/zh_CN/general/quick_run_demo.html)
+- [利尔达完整烧录教程](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/zh_CN/tools/flash/flash-tool.html)
 - [利尔达文档首页](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/zh_CN/)
 - 本仓库保留的 [SDK 英文说明](README_SDK.md) / [SDK 中文说明](README_ZH.md)
 

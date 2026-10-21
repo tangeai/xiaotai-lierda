@@ -229,7 +229,7 @@ def main() -> None:
             print(f"Previous published files saved outside the project: {archive}")
         (output / "manifest.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
         (output / "mem_map.txt").write_text(memory_map, encoding="ascii", newline="\n")
-    print(f"Ready: {release / package_name} (firmware + font + background)")
+    print(f"Ready: {release / package_name} (firmware + complete UI resources)")
     print("Factory initialization: flashing this package overwrites external Flash files.")
 
 

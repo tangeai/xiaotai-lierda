@@ -26,7 +26,7 @@ provenance. Integration details are in [runtime/README.md](../runtime/README.md)
 
 ## 阅读上游原始通知
 
-`UPSTREAM_THIRD_PARTY_NOTICES.md` 按上游原文保留，其中相对链接按原工程目录解释，不能从本文件所在目录直接解析；其 OLED/Opus 使用描述属于上游产品，不表示当前触屏应用启用了 Opus。当前音频使用 G.711 A-law。
+`UPSTREAM_THIRD_PARTY_NOTICES.md` 按上游原文保留，其中相对链接按原工程目录解释，不能从本文件所在目录直接解析；其中的 OLED 等产品说明按原工程理解。当前 Pro AI 由应用侧 Opus 适配器调用公共 Opus 1.4 源码，使用 16 kHz 单声道；微信、设备电话、LIVE 和 Room 保持 G.711 A-law。TiRTC SDK 负责媒体传输，不代替这些应用侧编解码。
 
 当前可用的许可入口：
 
@@ -34,7 +34,7 @@ provenance. Integration details are in [runtime/README.md](../runtime/README.md)
 - [上游 MIT 副本](../runtime/LICENSES/MIT.txt)
 - [历史上游 Apache-2.0 副本](../runtime/LICENSES/Apache-2.0.txt) / [利尔达原厂许可](../../../../LICENSE)
 - [cJSON 许可头](../../../../components/thirdparty/CJSON/cJSON.h)
-- [Opus 上游许可（公共 SDK 保留组件，当前应用未启用）](../../../../components/thirdparty/opus/opus-1.4/COPYING)
+- [Opus 1.4 上游许可（当前 AI 编解码使用）](../../../../components/thirdparty/opus/opus-1.4/COPYING)
 - [保留的 mbedTLS 许可](../board_compat/licenses/mbedtls-LICENSE)
 
 以上提供当前应用与历史上游许可的阅读路径；原始供应 SDK、历史通知和上游许可副本均保持原文。

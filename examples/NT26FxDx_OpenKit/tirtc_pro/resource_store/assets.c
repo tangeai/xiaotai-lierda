@@ -2,6 +2,10 @@
 #include "asset_io.h"
 #include "asset_manifest.h"
 #include "font_cache.h"
+#include "../ui/font/tirtc_font_14.h"
+#include "../ui/font/tirtc_font_digits_48.h"
+#include "../ui/assets/modern_icons.h"
+#include "../ui/ui_face.h"
 #include "../storage/tirtc_storage.h"
 #include "liot_log.h"
 #include "liot_os.h"
@@ -133,6 +137,16 @@ retry:
     result = tirtc_asset_read_verified(TIRTC_ASSET_BACKGROUND_PATH, background,
                                       TIRTC_BACKGROUND_BYTES, TIRTC_BACKGROUND_CRC32, loaded);
     if (result) goto failed;
+    /* Load immutable UI data into fixed BSS before publishing READY. No file
+     * access is added to drawing or media callbacks, and no extra heap is used. */
+    result = tirtc_font_load_external(loaded);
+    if (result) goto failed;
+    result = tirtc_font_digits_load_external(loaded);
+    if (result) goto failed;
+    result = tirtc_icons_load_external(loaded);
+    if (result) goto failed;
+    result = ui_face_load_external(loaded);
+    if (result) goto failed;
     tirtc_font_cache_init(font, recovery_generation);
     liot_rtos_enter_critical();
     s_cache_allocation = font;
@@ -196,7 +210,7 @@ int tirtc_assets_start(void)
     }
     s_asset_started = true;
     s_asset_snapshot.state = TIRTC_ASSETS_WAIT_STORAGE;
-    s_asset_snapshot.total_bytes = TIRTC_FONT_BYTES + TIRTC_BACKGROUND_BYTES;
+    s_asset_snapshot.total_bytes = TIRTC_UI_ASSET_TOTAL_BYTES;
     liot_rtos_exit_critical();
     result = liot_rtos_task_create(&s_asset_task, 4096U, ASSET_TASK_PRIORITY, "tirtc_assets", asset_worker, NULL, 0U);
     if (result) {

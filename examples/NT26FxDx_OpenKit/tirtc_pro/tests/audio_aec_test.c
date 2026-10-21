@@ -227,6 +227,19 @@ static void warm_case(void)
     assert(calls == 3 && accepted[0] == 300); /* No 1280ms leading silence. */
     assert(demo_ai_audio_play_done(&lease)); close_session(&lease);
 }
+static void mic_levels_case(void)
+{
+    static const uint8_t gains[] = {0,7,7,7,8,8,8,8,9,9,9};
+    static const int volumes[] = {0,160,164,169,173,177,182,186,190,195,199};
+    for (unsigned owner = DEMO_AI_AUDIO_OWNER_AI; owner < DEMO_AI_AUDIO_OWNER_COUNT; ++owner) {
+        demo_ai_audio_lease_t lease = open_session((demo_ai_audio_owner_e)owner, 8, 8);
+        for (uint8_t level = 0; level <= 10; ++level) {
+            assert(demo_ai_audio_set_levels(&lease, 8, level) == 0);
+            assert(mic_gain == gains[level] && mic_volume == volumes[level]);
+        }
+        close_session(&lease);
+    }
+}
 static void backpressure_case(void)
 {
     demo_ai_audio_lease_t lease = open_session(DEMO_AI_AUDIO_OWNER_DEVICE, 1, 1);
@@ -325,6 +338,7 @@ int main(int argc, char **argv)
     else if (!strcmp(name, "gain")) gain_case(false);
     else if (!strcmp(name, "mute")) gain_case(true);
     else if (!strcmp(name, "warm-contract")) warm_case();
+    else if (!strcmp(name, "mic-levels")) mic_levels_case();
     else if (!strcmp(name, "backpressure")) backpressure_case();
     else if (!strcmp(name, "pacing")) pacing_case();
     else if (!strncmp(name, "volume-", 7)) volume_case((unsigned)atoi(name + 7), !strcmp(name, "volume-read-retry"), !strcmp(name, "volume-contention"));

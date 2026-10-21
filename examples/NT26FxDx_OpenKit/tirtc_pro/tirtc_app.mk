@@ -29,6 +29,28 @@ ifneq ($(TIRTC_ASSET_INSTALLER),y)
 include $(TOP)/$(TIRTC_DIR)/runtime/runtime.mk
 CFLAGS_DEFS += -DHWDEMO_GROUP_ROOM_EN
 CFLAGS_DEFS += -DTIRTC_EXTERNAL_UI_ASSETS=1
+# Preserve the verified F6D_D late-buffer protection in normal AEC builds.
+# A non-AEC fallback build has no 3A callbacks to intercept.
+TIRTC_AUDIO_FREE_GUARD_EN ?= $(TIRTC_AUDIO_AEC_EN)
+ifeq ($(filter y n,$(TIRTC_AUDIO_FREE_GUARD_EN)),)
+$(error TIRTC_AUDIO_FREE_GUARD_EN must be y or n)
+endif
+ifeq ($(TIRTC_AUDIO_FREE_GUARD_EN),y)
+ifneq ($(TIRTC_AUDIO_AEC_EN),y)
+$(error The F6D_D audio free guard requires TIRTC_AUDIO_AEC_EN=y)
+endif
+CFLAGS_DEFS += -DTIRTC_AUDIO_FREE_GUARD_ENABLE=1
+LDFLAGS += -Wl,--wrap=audioFreeRecordBuf
+LDFLAGS += -Wl,--wrap=halSetVoiceEngRetCallback
+# These private entries exist in the pinned base ELF, but are absent
+# from lib_baseapi's public exports. Thumb entry addresses are valid only
+# with the exact F6D_D ELF hash checked below; never enable for another base.
+LDFLAGS += -Wl,--defsym=ccioGetAudioServEnt=0x00934725
+LDFLAGS += -Wl,--defsym=ccioRbufGetFreePcbCnt=0x009290d1
+LDFLAGS += -Wl,--defsym=ccioRbufUngetPtUlPcb=0x00928f4d
+LDFLAGS += -Wl,--defsym=pro_audio_pcb_pool=0x080600a8
+LDFLAGS += -Wl,--defsym=halSetVoiceEngRetCallback=0x00a27c31
+endif
 # Keep the stream ABI tied to the official archive tested by Lite. No SDK
 # sources are patched; a changed vendor binary requires another contract audit.
 ifeq ($(filter y n,$(TIRTC_AUDIO_AEC_EN)),)
@@ -47,7 +69,7 @@ endif
 # Command-line backend changes must also rebuild existing product objects.
 TIRTC_AEC_STAMP := $(BUILDDIR)/pro_aec_config.h
 # The bundled shell has read/test built-ins but does not include cmp.
-TIRTC_AEC_STAMP_UPDATE := $(shell mkdir -p "$(BUILDDIR)"; tirtc_aec_previous=''; if test -f "$(TIRTC_AEC_STAMP)"; then IFS= read -r tirtc_aec_previous < "$(TIRTC_AEC_STAMP)"; fi; if test "$$tirtc_aec_previous" != '$(TIRTC_AUDIO_AEC_EN) $(TIRTC_AUDIO_AEC_DELAY)'; then printf '%s\n' '$(TIRTC_AUDIO_AEC_EN) $(TIRTC_AUDIO_AEC_DELAY)' > "$(TIRTC_AEC_STAMP)"; fi)
+TIRTC_AEC_STAMP_UPDATE := $(shell mkdir -p "$(BUILDDIR)"; tirtc_aec_previous=''; if test -f "$(TIRTC_AEC_STAMP)"; then IFS= read -r tirtc_aec_previous < "$(TIRTC_AEC_STAMP)"; fi; if test "$$tirtc_aec_previous" != '$(TIRTC_AUDIO_AEC_EN) $(TIRTC_AUDIO_AEC_DELAY) $(TIRTC_AUDIO_FREE_GUARD_EN)'; then printf '%s\n' '$(TIRTC_AUDIO_AEC_EN) $(TIRTC_AUDIO_AEC_DELAY) $(TIRTC_AUDIO_FREE_GUARD_EN)' > "$(TIRTC_AEC_STAMP)"; fi)
 endif
 # The D SDK OS restores the scheduler itself. The remaining binary contracts
 # were re-audited against the complete official F6D_D package.
@@ -124,6 +146,7 @@ TIRTC_CFILES := $(TOP)/$(TIRTC_DIR)/user_main.c \
                 $(TOP)/$(TIRTC_DIR)/keys/tirtc_keys.c \
                 $(TOP)/$(TIRTC_DIR)/media/audio_device.c \
                 $(TOP)/$(TIRTC_DIR)/media/g711_codec.c \
+                $(TOP)/$(TIRTC_DIR)/media/opus_codec.c \
                 $(TOP)/$(TIRTC_DIR)/resource_store/assets.c \
                 $(TOP)/$(TIRTC_DIR)/resource_store/asset_io.c \
                 $(TOP)/$(TIRTC_DIR)/resource_store/font_cache.c \
@@ -133,6 +156,9 @@ TIRTC_CFILES := $(TOP)/$(TIRTC_DIR)/user_main.c \
                 $(TOP)/$(TIRTC_DIR)/status/tirtc_status.c \
                 $(TIRTC_STORAGE_CFILES) \
                 $(TIRTC_UI_CFILES)
+ifeq ($(TIRTC_AUDIO_FREE_GUARD_EN),y)
+TIRTC_CFILES += $(TOP)/$(TIRTC_DIR)/media/audio_free_guard.c
+endif
 ifeq ($(TIRTC_ASSET_INSTALLER),y)
 # Temporary resource installer uses the same base package / APP region.
 # It contains original resource bytes, with no RTC or UI application linked.

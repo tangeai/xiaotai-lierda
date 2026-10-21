@@ -4,6 +4,10 @@
 
 用一台带屏幕、摄像头、麦克风和喇叭的 4G 设备，体验 **AI 对话、AI 呼叫联系人、微信/设备音视频电话、实时查看与远程对讲、多人对讲**。
 
+> **首次烧录先看：[简明全量烧录图解（含两张操作截图）](../docs/全量烧录.md)**
+>
+> 从 [Pro 固件目录](../../../firmware/pro/README.md) 下载配套包，首次安装按“资源安装包 → `INSTALL_OK` → 正式应用包”执行。工具、驱动与官方详细教程见第 3 节，按需查阅。
+
 本项目基于 **L-CT4IT00-YP00W-01-V04 / NT26F6D0（EC718PM）**，工程目录为 `NT26FxDx_OpenKit`，展示 TiRTC 如何接入这套 OpenKit 硬件。先按本文把设备运行起来，再沿文档读懂平台接入、媒体传输和应用代码，最后替换成自己的产品界面与业务。
 
 <p>
@@ -13,9 +17,9 @@
 
 图为**当前 UI 源码的离线渲染**，使用工程内的字体、图标、背景和布局，原生尺寸 320×240；时间、联系人等为示例数据。不是硬件拍照，也不代表真实连接状态。左右箭头切换表情/时钟，右上角 `···` 打开菜单。
 
-**阅读顺序：** [认识功能](#features) → [看演示](#demo-videos) → [准备硬件](#hardware) → [利尔达教程](#lierda-guides) → [烧录与体验](#run) → [源码接入与开发](#development)。
+**阅读顺序：** [认识功能](#features) → [看演示](#demo-videos) → [准备硬件](#hardware) → [简明烧录图解](../docs/全量烧录.md) → [烧录与体验](#run) → [源码接入与开发](#development)；[官方资料](#lierda-guides)按需查阅。
 
-> 当前构建版本为 `pro_release`，使用官方 SDK 1.7.0 / `F6D_D`，默认启用 AEC 和 ANS 噪声抑制（与 Lite 相同的 `bypass=0, mode=1`），AGC 保持关闭，支持 AI 边播边听与插话打断。多人对讲见 [图文操作](docs/多人对讲.md#quick-start)，固件用途和构建方式见 [构建说明](docs/构建与固件.md)。
+> 当前构建版本为 `pro_release`，使用官方 SDK 1.7.0 / `F6D_D`，默认启用 AEC 和 ANS 噪声抑制（与 Lite 相同的 `bypass=0, mode=1`），AGC 保持关闭；麦克风档位曲线与 Lite 一致，出厂默认 L8，已保存档位优先，AI 对话采用与 Lite 相同的 Opus / 16 kHz 单声道（上行 20 ms、目标 24 kbit/s），支持边播边听与插话打断。多人对讲见 [图文操作](docs/多人对讲.md#quick-start)，固件用途和构建方式见 [构建说明](docs/构建与固件.md)。
 
 <a id="features"></a>
 ## 1. 先看设备能做什么
@@ -154,7 +158,7 @@ https://github.com/user-attachments/assets/c5d0ade8-9627-4e2a-9795-d41af390b7c8
 | 板卡/模组 | L-CT4IT00-YP00W-01-V04（工程名 `NT26FxDx_OpenKit`），NT26F6D0 / F6D_D；采购时核对带触屏、摄像头的板型 |
 | 显示与触摸 | ST7789、FT6336；当前逻辑横屏 320×240 |
 | 摄像头/声音 | GC032A、ES8311、麦克风、喇叭 |
-| 外置资源存储 | P25Q32SH 4 MiB SPI Flash，配套字体/背景资源 |
+| 外置资源存储 | P25Q32SH 4 MiB SPI Flash，配套字库、图标与表情资源 |
 | 4G | 能上网的 SIM 卡、接好的天线、稳定供电 |
 | 开发电脑 | Windows 10/11、数据 USB 线、USB 驱动、利尔达下载工具；完整工程含工具链 |
 | 平台与对端 | [小钛体验平台](https://xiaotai.chat)、微信联系人授权；设备通话另需一台已绑定设备 |
@@ -162,11 +166,12 @@ https://github.com/user-attachments/assets/c5d0ade8-9627-4e2a-9795-d41af390b7c8
 本示例通过 4G 联网，不提供 Wi-Fi 配网页面。不要仅根据外观相似或同为 EC718 就混用底包、引脚和固件；板级依赖说明见 [board_compat](board_compat/README.md)。
 
 <a id="lierda-guides"></a>
-## 3. 跟随利尔达教程准备环境
+<a id="3-跟随利尔达教程准备环境"></a>
+## 3. 快速烧录与官方资料
 
-按顺序阅读下面四项，完成驱动、工程和下载工具准备，再回到第 4 节选择 **TiRTC 应用**。
+**体验本项目，先看[简明全量烧录图解](../docs/全量烧录.md)。** Pro 文件选择和烧录顺序见第 4 节；工具、驱动尚未安装，或需要了解完整用法与源码开发时，再按需查阅以下官方资料。
 
-| 顺序 | 官方资料 | 需要完成什么 |
+| 参考项 | 官方资料 | 按需了解 |
 | --- | --- | --- |
 | 1 | [利尔达快速体验](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/zh_CN/general/quick_run_demo.html) | 认识下载、调试串口和开发板连接 |
 | 2 | [USB 驱动安装](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/zh_CN/tools/usb/USB_Driver_Installation_Guide.html) | 让电脑识别模组接口，确认实际 COM 号 |
@@ -186,22 +191,26 @@ https://github.com/user-attachments/assets/c5d0ade8-9627-4e2a-9795-d41af390b7c8
 
 当前使用公共官方 SDK 1.7.0 / `F6D_D`，应用位于 `examples/NT26FxDx_OpenKit/tirtc_pro`。从旧 A 底包升级时须完整烧录配套底包与 APP；编译参数和烧录步骤见 [操作说明](docs/当前设备操作.md#build-flash)。
 
-构建会生成根目录 `firmware/pro/YYYY_MM_DD_HH_MM_SS_pro.binpkg` 出厂初始化包，包含 D 底包、应用及外置 Flash 字库/背景；已有正常 UI 资源、需要保留外置文件时，使用 `gccout/tirtc_pro/TiRTC_pro_NT26F6D0_pro_release.binpkg` 普通应用维护包。不能使用旧 A 包更新当前 D 应用。仓库仅保留 [当前出厂发布包](../../../firmware/pro/) 和同目录的 [SHA-256 校验清单](../../../firmware/pro/SHA256SUMS.txt)，维护包、镜像明细及中间产物保留在 `gccout`，不另行上传。先按 [源码准备](../../../README.md#编译与下载)获取包含本产品目录及公共 SDK 的完整工程（仅克隆原厂 SDK 不含本产品），再完成 [Python 环境准备](docs/当前设备操作.md#python-setup)，在工程根目录执行：
+使用官方原版工具时，从 [当前 Pro 固件目录](../../../firmware/pro/) 下载配套的 `_pro_assets.binpkg` 资源安装包和 `_pro_app.binpkg` 正式应用包，按 [两次烧录详细说明](../../../firmware/pro/README.md)操作，并核对同目录的 [SHA-256 校验清单](../../../firmware/pro/SHA256SUMS.txt)。不能使用旧 A 包更新当前 D 应用。需要从源码构建时，先按 [源码准备](../../../README.md#编译与下载)获取包含本产品目录及公共 SDK 的完整工程（仅克隆原厂 SDK 不含本产品），再完成 [Python 环境准备](docs/当前设备操作.md#python-setup)，在工程根目录执行：
 
 ```powershell
 .\examples\NT26FxDx_OpenKit\tirtc_pro\build.bat
 ```
 
-统一入口保留内部 `APP_VERSION=pro_release`，对外生成 `firmware/pro/YYYY_MM_DD_HH_MM_SS_pro.binpkg`，时间取对应 `.bin` 的编译完成时间（UTC+8），不是重新命名的时间；普通应用包为 `gccout/tirtc_pro/TiRTC_pro_NT26F6D0_pro_release.binpkg`。设备日志中的版本字符串带有 SDK 前缀 `appVpro_release`。烧录步骤见 [编译烧录](docs/当前设备操作.md#build-flash)，固件用途与构建方式见 [构建与固件](docs/构建与固件.md)。
+统一入口保留内部 `APP_VERSION=pro_release`，生成包含 D 底包、应用及外置资源镜像的 `_pro.binpkg` 合并包；该包仅适合已验证支持本板外置 Flash 写入的工具。普通正式应用包位于 `gccout/tirtc_pro/TiRTC_pro_NT26F6D0_pro_release.binpkg`，资源安装包需另运行 `build_assets.bat` 构建，两个输出对应发布目录中的 `_pro_app.binpkg` 和 `_pro_assets.binpkg`。时间取各自 `.bin` 的编译完成时间（UTC+8），不是重新命名的时间。设备日志中的版本字符串带有 SDK 前缀 `appVpro_release`。完整命令、产物来源和校验说明见 [构建与固件](docs/构建与固件.md)及 [发布目录说明](../../../firmware/pro/README.md)。
 
-### 4.2 一次烧录固件与 UI 资源
+### 4.2 按顺序烧录资源安装包和正式应用包
 
-1. **备份外置 Flash 中需要保留的文件**；出厂初始化包会覆盖该文件区，写入配套字库与背景。
+工具按钮的最简操作见[全量烧录图解（含两张截图）](../docs/全量烧录.md)，文件选择和烧录顺序按下面执行。
+
+1. **备份绑定、设置及需要保留的文件**；全量下载可能覆盖内部数据，不能承诺保存原设置。
 2. 结束设备当前媒体会话，关闭占用串口的软件，保持 USB 连接。
-3. 在下载工具中启用“自定义镜像”，选择根目录 `firmware/pro/` 中的当前时间戳 `.binpkg`，按板型执行全量下载。
-4. 等待下载成功后重启，检查字体、背景与触摸，再继续联网绑定；无需另外烧录资源安装程序。详见 [首次资源准备](docs/当前设备操作.md#assets)。
+3. 在下载工具中启用“自定义镜像”，先选择配套的 `_pro_assets.binpkg`，执行“全量下载”。
+4. 下载成功后让设备启动，查看日志并等待 `[assets14] INSTALL_OK files=7 updated=... skipped=...`。此时没有正常业务界面是预期行为；工具“下载成功”不能代替资源安装成功。
+5. 关闭日志串口，再选择配套的 `_pro_app.binpkg`，执行第二次“全量下载”。
+6. 正常启动后确认 `[assets14] LOAD_OK`，检查字体、背景与触摸，再继续联网绑定。
 
-旧资源安装程序保留为开发维护选项，使用方法见 [资源维护说明](resource_store/README.md)。`F6D_D_base.binpkg` 不包含完整业务；也不能将资源安装程序当作正常应用使用。
+**顺序不能反：先安装资源，后恢复正式应用。** 两次下载均写内部 Flash；第一次启动的安装程序再将七个资源文件写入外置 Flash，第二个包不携带外置文件系统镜像。安装器不会自动切换为正式应用。详细界面操作、失败处理和文件选择见 [两次烧录说明](../../../firmware/pro/README.md)；开发维护见 [资源说明](resource_store/README.md)。`F6D_D_base.binpkg` 不包含完整业务。
 
 ### 4.3 按这个顺序验收
 
@@ -238,7 +247,7 @@ https://github.com/user-attachments/assets/c5d0ade8-9627-4e2a-9795-d41af390b7c8
 ## 参考与许可
 
 - [TiRTC 产品文档](https://docs.tange.ai/products/tirtc/)：实时音视频产品及接入资料。
-- [小钛利尔达参考工程](https://github.com/tangeai/xiaotai-lierda)：本页采用其“功能—硬件—官方教程—烧录—开发”阅读顺序，操作与参数以当前触屏产品源码为准。
+- [小钛利尔达参考工程](https://github.com/tangeai/xiaotai-lierda)：本页采用“功能—硬件—快速烧录—开发”阅读顺序，官方资料按需查阅，操作与参数以当前触屏产品源码为准。
 - [小钛 ESP32 参考工程](https://github.com/tangeai/xiaotai-esp32)：UI 与产品交互参考，不能直接照搬其硬件参数。
 - [设备能力协议](https://github.com/tangeai/tirtc-server-example/blob/main/thing-connect/api-reference.md)：服务端业务与能力声明参考，部署服务版本需与设备配套。
 - 探鸽自有应用采用 [MIT](LICENSE)；原厂派生代码、TiRTC 预编译 SDK、第三方组件及字体保留各自许可，详见 [SDK 分发说明](sdk/README.md) 与 [应用许可范围](THIRD_PARTY_NOTICES.md)。

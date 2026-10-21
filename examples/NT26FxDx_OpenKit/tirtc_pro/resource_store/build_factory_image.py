@@ -17,13 +17,14 @@ import struct
 import subprocess
 import tempfile
 import zlib
+from asset_catalog import RESOURCE_SPECS
 
 
 IMAGE_SIZE = 4 * 1024 * 1024
 BLOCK_SIZE = 4096
 PAGE_SIZE = 256
 DISK_VERSION = 0x00020000
-RESOURCE_NAMES = ("ui14-font.bin", "ui13-bg.bin")
+RESOURCE_NAMES = tuple(item[2] for item in RESOURCE_SPECS)
 DEFAULT_REPO = Path(__file__).resolve().parents[4]
 GEOMETRY_ARGS = (
     "-B", str(BLOCK_SIZE), "-R", str(PAGE_SIZE),
@@ -62,10 +63,10 @@ def _load_resources(repo: Path, assets: Path) -> list[dict]:
     manifest = json.loads((assets / "manifest.json").read_text(encoding="utf-8"))
     entries = manifest.get("files", [])
     if len(entries) != len(RESOURCE_NAMES):
-        raise ValueError("The resource manifest must describe exactly two files")
+        raise ValueError("The resource manifest must describe the complete UI resource set")
     by_name = {entry["name"]: entry for entry in entries}
     if set(by_name) != set(RESOURCE_NAMES):
-        raise ValueError("The resource manifest must contain the pro font and background")
+        raise ValueError("The resource manifest must contain all matching Pro UI resources")
     header_path = repo / "examples/NT26FxDx_OpenKit/tirtc_pro/resource_store/asset_manifest.h"
     header = header_path.read_text(encoding="utf-8")
     checked = []
@@ -78,7 +79,7 @@ def _load_resources(repo: Path, assets: Path) -> list[dict]:
         if any(str(by_name[name].get(key)).lower() != str(actual[key]).lower()
                for key in ("size", "crc32", "sha256")):
             raise ValueError(f"Resource does not match its manifest: {name}")
-        prefix = "FONT" if name == "ui14-font.bin" else "BACKGROUND"
+        prefix = next(key for key, _, filename in RESOURCE_SPECS if filename == name)
         for suffix, expected in (("BYTES", len(data)), ("CRC32", zlib.crc32(data))):
             macro = f"TIRTC_{prefix}_{suffix}"
             match = re.search(r"^#define\s+" + macro + r"\s+(0x[0-9a-fA-F]+|[0-9]+)[Uu]?\s*$",

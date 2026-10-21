@@ -39458,6 +39458,7 @@ static const uint8_t glyph_bitmap[] = {
     0x00,
 };
 #endif
+#ifndef TIRTC_EXTERNAL_UI_ASSETS
 static const lv_font_fmt_txt_glyph_dsc_t glyph_dsc[] = {
     {.bitmap_index = 0, .adv_w = 0, .box_w = 0, .box_h = 0, .ofs_x = 0, .ofs_y = 0},
     {.bitmap_index = 0, .adv_w = 112, .box_w = 0, .box_h = 0, .ofs_x = 0, .ofs_y = 0},
@@ -47058,6 +47059,25 @@ static const uint16_t unicode_list_0[] = {
     65330, 65331, 65332, 65333, 65334, 65335, 65336, 65337, 65338, 65339, 65340, 65341,
     65342, 65477,
 };
+#define TIRTC_GLYPH_DSC glyph_dsc
+#else
+#include "../../resource_store/asset_io.h"
+#include "../../resource_store/asset_manifest.h"
+#include <stddef.h>
+#include <string.h>
+/* TIRTC_FONT_META_WIRE: fixed BSS, no Cust heap and no duplicate raw buffer. */
+typedef struct {
+    lv_font_fmt_txt_glyph_dsc_t glyphs[7011];
+    uint16_t unicode[7010];
+} tirtc_font_meta_storage_t;
+static tirtc_font_meta_storage_t font_meta;
+static bool font_meta_ready;
+typedef char font_meta_glyph_size[(sizeof(lv_font_fmt_txt_glyph_dsc_t) == 8U && LV_FONT_FMT_TXT_LARGE == 0) ? 1 : -1];
+typedef char font_meta_unicode_offset[(offsetof(tirtc_font_meta_storage_t, unicode) == 56088U) ? 1 : -1];
+typedef char font_meta_wire_size[(offsetof(tirtc_font_meta_storage_t, unicode) + sizeof(font_meta.unicode) == 70108U && TIRTC_FONT_META_BYTES == 70108U) ? 1 : -1];
+#define TIRTC_GLYPH_DSC font_meta.glyphs
+#define unicode_list_0 font_meta.unicode
+#endif
 static const lv_font_fmt_txt_cmap_t cmaps[] = {
     {.range_start = 32, .range_length = 65478, .glyph_id_start = 1, .unicode_list = unicode_list_0, .glyph_id_ofs_list = NULL, .list_length = 7010, .type = LV_FONT_FMT_TXT_CMAP_SPARSE_TINY},
 };
@@ -47068,17 +47088,62 @@ static lv_font_fmt_txt_dsc_t font_dsc = {
 #else
     .glyph_bitmap = glyph_bitmap,
 #endif
-    .glyph_dsc = glyph_dsc, .cmaps = cmaps,
+    .glyph_dsc = TIRTC_GLYPH_DSC, .cmaps = cmaps,
     .kern_dsc = NULL, .kern_scale = 0, .cmap_num = 1, .bpp = 4,
     .kern_classes = 0, .bitmap_format = 0, .cache = &cache,
 };
 #ifdef TIRTC_EXTERNAL_UI_ASSETS
+/* Resource worker only, before fonts are exposed to the LVGL owner. */
+int tirtc_font_load_external(void (*progress)(uint32_t))
+{
+    uint8_t *raw = (uint8_t *)&font_meta;
+    uint32_t expected_offset = 0;
+    font_meta_ready = false;
+    memset(&cache, 0, sizeof(cache));
+    int result = tirtc_asset_read_verified("/ui14-meta.bin", raw,
+        TIRTC_FONT_META_BYTES, TIRTC_FONT_META_CRC32, progress);
+    if (result) return result;
+    for (unsigned i = 0; i < 7011U; ++i) {
+        const uint8_t *p = raw + i * 8U;
+        uint32_t word = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                        ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+        lv_font_fmt_txt_glyph_dsc_t value = {0};
+        value.bitmap_index = word & 0xfffffU;
+        value.adv_w = word >> 20;
+        value.box_w = p[4]; value.box_h = p[5];
+        value.ofs_x = p[6] < 128U ? (int)p[6] : (int)p[6] - 256;
+        value.ofs_y = p[7] < 128U ? (int)p[7] : (int)p[7] - 256;
+        uint32_t bytes = ((uint32_t)value.box_w * value.box_h + 1U) / 2U;
+        if (value.bitmap_index != expected_offset || expected_offset > TIRTC_FONT_BYTES ||
+            bytes > TIRTC_FONT_BYTES - expected_offset ||
+            (!i && (word || value.box_w || value.box_h || value.ofs_x || value.ofs_y)))
+            return TIRTC_ASSET_E_MISMATCH;
+        expected_offset += bytes;
+        TIRTC_GLYPH_DSC[i] = value;
+    }
+    if (expected_offset != TIRTC_FONT_BYTES) return TIRTC_ASSET_E_MISMATCH;
+    for (unsigned i = 0; i < 7010U; ++i) {
+        const uint8_t *p = raw + 56088U + i * 2U;
+        uint16_t value = (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+        if (value >= cmaps[0].range_length || (i && value <= unicode_list_0[i - 1U]))
+            return TIRTC_ASSET_E_MISMATCH;
+        unicode_list_0[i] = value;
+    }
+    font_meta_ready = true;
+    return 0;
+}
+static bool tirtc_font_get_dsc_external(const lv_font_t *font,
+    lv_font_glyph_dsc_t *dsc, uint32_t letter, uint32_t next)
+{
+    return font_meta_ready && lv_font_get_glyph_dsc_fmt_txt(font, dsc, letter, next);
+}
 static tirtc_font_bitmap_reader_t external_bitmap_reader;
-/* Original descriptors/metrics/fallback remain LVGL's. Only bitmap delivery
- * changes; the single software-render owner consumes each pointer synchronously. */
+/* Native descriptors and cached bitmaps preserve the original LVGL metrics.
+ * The single software-render owner consumes each pointer synchronously. */
 static const uint8_t *tirtc_font_get_bitmap_external(const lv_font_t *font, uint32_t letter)
 {
     static const uint8_t empty_bitmap = 0;
+    if (!font_meta_ready) return NULL;
     if (!external_bitmap_reader) {
         return font_dsc.glyph_bitmap ? lv_font_get_bitmap_fmt_txt(font, letter) : NULL;
     }
@@ -47094,7 +47159,7 @@ static const uint8_t *tirtc_font_get_bitmap_external(const lv_font_t *font, uint
             else high = middle;
         }
         if (low == cmap->list_length || cmap->unicode_list[low] != relative) return NULL;
-        const lv_font_fmt_txt_glyph_dsc_t *glyph = &glyph_dsc[cmap->glyph_id_start + low];
+        const lv_font_fmt_txt_glyph_dsc_t *glyph = &TIRTC_GLYPH_DSC[cmap->glyph_id_start + low];
         uint32_t bytes = ((uint32_t)glyph->box_w * glyph->box_h * 4U + 7U) / 8U;
         if (!bytes) return &empty_bitmap;
         return external_bitmap_reader(glyph->bitmap_index, bytes);
@@ -47103,7 +47168,11 @@ static const uint8_t *tirtc_font_get_bitmap_external(const lv_font_t *font, uint
 }
 #endif
 const lv_font_t tirtc_font_14 = {
+#ifdef TIRTC_EXTERNAL_UI_ASSETS
+    .get_glyph_dsc = tirtc_font_get_dsc_external,
+#else
     .get_glyph_dsc = lv_font_get_glyph_dsc_fmt_txt,
+#endif
 #ifdef TIRTC_EXTERNAL_UI_ASSETS
     .get_glyph_bitmap = tirtc_font_get_bitmap_external,
 #else
@@ -47117,14 +47186,14 @@ const lv_font_t tirtc_font_14 = {
 #ifdef TIRTC_EXTERNAL_UI_ASSETS
 int tirtc_font_set_reader(tirtc_font_bitmap_reader_t reader, uint32_t length)
 {
-    if (!reader || length != 631201U) return -1;
+    if (!font_meta_ready || !reader || length != 631201U) return -1;
     font_dsc.glyph_bitmap = NULL;
     external_bitmap_reader = reader;
     return 0;
 }
 int tirtc_font_set_bitmap(const uint8_t *bitmap, uint32_t length)
 {
-    if (!bitmap || length != 631201U) return -1;
+    if (!font_meta_ready || !bitmap || length != 631201U) return -1;
     external_bitmap_reader = NULL;
     font_dsc.glyph_bitmap = bitmap;
     return 0;

@@ -167,8 +167,8 @@ static void test_diagnostic_windows(void) {
     CHECK(s_audio_diag.window.drop_bytes==1U && s_audio_diag.window.peak_bytes==3840U);
     clock_ms+=ROOM_RX_MAX_AGE+1U;room_audio_tick();CHECK(s_audio_diag.window.drop_age==22U);
     CHECK(!audio_diag_lines);clock_ms=s_audio_diag.window_at+5000U;room_audio_diag_report(false);
-    CHECK(audio_diag_lines==2U && !s_audio_diag.window.packets);
-    room_audio_diag_report(false);CHECK(audio_diag_lines==2U);
+    CHECK(audio_diag_lines==0U && !s_audio_diag.window.packets);
+    room_audio_diag_report(false);CHECK(audio_diag_lines==0U);
     frame.length=160U;room_on_audio(s_wire_connection,&frame,data);
     CHECK(s_audio_diag.window.packets==1U && s_audio_diag.window.timestamp_repeat==1U);
     CHECK(!s_audio_diag.window.observed_bad_format &&
@@ -176,7 +176,7 @@ static void test_diagnostic_windows(void) {
     frame.stream_id=2U;room_on_audio(s_wire_connection,&frame,data);frame.stream_id=ROOM_STREAM;
     CHECK(s_audio_diag.window.observed_bad_format && s_audio_diag.window.observed_stream==2U);
     s_claimed=true;room_close(DEMO_GROUP_SUSPENDED,0,"suspended");CHECK(room_cleanup());
-    CHECK(audio_diag_lines==4U && !s_audio_diag.active && !s_audio_diag.window.packets);
+    CHECK(audio_diag_lines==0U && !s_audio_diag.active && !s_audio_diag.window.packets);
     room_audio_diag_begin();s_wire_connection=(void *)0x1234;ready_audio();
     room_on_audio(s_wire_connection,&frame,data);
     CHECK(s_audio_diag.window.packets==1U && !s_audio_diag.window.timestamp_repeat);

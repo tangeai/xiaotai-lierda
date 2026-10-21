@@ -8,7 +8,7 @@
 void user_main(void)
 {
     int result = -1;
-    liot_trace("[assets14] installer starting; only /ui14-font.bin and /ui13-bg.bin\r\n");
+    liot_trace("[assets14] installer starting; matching complete Pro UI resource set\r\n");
     /* This firmware has no display/storage worker, so it owns initial power
      * and the single storage initialization. Never pulse the shared rail. */
     if (Liot_AonPowerCtl(true) != L_GPIO_ERR_SUCCESS ||

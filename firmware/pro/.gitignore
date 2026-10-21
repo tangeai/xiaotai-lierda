@@ -1,0 +1,3 @@
+# Local flashing-tool extraction cache; keep published packages tracked.
+imagedata.json
+pkg_extract_tmp/

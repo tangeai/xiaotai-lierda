@@ -79,13 +79,13 @@
 | 对外编译命令 | 根目录 `examples\NT26FxDx_OpenKit\tirtc_lite\build.bat` | 根目录 `examples\NT26FxDx_OpenKit\tirtc_pro\build.bat` |
 | 构建选择 | `APP_VARIANT=lite BUILD_MODE=demo DEMO_NAME=tirtc_app` | `APP_VARIANT=pro BUILD_MODE=tirtc` |
 | 正常应用输出 | `gccout/tirtc_lite` | `gccout/tirtc_pro` |
-| 当前烧录包 | 根目录 `firmware/lite/YYYY_MM_DD_HH_MM_SS_lite.binpkg` | 根目录 `firmware/pro/YYYY_MM_DD_HH_MM_SS_pro.binpkg`，包含外置 UI 资源的出厂初始化包 |
+| 当前烧录包 | 根目录 `firmware/lite/YYYY_MM_DD_HH_MM_SS_lite.binpkg` | 根目录 `firmware/pro/`：先 `_pro_assets.binpkg` 安装资源，再 `_pro_app.binpkg` 恢复正式应用；文件名与顺序见 [烧录说明](../../../../firmware/pro/README.md) |
 | 配置入口 | 应用内 `config/tirtc_config.mk` | 应用内 `config` 文件 |
 | 底包 | 公共 `components/basePkg/F6D_D`，SDK 1.7.0 | 同一公共 `components/basePkg/F6D_D`，SDK 1.7.0 |
 | TiRTC | lite 自己的匹配头文件和 `.a` | pro 自己的匹配头文件和 `.a` |
 | 演示视频 | Lite 产品 `docs/assets/videos` | Pro 产品 `docs/assets/videos` |
 
-pro 默认出厂初始化包包含固件及外置 Flash 字库和背景，一次烧录后直接进入正常应用；**会覆盖外置 Flash 文件**。`examples\NT26FxDx_OpenKit\tirtc_pro\build_assets.bat` 与 `gccout/tirtc_pro_assets` 作为独立资源安装器的维护入口保留，对应资源数据位于 `examples/NT26FxDx_OpenKit/tirtc_pro/resource_store/assets14`。只有选择安装器维护模式时，才需要安装后再烧录正常应用。
+pro 使用官方原版工具时推荐两次烧录。第一包下载到内部 Flash，启动后由安装程序写入外置七个资源文件；等到 `INSTALL_OK` 后，再烧录正式应用包并确认 `LOAD_OK`。资源安装器使用 `examples\NT26FxDx_OpenKit\tirtc_pro\build_assets.bat` 构建，输出到 `gccout/tirtc_pro_assets`，对应资源数据位于 `examples/NT26FxDx_OpenKit/tirtc_pro/resource_store/assets14`。`_pro.binpkg` 合并包仅供已验证支持本板外置 Flash 写入的工具使用，该方式会覆盖外置文件系统；不能用原版工具的“下载成功”推断资源已经写入。
 
 ### 公共底包与各产品 TiRTC 库
 

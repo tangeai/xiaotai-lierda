@@ -51,7 +51,7 @@ extern "C" {
 #define DEMO_AI_AUDIO_LEVEL_MIN          0U
 #define DEMO_AI_AUDIO_LEVEL_MAX          10U
 #define DEMO_AI_AUDIO_DEFAULT_SPK_LEVEL  8U
-#define DEMO_AI_AUDIO_DEFAULT_MIC_LEVEL  7U
+#define DEMO_AI_AUDIO_DEFAULT_MIC_LEVEL  8U
 
 /*
  * ES8311/I2S0 is a process-wide singleton.  A fixed owner plus generation
@@ -186,7 +186,7 @@ int demo_ai_audio_stop(const demo_ai_audio_lease_t *lease);
 
 /* Levels 0..10; 0 is mute, values above 10 clamp to 10.
  * User levels 1..10 follow the upstream board demo's useful hardware range:
- * speaker 30..60, microphone ADC gain 7..10 and digital volume 160..230.
+ * speaker 30..60, microphone ADC gain 7..9 and digital volume 160..199.
  * DEV/Room playback uses software volume 10 (unity) and codec volume 38..72
  * to avoid clipping decoded G.711 PCM. Other owners use
  * the saved user-level curve 30..60 for both software and codec volume.

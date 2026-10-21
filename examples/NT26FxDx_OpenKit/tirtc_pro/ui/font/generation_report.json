@@ -7333,7 +7333,7 @@
       "bitmap_sha256": "c4c6cdf7237245e126a9d8d67125359d0edc9ce5b0136bd6749dfae6120750c7"
     }
   },
-  "generated_font_sha256": "52ef7418d91667c281e8856c86b10e8461afe250917263d09b6cc3cef9393fb2",
+  "generated_font_sha256": "c7ad17a537b5d30fec8fc1dd10d3f3f0d6bb98943d380bcaf1176b0fb12843a2",
   "table_validation": "PASS: every glyph index/bitmap span; all 6763 GB2312 Hanzi; curly single/double quotes",
   "lvgl_validation": "PASS glyphs=7017 fallback=7 placeholder=0 blank_printable=0"
 }

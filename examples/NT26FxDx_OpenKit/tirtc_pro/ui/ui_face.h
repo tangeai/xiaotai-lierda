@@ -27,6 +27,11 @@ typedef enum {
     UI_FACE_ERROR = 5
 } ui_face_phase_t;
 
+#ifdef TIRTC_EXTERNAL_UI_ASSETS
+/* Sole resource worker before assets READY; all other calls remain UI-owned. */
+int ui_face_load_external(void (*progress)(uint32_t));
+#endif
+
 /* One active face. Creating another detaches the previous one. No image zoom
  * or display rotation is applied here; x/y use the 320x240 logical display.
  * NULL parent, unavailable timer or insufficient LVGL memory returns NULL. */

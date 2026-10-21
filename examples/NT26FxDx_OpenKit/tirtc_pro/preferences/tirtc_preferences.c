@@ -23,8 +23,8 @@ typedef char prefs_stat_layout[(offsetof(liot_stat_s,size)==4 && offsetof(liot_s
 #define DEBOUNCE_MS 1000U
 #define RETRY_MS 5000U
 static const char *const s_files[2] = {"tirtc_audio_a.nvm", "tirtc_audio_b.nvm"};
-static tirtc_preferences_t s_value = {8,10,true,true};
-static tirtc_preferences_t s_saved = {8,10,true,true};
+static tirtc_preferences_t s_value = {8,8,true,true};
+static tirtc_preferences_t s_saved = {8,8,true,true};
 static bool s_initialized, s_initializing, s_dirty, s_saving, s_uncertain, s_retry;
 static uint32_t s_changed_ms, s_retry_ms, s_sequence;
 static int s_active_slot = -1;
@@ -92,7 +92,7 @@ typedef struct {
 static load_result_t read_slots(void)
 {
     uint8_t records[2][RECORD_BYTES];
-    tirtc_preferences_t values[2], chosen={8,10,true,true};
+    tirtc_preferences_t values[2], chosen={8,8,true,true};
     uint32_t sequences[2]={0,0}, sequence=0;
     bool valid[2]={false,false};
     int slot=-1, error=0;

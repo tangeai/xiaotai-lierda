@@ -29,6 +29,7 @@ const uint8_t *tirtc_assets_glyph(uint32_t offset, uint32_t bytes);
 bool tirtc_assets_font_process(void);
 const uint16_t *tirtc_assets_background(void);
 void tirtc_assets_get_snapshot(tirtc_assets_snapshot_t *out);
-/* READY follows full original font/background CRC validation. The 64KiB glyph
- * cache and unchanged background remain allocated for the entire boot. */
+/* READY follows validation of every matching UI resource, including metadata,
+ * icons, digit glyphs and face tables. These additions live in fixed BSS; the
+ * existing 64KiB glyph cache and background keep their boot-long allocations. */
 #endif

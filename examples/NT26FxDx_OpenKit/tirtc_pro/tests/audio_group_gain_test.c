@@ -1,4 +1,7 @@
 /* Compile the production audio adapter; fake only its SDK/RTOS boundary. */
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -11,6 +14,7 @@ static unsigned s_pause_calls, s_resume_calls, s_stop_calls;
 static int s_sw_volume = -1, s_codec_volume = -1;
 static uint8_t s_mic_gain;
 static int s_mic_volume;
+static uint8_t s_expected_mic_level = 10;
 static int s_critical_depth;
 static int16_t s_played[DEMO_AI_AUDIO_FRAME_SAMPLES];
 static unsigned s_play_calls, s_clipped;
@@ -77,7 +81,7 @@ Liot_AudErr_e Liot_AudioStop(void)
 }
 Liot_AudErr_e Liot_AudioPlay(uint8_t *data, int length)
 {
-    /* Model the checked-in F6D_A Liot_AudioApplyVolume (default mode 0),
+    /* Model the checked-in F6D_D Liot_AudioApplyVolume (default mode 0),
      * including Q8 gain and signed PCM16 saturation before the codec. */
     assert(length == sizeof(s_played));
     memcpy(s_played, data, sizeof(s_played));
@@ -103,8 +107,10 @@ static void expect_levels(int software, int codec)
 {
     assert(s_sw_volume == software);
     assert(s_codec_volume == codec);
-    assert(s_mic_gain == 10);
-    assert(s_mic_volume == 230);
+    static const uint8_t gains[] = {0,7,7,7,8,8,8,8,9,9,9};
+    static const int volumes[] = {0,160,164,169,173,177,182,186,190,195,199};
+    assert(s_mic_gain == gains[s_expected_mic_level]);
+    assert(s_mic_volume == volumes[s_expected_mic_level]);
     assert(s_critical_depth == 0);
 }
 
@@ -170,6 +176,12 @@ static void check_owner(demo_ai_audio_owner_e owner)
     assert(s_sw_calls == previous_writes);
     expect_levels(unity_owner(owner) ? 10 : 60,
                   unity_owner(owner) ? 72 : 60);
+    for (uint8_t mic = 0; mic <= 10; ++mic) {
+        s_expected_mic_level = mic;
+        assert(demo_ai_audio_set_levels(&lease, 10, mic) == 0);
+        expect_levels(unity_owner(owner) ? 10 : 60,
+                      unity_owner(owner) ? 72 : 60);
+    }
     close_session(&lease);
 }
 

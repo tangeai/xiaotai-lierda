@@ -2,8 +2,9 @@
 """Exercise Pro's production AI media/protocol functions with real cJSON.
 
 No hardware or network is used. The HAL fake preserves whole-block admission,
-bounded playback capacity, capture timing and cancellation boundaries. The
-test does not claim acoustic echo performance or actual DMA completion.
+bounded playback capacity, capture timing and cancellation boundaries. Opus
+packet duration is parsed by the production adapter; encode/decode are fakes
+for queue/lifecycle checks, not codec fidelity or acoustic performance tests.
 """
 import argparse
 import hashlib
@@ -59,12 +60,16 @@ PREFIX = r'''
 #include <stdlib.h>
 #include <string.h>
 #include "audio_device.h"
+#include "opus_codec.h"
+#include "opus.h"
 #include "json_guard.h"
 #define TIRTC_ENABLE_DEBUG_LOG 0
 #define TIRTC_LOG_DEBUG(...) ((void)0)
 #define liot_trace(...) ((void)0)
 #define TIRTC_AUDIO_ALAW 7U
 #define TIRTC_AUDIOSAMPLE_8K16B1C 8U
+#define TIRTC_AUDIO_OPUS 9U
+#define TIRTC_AUDIOSAMPLE_16K16B1C 16U
 #define DEMO_TIRTC_OWNER_AI 1U
 #define TIRTC_E_CONN_REMOTECLOSE (-101)
 enum { TIRTC_AI_THINKING, TIRTC_AI_LISTENING, TIRTC_AI_SPEAKING };
@@ -81,7 +86,12 @@ static uint32_t s_connected_at, s_last_ui;
 static uint32_t s_request, s_running, s_generation, s_deadline, s_order;
 static tirtc_conn_t s_connection;
 static demo_ai_audio_lease_t s_lease;
-static uint8_t s_rx[AI_RX_BYTES], s_play_alaw[AI_NETWORK_SAMPLES_8K], s_alaw[AI_NETWORK_SAMPLES_8K];
+typedef struct { uint16_t length, samples; } ai_rx_packet_t;
+static uint8_t s_rx[AI_RX_BYTES], s_play_opus[DEMO_AI_OPUS_MAX_PACKET], s_uplink_opus[DEMO_AI_OPUS_MAX_PACKET];
+static ai_rx_packet_t s_rx_packets[AI_RX_PACKETS];
+static uint32_t s_rx_head, s_rx_count, s_rx_samples;
+static int16_t s_decode_pcm[DEMO_AI_OPUS_MAX_DECODE_SAMPLES];
+static uint16_t s_decode_samples, s_decode_offset;
 static int16_t s_pcm[DEMO_AI_AUDIO_FRAME_SAMPLES], s_record[DEMO_AI_AUDIO_FRAME_SAMPLES];
 static uint32_t s_rx_read, s_rx_queued, s_rx_peak, s_rx_drop_bytes, s_rx_bad_frames, s_cmd_drops, s_play_errors;
 static uint32_t s_tx, s_rx_frames, s_played, s_rx_drops, s_tx_drops, s_suppressed, s_capture;
@@ -89,7 +99,6 @@ static uint32_t s_play_audio_until, s_preroll_since, s_play_until, s_timestamp;
 static bool s_play_continuing, s_preroll_waiting, s_play_guard, s_controls_dirty;
 static bool s_capture_paused, s_speaker_mute_pending, s_speaker_draining;
 static uint8_t s_play_sample_remainder;
-static bool s_partial_waiting; static uint32_t s_partial_since;
 static uint32_t s_capture_pause_at, s_capture_pause_remainder;
 static bool s_play_retry; static uint32_t s_play_retry_since;
 static bool s_suppression_hint, s_prime_wait_hint;
@@ -124,7 +133,12 @@ static unsigned allocations, cases, played_samples;
 static int16_t played_pcm[200000];
 static uint32_t sent_ts[2000];
 static uint8_t sent_first[2000];
-static unsigned capture_hook;
+static unsigned capture_hook, decode_hook;
+static unsigned encode_calls, decode_calls, decoder_reset_calls, codec_reset_calls;
+static int encode_error, decode_error, codec_init_error, decode_samples_override;
+static int last_decode_bytes;
+static uint8_t last_decode_marker;
+static int16_t last_encoded_pcm[DEMO_AI_OPUS_FRAME_SAMPLES];
 static bool calls_busy;
 static unsigned lookup_steps;
 static uint32_t tick(void) { return now_ms; }
@@ -229,10 +243,31 @@ int demo_ai_audio_prewarm_session(const demo_ai_audio_lease_t *lease,uint32_t *e
 #endif
     return 0;
 }
-static uint32_t demo_g711_alaw_decode(const uint8_t *a,int16_t *pcm,uint32_t n) {
-    uint32_t i; for(i=0;i<n;++i)pcm[i]=(int16_t)a[i]; return n;
+int demo_ai_opus_init(void) { return codec_init_error; }
+void demo_ai_opus_reset(void) { ++codec_reset_calls; }
+void demo_ai_opus_reset_decoder(void) { ++decoder_reset_calls; }
+void demo_ai_opus_deinit(void) {}
+int demo_ai_opus_encode_20ms(const int16_t *pcm,uint8_t *packet,int capacity) {
+    ++encode_calls; assert(capacity>=60); memcpy(last_encoded_pcm,pcm,sizeof(last_encoded_pcm));
+    if(encode_error)return encode_error;
+    memset(packet,(uint8_t)pcm[0],60);packet[0]=0x08U;return 60;
 }
-static uint8_t demo_g711_alaw_encode_sample(int16_t x) { return (uint8_t)x; }
+int demo_ai_opus_decode(const uint8_t *packet,int length,int16_t *pcm,int capacity) {
+    int i,n; ++decode_calls;last_decode_bytes=length;
+    if(decode_error)return decode_error;
+    n=demo_ai_opus_packet_samples(packet,length);
+    assert(n>0 && n<=capacity && length>=2);
+    last_decode_marker=packet[1];
+    for(i=1;i<length;++i)assert(packet[i]==last_decode_marker);
+    for(i=0;i<n;++i)pcm[i]=(int16_t)last_decode_marker;
+    if(decode_hook==1U)s_want=false;
+    if(decode_hook==2U)++s_request;
+    if(decode_hook==3U)network_ready=false;
+    if(decode_hook==4U)route_valid=false;
+    if(decode_hook==5U)tirtc_ai_set_audio_config(8,7,false,true);
+    if(decode_hook==6U)tirtc_ai_set_audio_config(0,7,true,true);
+    return decode_samples_override ? decode_samples_override : n;
+}
 static int demo_tirtc_get_send_buffer_used(unsigned owner,uint32_t gen,size_t *used) {
     (void)owner;(void)gen;++query_calls;*used=query_used;
     if(query_hook==1U)++s_request;
@@ -248,9 +283,9 @@ static int demo_tirtc_get_send_buffer_used(unsigned owner,uint32_t gen,size_t *u
 }
 static int demo_tirtc_send_audio(unsigned owner,uint32_t gen,const TIRTCFRAMEINFO *f,const void *p) {
     (void)owner;(void)gen;(void)p;
-    assert(f->stream_id==1 && f->media==TIRTC_AUDIO_ALAW && f->flags==TIRTC_AUDIOSAMPLE_8K16B1C);
-    assert(f->length==160U && sends<2000U);
-    sent_first[sends]=((const uint8_t *)p)[0];sent_ts[sends++]=f->ts;return 160;
+    assert(f->stream_id==1 && f->media==TIRTC_AUDIO_OPUS && f->flags==TIRTC_AUDIOSAMPLE_16K16B1C);
+    assert(f->length==60U && sends<2000U);
+    sent_first[sends]=((const uint8_t *)p)[1];sent_ts[sends++]=f->ts;return 60;
 }
 static void *count_alloc(size_t size) { void *p=malloc(size); if(p)++allocations; return p; }
 static void count_free(void *p) { if(p) { assert(allocations); --allocations; free(p); } }
@@ -272,12 +307,17 @@ static void reset(void) {
     s_whip_done=s_standby=s_runtime_owned=s_resume_after_cleanup=false;
     s_lost_error=s_whip_error=0; s_connected_at=s_last_ui=0;
     s_first_rx_logged=calls_busy=false; lookup_steps=0; memset(s_commands,0,sizeof(s_commands));
+    s_rx_head=s_rx_count=s_rx_samples=0; s_decode_samples=s_decode_offset=0;
+    memset(s_rx_packets,0,sizeof(s_rx_packets));
+    encode_calls=decode_calls=decoder_reset_calls=codec_reset_calls=0;
+    encode_error=decode_error=codec_init_error=decode_samples_override=last_decode_bytes=0;
+    last_decode_marker=0;
     s_rx_read=s_rx_queued=s_rx_peak=s_rx_drop_bytes=s_rx_bad_frames=s_cmd_drops=s_play_errors=0;
     s_tx=s_rx_frames=s_played=s_rx_drops=s_tx_drops=s_suppressed=s_capture=0;
     s_play_audio_until=s_preroll_since=s_play_until=s_timestamp=0;
     s_play_continuing=s_preroll_waiting=s_play_guard=s_controls_dirty=false;
     s_capture_paused=s_speaker_mute_pending=s_speaker_draining=false;
-    s_play_sample_remainder=0; s_partial_waiting=false; s_partial_since=0;
+    s_play_sample_remainder=0;
     s_capture_pause_at=s_capture_pause_remainder=0; s_play_retry=false; s_play_retry_since=0;
     s_suppression_hint=s_prime_wait_hint=false;
     s_applied_volume=8; s_applied_mic_gain=7; s_applied_speaker=s_applied_mic=true;
@@ -286,18 +326,29 @@ static void reset(void) {
     s_first_signal_logged=s_first_pcm_logged=s_first_rx_seen=false;
     playback_error=finish_error=finish_count=0;
     captures=sends=level_calls=discards=stop_calls=warm_calls=captions=actions=cancelled=0;
-    capture_hook=played_samples=0; strcpy(s_rpc_id,"pro-start-7");
+    capture_hook=decode_hook=played_samples=0; strcpy(s_rpc_id,"pro-start-7");
 #if DEMO_AI_AUDIO_AEC_ENABLE
     s_record_failure_active=false; s_record_failure_since=s_record_failure_generation=0;
     s_remote_tail=s_remote_tail_quiet=false;
     s_remote_tail_progress=s_remote_tail_quiet_since=s_mic_capture_generation=0;
 #endif
 }
-static void put(unsigned length,uint8_t value) {
-    uint8_t data[2048]; TIRTCFRAMEINFO f={1,TIRTC_AUDIO_ALAW,TIRTC_AUDIOSAMPLE_8K16B1C,0,0};
-    assert(length<=sizeof(data)); memset(data,value,length); f.length=length;
+static void put_samples(unsigned length,uint8_t value,unsigned samples) {
+    uint8_t data[2048]; TIRTCFRAMEINFO f={1,TIRTC_AUDIO_OPUS,TIRTC_AUDIOSAMPLE_16K16B1C,0,0};
+    assert(length>=2 && length<=sizeof(data)); memset(data,value,length); f.length=length;
+    switch(samples) {
+        case 40:data[0]=0x80U;break;
+        case 80:data[0]=0x88U;break;
+        case 160:data[0]=0x00U;break;
+        case 320:data[0]=0x08U;break;
+        case 640:data[0]=0x10U;break;
+        case 960:data[0]=0x18U;break;
+        case 1920:data[0]=0x19U;break;
+        default:assert(!"unsupported test duration");
+    }
     audio_received(s_connection,&f,data);
 }
+static void put(unsigned length,uint8_t value) { put_samples(length,value,320U); }
 static void command_bytes(const char *json,size_t length) {
     ai_cmd_t m; memset(&m,0,sizeof(m)); assert(length<=AI_CMD_BYTES);
     m.epoch=s_running; m.length=(uint16_t)length; memcpy(m.data,json,length);
@@ -309,8 +360,8 @@ static void protocols(void) {
     const char *end="{\"jsonrpc\":\"2.0\",\"method\":\"end_session\"}";
     char bytes[300];
     reset(); s_phase=AI_NEGOTIATE; command(ack); assert(s_phase==AI_ACTIVE && !finish_count); ++cases;
-    reset(); s_phase=AI_NEGOTIATE; command("{\"jsonrpc\":\"2.0\",\"id\":\"pro-start-7\",\"result\":{\"session_id\":\"x\",\"output_audio\":{\"codec\":\"g711a\",\"sample_rate\":8000,\"channels\":1}}}"); assert(s_phase==AI_ACTIVE); ++cases;
-    reset(); s_phase=AI_NEGOTIATE; command("{\"jsonrpc\":\"2.0\",\"id\":\"pro-start-7\",\"result\":{\"session_id\":\"x\",\"output_audio\":{\"codec\":\"opus\",\"sample_rate\":16000,\"channels\":1}}}"); assert(finish_error==AI_ERR_PROTOCOL); ++cases;
+    reset(); s_phase=AI_NEGOTIATE; command("{\"jsonrpc\":\"2.0\",\"id\":\"pro-start-7\",\"result\":{\"session_id\":\"x\",\"output_audio\":{\"codec\":\"opus\",\"sample_rate\":16000,\"channels\":1}}}"); assert(s_phase==AI_ACTIVE); ++cases;
+    reset(); s_phase=AI_NEGOTIATE; command("{\"jsonrpc\":\"2.0\",\"id\":\"pro-start-7\",\"result\":{\"session_id\":\"x\",\"output_audio\":{\"codec\":\"g711a\",\"sample_rate\":8000,\"channels\":1}}}"); assert(finish_error==AI_ERR_PROTOCOL); ++cases;
     reset(); command("{\"jsonrpc\":\"2.0\",\"method\":\"caption\",\"params\":{\"text\":\"hi\"}}"); assert(captions==1); ++cases;
     reset(); command("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"call_intent\",\"params\":{}}"); assert(actions==1); ++cases;
     reset(); command("{\"jsonrpc\":\"2.0\",\"id\":\"call\",\"method\":\"ai_call_intent\",\"params\":{}}"); assert(actions==1); ++cases;
@@ -385,13 +436,112 @@ static void media_cases(void) {
     media_step(); assert(!s_rx_queued && sends==1 && s_speaker_draining); ++cases;
 #endif
     reset(); put(160,33); s_play_continuing=true; s_play_audio_until=now_ms+20; playback_error=DEMO_AI_AUDIO_ERR_WARM_PARTIAL; media_step(); assert(finish_error==AI_ERR_AUDIO && s_rx_queued==160); ++cases;
-    reset(); put(1,44); media_step(); assert(!played_samples); now_ms+=AI_PREROLL_WAIT_MS; media_step();
-    assert(played_samples==2 && !s_rx_queued && played_pcm[0]==44 && played_pcm[1]==44); ++cases;
-    reset(); { uint8_t b=1; TIRTCFRAMEINFO f={2,TIRTC_AUDIO_ALAW,TIRTC_AUDIOSAMPLE_8K16B1C,0,1}; audio_received(s_connection,&f,&b); }
+    reset(); put_samples(3,44,40); media_step(); assert(!played_samples); now_ms+=AI_PREROLL_WAIT_MS; media_step();
+    assert(played_samples==40 && !s_rx_queued && played_pcm[0]==44 && played_pcm[39]==44); ++cases;
+    reset(); { uint8_t b=1; TIRTCFRAMEINFO f={2,TIRTC_AUDIO_OPUS,TIRTC_AUDIOSAMPLE_16K16B1C,0,1}; audio_received(s_connection,&f,&b); }
     assert(!s_rx_queued && s_rx_bad_frames==1); ++cases;
 }
 
 
+
+static void opus_packet_cases(void) {
+    unsigned i; uint32_t before; uint16_t n;
+    /* Known duration vectors exercise SILK, hybrid, CELT and multi-frame
+     * parsing through the repository's original libopus implementation. */
+    { static const struct {uint8_t toc,count;int samples;} vectors[]={
+        {0x00,0,160},{0x08,0,320},{0x10,0,640},{0x18,0,960},
+        {0x60,0,160},{0x68,0,320},{0x80,0,40},{0x88,0,80},
+        {0x90,0,160},{0x98,0,320},{0x19,0,1920},{0x83,48,1920}};
+      uint8_t p[2];for(i=0;i<sizeof(vectors)/sizeof(vectors[0]);++i) {
+          p[0]=vectors[i].toc;p[1]=vectors[i].count;
+          assert(demo_ai_opus_packet_samples(p,2)==vectors[i].samples);
+      }
+      p[0]=0x83;p[1]=49;assert(demo_ai_opus_packet_samples(p,2)<0);
+      assert(demo_ai_opus_packet_samples(p,1)<0);
+      assert(demo_ai_opus_packet_samples(NULL,2)<0);
+      assert(demo_ai_opus_packet_samples(p,0)<0);
+      assert(demo_ai_opus_packet_samples(p,1276)<0);++cases;
+    }
+    /* The next packet may be longer in bytes but shorter in PCM duration.
+     * Consume a complete decoded packet, never byte slices from two packets. */
+    reset(); put_samples(11,11,160); put_samples(1275,22,640);
+    assert(s_rx_count==2 && queued_audio_samples()==800);
+    n=peek_audio(); assert(n==160 && decode_calls==1 && last_decode_bytes==11);
+    for(i=0;i<n;++i)assert(s_pcm[i]==11);consume_audio(n);
+    assert(s_rx_count==1 && s_rx_queued==1275 && queued_audio_samples()==640);
+    for(i=0;i<2;++i) {
+        n=peek_audio(); assert(n==320 && decode_calls==2 && last_decode_bytes==1275);
+        assert(s_pcm[0]==22 && s_pcm[319]==22); consume_audio(n);
+    }
+    assert(!s_rx_count && !s_rx_queued && !queued_audio_samples());++cases;
+    /* Maximum 120 ms packet is decoded exactly once and split into six
+     * hardware-sized 20 ms blocks; duration tracks only the remaining PCM. */
+    reset(); put_samples(1201,33,1920);
+    for(i=0;i<6;++i) {
+        assert(queued_audio_samples()==1920-i*320);
+        n=peek_audio();assert(n==320 && decode_calls==1);
+        assert(s_pcm[0]==33 && s_pcm[319]==33);consume_audio(n);
+        assert(s_rx_count==(i==5 ? 0U : 1U));
+    }
+    assert(!s_rx_queued && !queued_audio_samples());++cases;
+    /* Pre-roll is measured in audio time, not compressed byte count. A
+     * quiet low-bitrate packet and a large one must obey the same deadline. */
+    reset();put_samples(3,11,1920);put_samples(3,22,1920);
+    assert(s_rx_queued==6 && playback_buffer_ready(true,8));++cases;
+    reset();for(i=0;i<4;++i)put(1275,33);
+    assert(s_rx_queued>AI_PREROLL_SAMPLES && !playback_buffer_ready(true,8));
+    now_ms+=AI_PREROLL_WAIT_MS;assert(playback_buffer_ready(true,8));++cases;
+    /* Byte ring wrap retains the exact compressed packet. */
+    reset();s_rx_read=AI_RX_BYTES-5U;put_samples(37,44,320);
+    assert(peek_audio()==320 && last_decode_bytes==37 && s_pcm[319]==44);
+    consume_audio(320);assert(!s_rx_queued && s_rx_read==32U);++cases;
+    /* Packet descriptors, compressed bytes and decoded duration are separate
+     * admission limits. Rejection leaves every earlier packet undamaged. */
+    reset();for(i=0;i<AI_RX_PACKETS;++i)put_samples(3,55,40);
+    before=s_rx_drops;put_samples(3,66,40);
+    assert(s_rx_count==AI_RX_PACKETS && s_rx_drops==before+1 && s_rx_queued==AI_RX_PACKETS*3U);
+    assert(peek_audio()==40 && s_pcm[0]==55);consume_audio(40);put_samples(3,66,40);
+    assert(s_rx_count==AI_RX_PACKETS);++cases;
+    reset();for(i=0;i<AI_RX_MAX_SAMPLES/1920U;++i)put_samples(3,55,1920);
+    before=s_rx_drops;put(160,66);
+    assert(queued_audio_samples()==AI_RX_MAX_SAMPLES && s_rx_drops==before+1);
+    assert(s_rx_count==AI_RX_MAX_SAMPLES/1920U);++cases;
+    reset();for(i=0;i<AI_RX_BYTES/1275U;++i)put(1275,55);
+    before=s_rx_drops;put(1275,66);
+    assert(s_rx_queued==(AI_RX_BYTES/1275U)*1275U && s_rx_drops==before+1);
+    assert(peek_audio()==320 && s_pcm[0]==55);consume_audio(320);put(1275,66);
+    assert(s_rx_count==AI_RX_BYTES/1275U);++cases;
+    /* Corrupt packet framing and a decoder error retire a whole packet;
+     * they cannot be mistaken for silence or poison the next boundary. */
+    reset();{uint8_t invalid[2]={0x03U,0U};TIRTCFRAMEINFO f={1,TIRTC_AUDIO_OPUS,TIRTC_AUDIOSAMPLE_16K16B1C,0,2};
+        audio_received(s_connection,&f,invalid);assert(!s_rx_count && !s_rx_queued && s_rx_bad_frames==1);}
+    put(1276,66);assert(!s_rx_count && !s_rx_queued && s_rx_bad_frames==2);++cases;
+    reset();put(77,55);put(79,66);decode_error=-4;
+    assert(peek_audio()==0 && s_rx_count==1 && s_rx_queued==79 && decoder_reset_calls==1);
+    decode_error=0;assert(peek_audio()==320 && s_pcm[0]==66 && last_decode_bytes==79);
+    consume_audio(320);assert(!s_rx_count && !s_rx_queued);++cases;
+    reset();put(77,55);decode_samples_override=160;
+    assert(peek_audio()==0 && !s_rx_count && !s_rx_queued && decoder_reset_calls==1);++cases;
+    /* A busy HAL must retain decoded PCM and must not feed the same Opus
+     * packet into a stateful decoder twice. */
+    reset();put_samples(1201,77,1920);s_play_continuing=true;s_play_audio_until=now_ms+20;sdk_busy=true;
+    submit_playback(true,8);submit_playback(true,8);
+    assert(decode_calls==1 && !played_samples && s_decode_offset==0 && s_rx_count==1);
+    sdk_busy=false;submit_playback(true,8);
+    assert(decode_calls==1 && played_samples==1920 && !s_rx_count && !s_rx_queued);++cases;
+    /* Interrupt/mute queue clearing must also remove partial decoded output
+     * and reset decoder history before accepting a replacement response. */
+    reset();put_samples(1201,77,1920);assert(peek_audio()==320);consume_audio(320);
+    before=decoder_reset_calls;discard_audio_queue();
+    assert(!s_rx_count && !s_rx_queued && !s_rx_samples && !s_decode_samples && !s_decode_offset);
+    assert(decoder_reset_calls==before+1 && queued_audio_samples()==0);
+    put(160,88);assert(peek_audio()==320 && s_pcm[0]==88);consume_audio(320);++cases;
+    /* Encode receives the entire original 16 kHz frame, without A-law
+     * downsampling. A codec failure must not submit a stale packet. */
+    reset();media_step();assert(encode_calls==1 && sends==1);
+    for(i=0;i<DEMO_AI_OPUS_FRAME_SAMPLES;++i)assert(last_encoded_pcm[i]==(int16_t)(100+i));++cases;
+    reset();encode_error=-4;media_step();assert(encode_calls==1 && !sends);++cases;
+}
 
 static void uplink_backpressure_cases(void) {
     const size_t limit=12U*1024U;unsigned i;uint32_t first;
@@ -448,39 +598,39 @@ static void queue_start_ack(const char *ack) {
 }
 static void negotiation_audio_cases(void) {
     const char *ack="{\"jsonrpc\":\"2.0\",\"id\":\"pro-start-7\",\"result\":{\"session_id\":\"x\"}}";
-    const char *bad_profile="{\"jsonrpc\":\"2.0\",\"id\":\"pro-start-7\",\"result\":{\"session_id\":\"x\",\"output_audio\":{\"codec\":\"opus\",\"sample_rate\":16000,\"channels\":1}}}";
+    const char *bad_profile="{\"jsonrpc\":\"2.0\",\"id\":\"pro-start-7\",\"result\":{\"session_id\":\"x\",\"output_audio\":{\"codec\":\"g711a\",\"sample_rate\":8000,\"channels\":1}}}";
     const char *rejected="{\"jsonrpc\":\"2.0\",\"id\":\"pro-start-7\",\"error\":{\"code\":-1}}";
     unsigned i;
     /* Real SDK command callbacks enqueue ACK; the worker handles it later.
      * Audio racing behind that ACK must survive without bypassing negotiation. */
-    reset();s_phase=AI_NEGOTIATE;queue_start_ack(ack);put(1280U,77U);
-    assert(s_rx_queued==1280U && s_rx_frames==1U && !played_samples);
+    reset();s_phase=AI_NEGOTIATE;queue_start_ack(ack);put_samples(1201U,77U,1920U);
+    assert(s_rx_queued==1201U && s_rx_frames==1U && !played_samples);
     assert(s_phase==AI_NEGOTIATE && !sends && !captures);
     step();assert(s_phase==AI_ACTIVE && !finish_count);
     for(i=0;i<200U && s_rx_queued;++i) {now_ms+=20U;step();}
-    assert(!s_rx_queued && played_samples==2560U && !finish_count);
+    assert(!s_rx_queued && played_samples==1920U && !finish_count);
     for(i=0;i<played_samples;++i)assert(played_pcm[i]==77);++cases;
     /* An early packet without an ACK remains bounded queued data only. */
-    reset();s_phase=AI_NEGOTIATE;s_deadline=now_ms+1000U;put(1280U,66U);
-    step();assert(s_phase==AI_NEGOTIATE && s_rx_queued==1280U && !played_samples && !captures && !sends);++cases;
+    reset();s_phase=AI_NEGOTIATE;s_deadline=now_ms+1000U;put_samples(1201U,66U,1920U);
+    step();assert(s_phase==AI_NEGOTIATE && s_rx_queued==1201U && !played_samples && !captures && !sends);++cases;
     /* Bad/rejected ACK must close before any buffered PCM reaches playback. */
     for(i=0;i<2U;++i) {
-        reset();s_phase=AI_NEGOTIATE;queue_start_ack(i ? rejected : bad_profile);put(1280U,77U);
+        reset();s_phase=AI_NEGOTIATE;queue_start_ack(i ? rejected : bad_profile);put_samples(1201U,77U,1920U);
         step();assert(finish_count==1 && finish_error==AI_ERR_PROTOCOL && !played_samples && !sends && !captures);++cases;
     }
-    reset();s_phase=AI_NEGOTIATE;s_deadline=now_ms+100U;put(1280U,77U);
+    reset();s_phase=AI_NEGOTIATE;s_deadline=now_ms+100U;put_samples(1201U,77U,1920U);
     step();assert(!finish_count && !played_samples);now_ms+=100U;step();
     assert(finish_count==1 && finish_error==AI_ERR_TIMEOUT && !played_samples && !sends);++cases;
     /* User cancellation rejects later packets and never plays the saved prefix. */
-    reset();s_phase=AI_NEGOTIATE;put(1280U,77U);++s_request;put(160U,88U);
-    assert(s_rx_queued==1280U);step();assert(finish_count==1 && !played_samples && !sends);++cases;
-    reset();s_phase=AI_NEGOTIATE;s_ui.speaker_enabled=false;put(1280U,77U);
+    reset();s_phase=AI_NEGOTIATE;put_samples(1201U,77U,1920U);++s_request;put(160U,88U);
+    assert(s_rx_queued==1201U);step();assert(finish_count==1 && !played_samples && !sends);++cases;
+    reset();s_phase=AI_NEGOTIATE;s_ui.speaker_enabled=false;put_samples(1201U,77U,1920U);
     assert(!s_rx_queued && !played_samples);++cases;
     reset();s_phase=AI_NEGOTIATE;
-    {uint8_t b=1;TIRTCFRAMEINFO f={2,TIRTC_AUDIO_ALAW,TIRTC_AUDIOSAMPLE_8K16B1C,0,1};
+    {uint8_t b=1;TIRTCFRAMEINFO f={2,TIRTC_AUDIO_OPUS,TIRTC_AUDIOSAMPLE_16K16B1C,0,1};
      audio_received(s_connection,&f,&b);assert(!s_rx_queued && s_rx_bad_frames==1U);}
     ++cases;
-    reset();s_phase=AI_CONNECT;put(1280U,77U);assert(!s_rx_queued);++cases;
+    reset();s_phase=AI_CONNECT;put_samples(1201U,77U,1920U);assert(!s_rx_queued);++cases;
 }
 
 static void capture_timeout_cases(void) {
@@ -558,7 +708,7 @@ static void interrupt_arrival_cases(void) {
     command("{\"jsonrpc\":\"2.0\",\"method\":\"interrupt\"}");
     assert(stop_calls==1 && prepare_calls==1 && !hal_stopped && !finish_count);
     assert(queued_at_stop==0 && s_rx_queued==160 && now_ms==1200U && !played_samples);
-    assert(s_rx[s_rx_read]==99U);
+    assert(s_rx[(s_rx_read+1U)%AI_RX_BYTES]==99U);
     media_step(); now_ms+=AI_PREROLL_WAIT_MS; media_step();
     assert(!s_rx_queued && played_samples==320 && !finish_count);
     for(i=0;i<320U;++i) assert(played_pcm[i]==99); /* cancelled 77 never replays */
@@ -636,6 +786,19 @@ static void tails(void) {
     reset(); now_ms=0xfffffe00U; drain_until=now_ms; begin_remote_tail(); media_step(); now_ms+=1200; media_step(); assert(finish_count==1); ++cases;
 }
 #endif
+static void decode_control_cases(void) {
+    unsigned hook;
+    for(hook=1U;hook<=6U;++hook) {
+        reset(); decode_hook=hook; put(160,77);
+        s_play_continuing=s_play_guard=true; s_play_audio_until=now_ms+100U;
+        assert(!submit_playback(true,8));
+        assert(decode_calls==1U && !played_samples && !warm_calls);
+        assert(s_rx_queued==160U && s_decode_samples==320U && !s_decode_offset);
+        /* The normal worker control path owns discard/reset, not the decoder. */
+        discard_audio_queue(); assert(!s_rx_queued && !s_decode_samples);
+        ++cases;
+    }
+}
 static void lifecycle_cases(void) {
     unsigned i;
     reset(); disconnected(s_connection); step();
@@ -672,7 +835,11 @@ static void lifecycle_cases(void) {
 }
 int main(void) {
     cJSON_Hooks hooks={count_alloc,count_free}; cJSON_InitHooks(&hooks);
-#if defined(TEST_AI_UPLINK_BACKPRESSURE_ONLY)
+#if defined(TEST_AI_DECODE_CONTROLS_ONLY)
+    decode_control_cases();
+#elif defined(TEST_AI_OPUS_PACKETS_ONLY)
+    opus_packet_cases();
+#elif defined(TEST_AI_UPLINK_BACKPRESSURE_ONLY)
     uplink_backpressure_cases();
 #elif defined(TEST_AI_NEGOTIATION_AUDIO_ONLY)
     negotiation_audio_cases();
@@ -687,17 +854,17 @@ int main(void) {
     tail_speaker_cases();
 #endif
 #else
-    protocols(); media_cases(); capture_timeout_cases(); negotiation_audio_cases(); uplink_backpressure_cases();
+    protocols(); media_cases(); opus_packet_cases(); capture_timeout_cases(); negotiation_audio_cases(); uplink_backpressure_cases();
 #if DEMO_AI_AUDIO_AEC_ENABLE
     interrupt_arrival_cases(); tail_speaker_cases(); tails();
 #else
     reset(); put(160,77); command("{\"jsonrpc\":\"2.0\",\"method\":\"interrupt\"}");
     assert(!stop_calls && !prepare_calls && s_rx_queued==160 && !finish_count); ++cases;
 #endif
-    lifecycle_cases();
+    decode_control_cases(); lifecycle_cases();
 #endif
     assert(!allocations); cJSON_InitHooks(NULL);
-    printf("PASS: Pro AI AEC=%d %u production cases; real cJSON, media FIFO, capture gates, tails\n",DEMO_AI_AUDIO_AEC_ENABLE,cases);
+    printf("PASS: Pro AI AEC=%d %u production cases; real cJSON/duration parser, fake Opus, packet FIFO, capture gates, tails\n",DEMO_AI_AUDIO_AEC_ENABLE,cases);
     return 0;
 }
 '''
@@ -708,20 +875,29 @@ def main():
     parser.add_argument('--cc', default=os.environ.get('CC', 'tcc'))
     parser.add_argument('--cjson', type=Path, required=True)
     parser.add_argument('--source', type=Path, help='Alternative tirtc_ai.c for regression negative controls')
-    parser.add_argument('--case', choices=('all', 'interrupt-arrival', 'tail-speaker', 'capture-timeout', 'negotiation-audio', 'uplink-backpressure'), default='all')
+    parser.add_argument('--case', choices=('all', 'opus-packets', 'interrupt-arrival', 'tail-speaker', 'capture-timeout', 'negotiation-audio', 'uplink-backpressure', 'decode-controls'), default='all')
     args = parser.parse_args()
+    cc = [args.cc] + (['cc'] if Path(args.cc).stem.lower() == 'zig' else [])
     if hashlib.sha256(args.cjson.read_bytes()).hexdigest() != CJSON_SHA256:
         parser.error('Expected unmodified upstream cJSON v1.7.16')
     app = Path(__file__).resolve().parents[1]
     sdk = app.parents[2]
     source = (args.source or app / 'ai/tirtc_ai.c').read_text(encoding='utf-8')
     protocol = (app / 'ai/ai_call_protocol.c').read_text(encoding='utf-8')
+    codec = (app / 'media/opus_codec.c').read_text(encoding='utf-8')
+    opus = sdk / 'components/thirdparty/opus/opus-1.4'
+    opus_common = (opus / 'src/opus.c').read_text(encoding='utf-8')
+    opus_decoder = (opus / 'src/opus_decoder.c').read_text(encoding='utf-8')
     constants = source[source.index('#define AI_CMD '):source.index('typedef enum')]
     names = ['pending', 'tirtc_ai_set_audio_config', 'discard_audio_queue', 'callback_current', 'connection_error', 'disconnected', 'audio_received', 'ai_command', 'command_received',
              'json_string', 'profile', 'command_notification', 'handle_command',
-             'queued_audio_bytes', 'peek_audio', 'consume_audio', 'playback_buffer_ready',
+             'queued_audio_samples', 'consume_rx_packet', 'peek_audio', 'consume_audio', 'playback_buffer_ready',
              'submit_playback', 'account_capture_pause', 'pause_capture', 'media_step', 'prepare_audio', 'command_slot', 'step']
-    bodies = function(protocol, 'ai_call_json_complete') + '\n'
+    bodies = function(opus_common, 'opus_packet_get_samples_per_frame') + '\n'
+    bodies += function(opus_decoder, 'opus_packet_get_nb_frames') + '\n'
+    bodies += function(opus_decoder, 'opus_packet_get_nb_samples') + '\n'
+    bodies += function(codec, 'demo_ai_opus_packet_samples') + '\n'
+    bodies += function(protocol, 'ai_call_json_complete') + '\n'
     bodies += '#if DEMO_AI_AUDIO_AEC_ENABLE\n' + function(source, 'begin_remote_tail') + '\n#endif\n'
     for name in names:
         bodies += function(source, name) + '\n'
@@ -733,9 +909,9 @@ def main():
         for enabled in (0, 1):
             exe = Path(temp) / ('ai-aec-%d.exe' % enabled)
             selected = [] if args.case == 'all' else ['-DTEST_AI_%s_ONLY=1' % args.case.upper().replace('-', '_')]
-            subprocess.run([args.cc, '-std=c99', '-DDEMO_AI_AUDIO_AEC_ENABLE=%d' % enabled, *selected,
+            subprocess.run([*cc, '-std=c99', '-DDEMO_AI_AUDIO_AEC_ENABLE=%d' % enabled, *selected,
                             '-DCJSON_HIDE_SYMBOLS', '-I' + str(app / 'media'), '-I' + str(app / 'platform'),
-                            '-I' + str(sdk / 'components/thirdparty/CJSON'), str(c), str(args.cjson),
+                            '-I' + str(sdk / 'components/thirdparty/CJSON'), '-I' + str(opus / 'include'), str(c), str(args.cjson),
                             '-o', str(exe), '-lm'], check=True)
             subprocess.run([str(exe)], check=True, timeout=20)
 

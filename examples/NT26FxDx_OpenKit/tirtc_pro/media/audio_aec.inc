@@ -17,6 +17,10 @@
 #define AEC_ERR_FAULT (-41)
 #define AEC_ERR_BUSY DEMO_AI_AUDIO_ERR_PLAY_BUSY
 
+#if defined(TIRTC_AUDIO_FREE_GUARD_ENABLE) && TIRTC_AUDIO_FREE_GUARD_ENABLE
+#include "audio_free_guard.h"
+#endif
+
 static liot_task_t s_aec_task;
 static liot_mutex_t s_aec_levels_mutex;
 static bool s_aec_hw_ready;
@@ -118,34 +122,37 @@ static void aec_worker_step(void)
              * Keep DMA alive briefly so the SDK timer can consume common
              * TX leftovers before RecordStop removes I2S. This is best
              * effort: retain the SDK cleanup/fault path if it cannot drain. */
-            TIRTC_LOG_DEBUG("[AI-AEC] muted drain begin t=%lu\r\n",
-                       (unsigned long)liot_rtos_get_running_time());
             liot_rtos_task_sleep_ms(AEC_DRAIN_GRACE_MS);
             /* Match _Liot_Aud3aDeInit: stop recording/VEM before playback.
              * PlayStreamStop with live RX directly deinitializes shared
              * I2S without the record-stop handshake; board logs show panic
              * before that call returns. RecordStreamStop quiesces RX first.
              * Keep use3A/config alive so the existing engine can restart. */
-            TIRTC_LOG_DEBUG("[AI-AEC] stop record begin t=%lu\r\n",
-                       (unsigned long)liot_rtos_get_running_time());
+#if defined(TIRTC_AUDIO_FREE_GUARD_ENABLE) && TIRTC_AUDIO_FREE_GUARD_ENABLE
+            demo_audio_free_guard_begin_stop();
+#endif
             ret = Liot_AudioRecordStreamStop();
-            if (ret != L_AUD_ERR_SUCCESS || TIRTC_ENABLE_DEBUG_LOG) liot_trace("[AI-AEC] stop record done ret=%d t=%lu\r\n",
+            if (ret != L_AUD_ERR_SUCCESS) liot_trace("[AI-AEC] stop record done ret=%d t=%lu\r\n",
                        (int)ret, (unsigned long)liot_rtos_get_running_time());
             if (ret == L_AUD_ERR_SUCCESS) {
-                TIRTC_LOG_DEBUG("[AI-AEC] stop play begin t=%lu\r\n",
-                           (unsigned long)liot_rtos_get_running_time());
                 Liot_AudErr_e play_ret = Liot_AudioPlayStreamStop();
-                if (play_ret != L_AUD_ERR_SUCCESS || TIRTC_ENABLE_DEBUG_LOG) liot_trace("[AI-AEC] stop play done ret=%d t=%lu\r\n",
+                if (play_ret != L_AUD_ERR_SUCCESS) liot_trace("[AI-AEC] stop play done ret=%d t=%lu\r\n",
                            (int)play_ret, (unsigned long)liot_rtos_get_running_time());
                 if (play_ret != L_AUD_ERR_SUCCESS) ret = play_ret;
             }
-            if (ret != L_AUD_ERR_SUCCESS || TIRTC_ENABLE_DEBUG_LOG) liot_trace("[AI-AEC] streams stopped combined_ret=%d t=%lu\r\n",
+#if defined(TIRTC_AUDIO_FREE_GUARD_ENABLE) && TIRTC_AUDIO_FREE_GUARD_ENABLE
+            if (ret == L_AUD_ERR_SUCCESS) {
+                if (demo_audio_free_guard_reclaim() != 0) {
+                    ret = L_AUD_ERR_EXECUTE;
+                    liot_trace("[AI-AEC] stop ownership check failed; capture restart blocked\r\n");
+                }
+            }
+#endif
+            if (ret != L_AUD_ERR_SUCCESS) liot_trace("[AI-AEC] streams stopped combined_ret=%d t=%lu\r\n",
                        (int)ret, (unsigned long)liot_rtos_get_running_time());
             if (ret == L_AUD_ERR_SUCCESS && !s_aec_fault) {
-                TIRTC_LOG_DEBUG("[AI-AEC] capture rebuild begin t=%lu\r\n",
-                           (unsigned long)liot_rtos_get_running_time());
                 restart_ret = aec_start();
-                if (restart_ret != 0 || TIRTC_ENABLE_DEBUG_LOG) liot_trace("[AI-AEC] capture rebuild done ret=%d t=%lu\r\n",
+                if (restart_ret != 0) liot_trace("[AI-AEC] capture rebuild done ret=%d t=%lu\r\n",
                            restart_ret, (unsigned long)liot_rtos_get_running_time());
                 if (restart_ret != 0) {
                     /* The SDK may have partially started before failing. */
@@ -154,10 +161,8 @@ static void aec_worker_step(void)
                 } else {
                     /* Reinitialization resets codec registers. Keep Stop
                      * silent until a later record/play restores the levels. */
-                    TIRTC_LOG_DEBUG("[AI-AEC] rebuild mute begin t=%lu\r\n",
-                               (unsigned long)liot_rtos_get_running_time());
                     restart_ret = aec_mute();
-                    if (restart_ret != 0 || TIRTC_ENABLE_DEBUG_LOG) liot_trace("[AI-AEC] rebuild mute done ret=%d t=%lu\r\n",
+                    if (restart_ret != 0) liot_trace("[AI-AEC] rebuild mute done ret=%d t=%lu\r\n",
                                restart_ret, (unsigned long)liot_rtos_get_running_time());
                 }
             }
@@ -284,10 +289,8 @@ static int aec_start(void)
     if (!s_aec_running) {
         s_aec_seen_capture = false;
         s_aec_running = true; /* Permit an immediate ISR during Start. */
-        TIRTC_LOG_DEBUG("[AI-AEC] RecordStream begin t=%lu\r\n",
-                   (unsigned long)liot_rtos_get_running_time());
         ret = Liot_AudioRecordStream(aec_record_callback);
-        if (ret != L_AUD_ERR_SUCCESS || TIRTC_ENABLE_DEBUG_LOG) liot_trace("[AI-AEC] RecordStream done ret=%d t=%lu\r\n",
+        if (ret != L_AUD_ERR_SUCCESS) liot_trace("[AI-AEC] RecordStream done ret=%d t=%lu\r\n",
                    ret, (unsigned long)liot_rtos_get_running_time());
         if (ret != L_AUD_ERR_SUCCESS) {
             s_aec_running = false;
@@ -367,10 +370,8 @@ static int aec_stop(const demo_ai_audio_lease_t *lease)
      * ensures a level write already in progress cannot undo our mute.
      * Publish worker teardown only after the codec write returns: stopping
      * already blocks new feeds, but teardown can deinitialize that codec. */
-    TIRTC_LOG_DEBUG("[AI-AEC] stop mute begin t=%lu\r\n",
-               (unsigned long)liot_rtos_get_running_time());
     mute_ret = aec_mute();
-    if (mute_ret != 0 || TIRTC_ENABLE_DEBUG_LOG) liot_trace("[AI-AEC] stop mute done ret=%d t=%lu\r\n",
+    if (mute_ret != 0) liot_trace("[AI-AEC] stop mute done ret=%d t=%lu\r\n",
                mute_ret, (unsigned long)liot_rtos_get_running_time());
     liot_rtos_enter_critical();
     if (mute_ret != 0) s_aec_fault = true;
@@ -597,7 +598,7 @@ static int aec_apply_levels(const demo_ai_audio_lease_t *lease,
          * zero: a successful return is not proof of a successful read or
          * write, so subsequent 100-ms checks remain enabled after retry. */
         s_levels_dirty = true;
-        if (read_ret != L_AUD_ERR_SUCCESS || TIRTC_ENABLE_DEBUG_LOG) liot_trace("[AI-AUDIO] codec level drift: read=%d expected=%d ret=%d; restoring\r\n",
+        if (read_ret != L_AUD_ERR_SUCCESS) liot_trace("[AI-AUDIO] codec level drift: read=%d expected=%d ret=%d; restoring\r\n",
                    actual, expected, (int)read_ret);
     }
     /* A read may yield to Stop or an owner change. Never restore volume
@@ -639,14 +640,6 @@ static int aec_apply_levels(const demo_ai_audio_lease_t *lease,
     if (s_aec_stopping) s_levels_dirty = true;
     (void)liot_rtos_mutex_unlock(s_aec_levels_mutex);
 #endif
-    TIRTC_LOG_DEBUG("[AI-AUDIO] levels applied: speaker L%u sw=%u codec=%u, "
-               "mic L%u gain=%u volume=%u\r\n",
-               (unsigned int)speaker_level,
-               (unsigned int)speaker_volume,
-               (unsigned int)codec_volume,
-               (unsigned int)mic_level,
-               (unsigned int)mic_gain,
-               (unsigned int)mic_volume);
     /* Preserve a simultaneous UI update for the next service point. */
     if (speaker_level != s_speaker_level || mic_level != s_mic_level)
     {
