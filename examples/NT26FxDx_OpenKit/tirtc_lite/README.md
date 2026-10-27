@@ -185,6 +185,7 @@ AEC 配置位于 `config/tirtc_config.mk`，默认 `TIRTC_AUDIO_AEC_DELAY=10`。
 lite 应用位于 [examples/NT26FxDx_OpenKit/tirtc_lite](.)：利尔达 SDK 提供 4G、系统和硬件能力，应用完成绑定与呼叫信令，TiRTC 负责实时连接及音频、命令传输。
 
 - [当前设备操作](docs/当前设备操作.md)：绑定、按键、AI 呼叫、网页创建/加入多人房间及 OLED 状态。
+- [TiRTC 设备 ID 获取与绑定流程（Lite / Pro 通用）](../docs/TiRTC设备ID获取与绑定流程.md)：ID / 密钥来源、六位码绑定、重启恢复与 SDK 启动。
 - [AI 呼叫微信与设备配置](docs/AI呼叫微信与设备配置详解.md)：联系人准备、智能体和设备插件填写示例。
 - [代码与流程详解](docs/代码与流程详解.md)：文件职责、模块架构、AI 转呼和多人对讲业务流程。
 - [TiRTC 接口调用与模块流程](docs/TiRTC接口调用与模块流程.md)：SDK 调用位置、参数与回调，以及 AI 呼叫命令和多人房间信令。

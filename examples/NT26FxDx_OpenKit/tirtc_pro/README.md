@@ -226,7 +226,9 @@ https://github.com/user-attachments/assets/c5d0ade8-9627-4e2a-9795-d41af390b7c8
 <a id="development"></a>
 ## 5. 从源码接入与二次开发
 
-面向使用者的文档收敛为 **五篇**，按需逐步深入：
+设备身份接入见 [TiRTC 设备 ID 获取与绑定流程（Lite / Pro 通用）](../docs/TiRTC设备ID获取与绑定流程.md)，包括 ID / 密钥来源、六位码绑定、重启恢复与 SDK 启动。
+
+本版操作与业务文档分为 **五篇**，按需逐步深入：
 
 | 文档 | 读完可以做什么 |
 | --- | --- |
