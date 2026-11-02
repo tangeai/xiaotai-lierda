@@ -250,6 +250,6 @@ https://github.com/user-attachments/assets/c5d0ade8-9627-4e2a-9795-d41af390b7c8
 
 - [TiRTC 产品文档](https://docs.tange.ai/products/tirtc/)：实时音视频产品及接入资料。
 - [小钛利尔达参考工程](https://github.com/tangeai/xiaotai-lierda)：本页采用“功能—硬件—快速烧录—开发”阅读顺序，官方资料按需查阅，操作与参数以当前触屏产品源码为准。
-- [小钛 ESP32 参考工程](https://github.com/tangeai/xiaotai-esp32)：UI 与产品交互参考，不能直接照搬其硬件参数。
+- [小钛 ESP32 参考工程](https://github.com/tangeai/xiaotai)：UI 与产品交互参考，不能直接照搬其硬件参数。
 - [设备能力协议](https://github.com/tangeai/tirtc-server-example/blob/main/thing-connect/api-reference.md)：服务端业务与能力声明参考，部署服务版本需与设备配套。
 - 探鸽自有应用采用 [MIT](LICENSE)；原厂派生代码、TiRTC 预编译 SDK、第三方组件及字体保留各自许可，详见 [SDK 分发说明](sdk/README.md) 与 [应用许可范围](THIRD_PARTY_NOTICES.md)。

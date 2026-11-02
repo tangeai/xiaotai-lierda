@@ -287,7 +287,7 @@ WX TALK / DEV TALK              对方接听，通话建立
 
 ## 9. 参考来源与本工程的对应关系
 
-本文最初参考了小钛 ESP32 仓库早期 `esp32-s3/minimal-system-examples/README.md` 的 AT 示例，同时核对当前利尔达源码和平台页面。后续复查时该 GitHub 路径已返回 404，当前主分支展示的是 S3/P4 APP，见[小钛 ESP32 当前项目说明](https://github.com/tangeai/xiaotai-esp32)。下表记录的是早期 AT 示例的对应关系，不代表当前 GitHub APP 的完整配置说明。本文第 3～8 节的具体参数与操作以本利尔达工程和实际平台表单为依据。
+本文最初参考了小钛 ESP32 仓库早期 `esp32-s3/minimal-system-examples/README.md` 的 AT 示例，同时核对当前利尔达源码和平台页面。后续复查时该 GitHub 路径已返回 404，当前主分支展示的是 S3/P4 APP，见[小钛 ESP32 当前项目说明](https://github.com/tangeai/xiaotai)。下表记录的是早期 AT 示例的对应关系，不代表当前 GitHub APP 的完整配置说明。本文第 3～8 节的具体参数与操作以本利尔达工程和实际平台表单为依据。
 
 | 内容 | 早期 ESP32 AT 示例 | 本利尔达工程 |
 | --- | --- | --- |

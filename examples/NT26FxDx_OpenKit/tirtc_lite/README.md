@@ -190,7 +190,7 @@ lite 应用位于 [examples/NT26FxDx_OpenKit/tirtc_lite](.)：利尔达 SDK 提�
 - [代码与流程详解](docs/代码与流程详解.md)：文件职责、模块架构、AI 转呼和多人对讲业务流程。
 - [TiRTC 接口调用与模块流程](docs/TiRTC接口调用与模块流程.md)：SDK 调用位置、参数与回调，以及 AI 呼叫命令和多人房间信令。
 
-[TiRTC 官方文档](https://docs.tange.ai/products/tirtc/) · [WebRTC / TiRTC 基础知识](https://github.com/tangeai/xiaotai-esp32/blob/main/docs/README_CN.md)
+[TiRTC 官方文档](https://docs.tange.ai/products/tirtc/) · [WebRTC / TiRTC 基础知识](https://github.com/tangeai/xiaotai)
 
 应用源码、利尔达 SDK、TiRTC SDK 及第三方组件分别遵循各自授权声明。
 

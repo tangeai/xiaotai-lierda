@@ -379,7 +379,7 @@ AI 上行是 20 ms / 320 个 16 kHz PCM sample，经 Opus 编码发送。当前 
 
 **ESP32 参数兼容与边界**
 
-对照 [P4 参数解析](https://github.com/tangeai/xiaotai-esp32/blob/cb30059b6611acad5f220fe1c4b301bfe218dee2/esp32-p4/complete-applications/device-monitor/main/services/ai_chat_events.c#L244)及 [S3 参数解析](https://github.com/tangeai/xiaotai-esp32/blob/cb30059b6611acad5f220fe1c4b301bfe218dee2/esp32-s3/complete-applications/device-monitor/main/services/ai_chat_events.c#L240)，兼容以下入参；后台仍建议配置标准 `target`，不必改插件名称。
+对照 P4 参数解析（历史来源：`https://github.com/tangeai/xiaotai-esp32/blob/cb30059b6611acad5f220fe1c4b301bfe218dee2/esp32-p4/complete-applications/device-monitor/main/services/ai_chat_events.c#L244`；[当前项目主页](https://github.com/tangeai/xiaotai)）及 S3 参数解析（历史来源：`https://github.com/tangeai/xiaotai-esp32/blob/cb30059b6611acad5f220fe1c4b301bfe218dee2/esp32-s3/complete-applications/device-monitor/main/services/ai_chat_events.c#L240`；[当前项目主页](https://github.com/tangeai/xiaotai)），兼容以下入参；后台仍建议配置标准 `target`，不必改插件名称。
 
 | 项目 | 优先顺序 |
 | --- | --- |

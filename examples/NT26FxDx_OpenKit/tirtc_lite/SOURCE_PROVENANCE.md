@@ -114,3 +114,5 @@ proprietary materials，不受仓库 MIT 许可证覆盖；进一步分发、修
 5. 保留 `LICENSES/`、`THIRD_PARTY_NOTICES.md` 及所有第三方原始通知。
 6. 运行 SPDX/REUSE 扫描；供应 SDK 在外部 SBOM 中标为 `NOASSERTION` 或其真实许可，
    不得伪标 Apache/MIT。
+
+当前项目入口：[小钛项目主页](https://github.com/tangeai/xiaotai)。历史仓库地址仅作为来源标识保留。

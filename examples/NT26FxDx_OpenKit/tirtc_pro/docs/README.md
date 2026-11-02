@@ -108,6 +108,6 @@ Pro 使用 `CODE_REGION_ADJUST=0x4B000`，程序区为 1112 KiB，内部文件�
 - [项目首页中的利尔达教程](../README.md#lierda-guides)
 - [TiRTC 官方文档](https://docs.tange.ai/products/tirtc/)
 - [lite 语音产品操作文档](../../tirtc_lite/docs/当前设备操作.md)
-- [小钛 ESP32 参考](https://github.com/tangeai/xiaotai-esp32)
+- [小钛 ESP32 参考](https://github.com/tangeai/xiaotai)
 
 硬件教程解决“板子怎样跑起来”；操作篇解决“本产品怎样用”；接入篇解决“怎样把 TiRTC 接到自己的产品”。参考工程与当前产品并不具有完全相同的 UI、媒体能力和持久化行为。

@@ -6,7 +6,7 @@
 
 | 文件 | 来源与作用 |
 |---|---|
-| `lv_font_cn_14.c.gz` | [XiaoTai 固定提交 f718663 的 main/ui 字库](https://github.com/tangeai/xiaotai-esp32/tree/f7186630ed63f1e26838b8394e3e83a7e032646c/waveshare-esp32p4-xiaotai/main/ui)，原始 14px、4bpp、未压缩字形表。 |
+| `lv_font_cn_14.c.gz` | XiaoTai 固定提交 f718663 的 main/ui 字库（历史来源：`https://github.com/tangeai/xiaotai-esp32/tree/f7186630ed63f1e26838b8394e3e83a7e032646c/waveshare-esp32p4-xiaotai/main/ui`；[当前项目主页](https://github.com/tangeai/xiaotai)），原始 14px、4bpp、未压缩字形表。 |
 | `supplemental_font_14.c.gz` | 已有工程中 `U+76CA 益` 的补字。原字库遗漏此字；补充位图来自当时的 SimHei 14px 生成结果，现直接复用 91 字节字形数据。 |
 | `MANIFEST.json` | 两份解压后 C 源码的 SHA-256、补字字体来源哈希及原生成参数。脚本读取时强制校验。 |
 
