@@ -425,7 +425,7 @@ AI 上行是 20 ms / 320 个 16 kHz PCM sample，经 Opus 编码发送。当前 
 本地约 12 秒仍未完成返回 `contacts_timeout`，失败或不可用返回 `contacts_unavailable`；
 均不是 `not_found/offline`，也不使用旧缓存兜底。12 秒仅为本地预算，不是云端规定。
 拒绝后保持 AI，用户可稍后重新下令；本次刷新成功则直接继续原呼叫，不必重复下令。
-AI 入口另有一次异步预热，没有周期轮询或 TTL；HTTP 失败仍保留原列表显示并约 10 秒退避，
+AI 入口不额外刷新联系人，每次有效呼叫仍按上述 ticket 请求刷新；HTTP 失败保留原列表显示并约 10 秒退避，
 但后续普通重试不能把已失败的 ticket 改为成功。
 
 同一 pending RPC id 去重，其他 id 返回 busy；取消、会话结束或换请求后丢弃迟到结果。
@@ -803,7 +803,7 @@ GROUP 页面仍允许真实 WX / DEV MQTT 来电。`demo_group_intercom_reserve_
 
 预约成功或前台许可撤销时还会记录 `s_suspend_requested`。即使来电马上取消、ticket 已释放或 UI 已恢复许可，worker 仍会先完成这一次暂停清理，再重新加入，避免“界面显示收听，接收门控却已经关闭”的无声状态。预约不意味着自动接听，也不允许跳过 runtime 的真实释放条件。
 
-DEV 的普通冷恢复 `GET /v1/call/room` 是另一条路径：`dev_recovery_owner_safe()` 与 `dev_recover_room()` 在发布 `s_recovery_inflight` 前，检查 GROUP 未启用、媒体已 idle 且没有来电预约；进入 GROUP 后延后这类查询，完整退出后恢复。这样普通查询不会把 DEV 标记忙而误触 GROUP 暂停；原 `demo_dev_chat_is_idle()` 的在途保护、真实 MQTT 来电和实际呼叫恢复路径保留。
+DEV 的普通冷恢复 `GET /v1/call/room` 是另一条路径：`dev_recovery_owner_safe()` 与 `dev_recover_room()` 在发布 `s_recovery_inflight` 前，检查 GROUP 未启用、媒体已 idle 且没有来电预约；进入 GROUP 后延后这类查询，完整退出后恢复。这样普通查询不会把 DEV 标记忙而误触 GROUP 暂停。离开 HOME 准入时，未提交恢复处理（commit）的后台 GET 标记取消，为 UI 准入让路，HTTP 正常清理后丢弃结果；已 commit 的在途保护、真实 MQTT 来电和实际呼叫恢复路径保留。
 
 AI / WX / DEV / LIVE 与 GROUP 仍按唯一媒体 owner 互斥。LIVE 只在 HOME 准入，GROUP 页面不允许它抢占；退出 GROUP 等媒体释放后，才恢复 HOME 和原业务入口。`HWDEMO_GROUP_ROOM_EN=n` 时这些 GROUP 条件分支不编译，原模块继续使用原接口。
 
@@ -912,7 +912,7 @@ LIVE 和 runtime；零超时只读状态，不在按键处理里等待。就绪�
 `KEY1` 可重试；有效来电抢占、掉网或绑定失效取消旧请求。AI 凭据预取继续由原 worker 处理。
 已提交但未接通 DEV 主叫的约 10 秒保护、原 DEV 错误状态约 3 秒可见期限、AI 转呼约 6 秒
 和来电接听约 6 秒路径均保留。已接通 DEV 挂断只取消额外固定保护，不改变 SDK 回收策略；
-实际 cleanup 或已提交的房间查询仍可能延迟进入 AI，也不保证其他 UI 路径无阻塞。
+实际 cleanup 或已 commit 恢复的房间查询仍可能延迟进入 AI；已取消且未 commit 的后台 GET 可让路，也不保证其他 UI 路径无阻塞。
 
 ### 11.2 需要恢复整个 SDK 时
 

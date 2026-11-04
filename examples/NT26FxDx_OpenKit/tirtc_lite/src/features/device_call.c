@@ -339,6 +339,9 @@ static char s_existing_room_hint[DEV_ROOM_MAX];
 static bool s_contacts_ready;
 static volatile bool s_audio_owned;
 static volatile bool s_recovery_inflight;
+/* Only an uncommitted background room GET may yield to a UI entry. */
+static bool s_recovery_cancelled;
+static bool s_recovery_committing;
 static volatile uint32_t s_audio_queued;
 static volatile uint32_t s_audio_queued_samples;
 static volatile uint32_t s_audio_producers;
@@ -2706,6 +2709,8 @@ static int dev_recover_room(void)
         return 0;
     }
     s_recovery_inflight = true;
+    s_recovery_cancelled = false;
+    s_recovery_committing = false;
     liot_rtos_exit_critical();
 
     ret = dev_http(DEMO_BIND_HTTP_GET, "/v1/call/room", NULL);
@@ -2713,6 +2718,17 @@ static int dev_recover_room(void)
     {
         goto done;
     }
+    /* HTTP still completes its normal cleanup. Arbitrate result ownership
+     * against UI entry before any room action or TiRTC claim. */
+    liot_rtos_enter_critical();
+    if (s_recovery_cancelled || !s_home_allowed)
+    {
+        liot_rtos_exit_critical();
+        liot_trace("[DEV] background room check yielded to UI\r\n");
+        goto done;
+    }
+    s_recovery_committing = true;
+    liot_rtos_exit_critical();
     root = demo_json_parse(s_http_response);
     code = root != NULL ?
                cJSON_GetObjectItemCaseSensitive(root, "code") : NULL;
@@ -2834,6 +2850,8 @@ done:
     cJSON_Delete(root);
     liot_rtos_enter_critical();
     s_recovery_inflight = false;
+    s_recovery_cancelled = false;
+    s_recovery_committing = false;
     liot_rtos_exit_critical();
     if (ret != 0)
     {
@@ -4582,6 +4600,11 @@ void demo_dev_chat_set_home_allowed(bool allowed)
 {
     liot_rtos_enter_critical();
     s_home_allowed = allowed;
+    if (!allowed && s_recovery_inflight && !s_recovery_committing)
+    {
+        /* Sticky until this GET ends, even if HOME opens again meanwhile. */
+        s_recovery_cancelled = true;
+    }
     liot_rtos_exit_critical();
 }
 
@@ -4602,7 +4625,8 @@ bool demo_dev_chat_is_idle(void)
 #endif
            !s_call_starting &&
            !s_existing_room_recovery &&
-           !s_recovery_inflight &&
+           (!s_recovery_inflight ||
+            (s_recovery_cancelled && !s_recovery_committing)) &&
            s_conn == NULL && !s_audio_owned && !s_tirtc_claimed &&
            s_audio_producers == 0U && s_audio_queued == 0U &&
            !dev_deadline_pending(s_reject_incoming_until);

@@ -40,8 +40,8 @@ TIRTC_LIBRARY_LOG_LEVEL   ?= 3
 TIRTC_TRANSPORT_LOG_LEVEL ?= 3
 TIRTC_TRANSPORT_STATS_EN  ?= 0
 
-# One packet starts playback with the lowest possible first-sound latency.
-# Raise to 2 or 3 on unusually jittery networks to trade 20/40 ms for margin.
+# Packet threshold for the non-AEC fallback only. The default AEC AI path
+# buffers 80 ms of decoded PCM, with a 120-ms owner-loop wait budget.
 TIRTC_AI_PREBUFFER_PACKETS ?= 1
 
 # Lite-only AEC. Keep n for the tested ordinary PCM fallback.

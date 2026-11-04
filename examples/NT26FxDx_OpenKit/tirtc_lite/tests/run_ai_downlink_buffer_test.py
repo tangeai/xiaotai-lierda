@@ -61,6 +61,16 @@ static uint32_t play_calls,busy_calls,decode_calls,signals,backpressure_logs;
 static uint32_t critical_depth,cases;
 static bool force_queue_failure,inject_audio_after_empty;
 static void packet(unsigned id);
+static bool active=true,s_remote_ended=true,s_play_prebuffering;
+static uint32_t s_prebuffer_start_ms,s_prebuffer_starts,s_prebuffer_ready,s_prebuffer_timeouts;
+static uint32_t s_prebuffer_tail_flushes,s_prebuffer_wait_ms,s_prebuffer_max_ms;
+static uint32_t done_at,decoded_length[65536];
+static bool cancel_decode;
+static bool ai_request_is_active(void){return active;}
+static bool demo_ai_audio_play_done(void *lease){
+    assert(lease==&s_audio_lease);
+    return !buffered && (int32_t)(now_ms-done_at)>=0;
+}
 static void liot_rtos_enter_critical(void){ ++critical_depth; }
 static void liot_rtos_exit_critical(void){ assert(critical_depth); --critical_depth; }
 static void liot_trace(const char *format, ...){
@@ -101,8 +111,11 @@ static int demo_ai_opus_decode(const uint8_t *p,unsigned n,int16_t *pcm,unsigned
     id=p[0]+256U*p[1];
     if(id==65535U) return -1;
     if(id==65534U) return 0;
-    for(i=0;i<320U;i++) pcm[i]=(int16_t)id;
-    return 320;
+    if(cancel_decode) active=false;
+    unsigned samples=decoded_length[id] ? decoded_length[id] : 320U;
+    assert(samples<=cap);
+    for(i=0;i<samples;i++) pcm[i]=(int16_t)id;
+    return (int)samples;
 }
 static int demo_ai_audio_play(void *lease,const int16_t *pcm,unsigned count){
     assert(lease==&s_audio_lease && count>0U && critical_depth==0U);
@@ -112,6 +125,7 @@ static int demo_ai_audio_play(void *lease,const int16_t *pcm,unsigned count){
     memcpy(output+submitted,pcm,count*sizeof(*pcm));
     submitted+=count;
     buffered+=count;
+    done_at=now_ms+160U;
     return 0;
 }
 '''
@@ -119,6 +133,12 @@ static int demo_ai_audio_play(void *lease,const int16_t *pcm,unsigned count){
 SUFFIX = r'''
 static void reset(void){
     assert(critical_depth==0U);
+    /* Original ownership/drop cases use the tail path without startup delay.
+     * The dedicated scenarios below enable the real startup/rebuffer gates. */
+    active=true;s_remote_ended=true;s_play_prebuffering=false;cancel_decode=false;
+    s_prebuffer_start_ms=s_prebuffer_starts=s_prebuffer_ready=s_prebuffer_timeouts=0;
+    s_prebuffer_tail_flushes=s_prebuffer_wait_ms=s_prebuffer_max_ms=done_at=0;
+    memset(decoded_length,0,sizeof(decoded_length));
     memset(s_audio_pool_used,0,sizeof(s_audio_pool_used));
     memset(s_command_pool_used,0,sizeof(s_command_pool_used));
     memset(s_audio_pool,0,sizeof(s_audio_pool));
@@ -343,7 +363,7 @@ static void test_discard_callback_race(void){
     assert(s_rx_dropped==0U);
     ++cases;
 }
-int main(void){
+static int old_main(void){
     test_forty_packet_burst();
     test_twice_realtime();
     test_capacity_and_every_slot();
@@ -360,6 +380,143 @@ int main(void){
 }
 '''
 
+
+PREBUFFER_SCENARIOS = r'''
+#if DEMO_AI_AUDIO_AEC_ENABLE
+static bool s_capture_timeout_active;
+static void fresh(void){reset();s_remote_ended=false;}
+static void reenter(void){
+    /* ACTUAL_REENTRY_RESET */
+    s_first_play_reported=false;
+    active=true;s_remote_ended=false;
+    buffered=0U;done_at=0U;
+}
+static void interrupt_now(void){
+    /* ACTUAL_INTERRUPT_RESET */
+    buffered=0U;done_at=0U;
+}
+static void test_regular_stream(void){
+    fresh();
+    for(unsigned i=1;i<=4;i++){
+        packet(i);
+        assert(ai_play_downlink()==(i==4 ? 1:0));
+        if(i<4){assert(play_calls==0 && s_play_prebuffering);now_ms+=20;}
+    }
+    assert(submitted==1280 && s_prebuffer_ready==1 && s_prebuffer_wait_ms==60);
+    packet(5);now_ms+=20;assert(ai_play_downlink()==1);
+    assert(s_prebuffer_starts==1 && submitted==1600 && s_rx_dropped==0);
+    expect_frames(1,5);cases++;
+}
+static void test_fast_first_with_warmup(void){
+    fresh();buffered=1920;done_at=now_ms+160;
+    for(unsigned i=1;i<=4;i++) packet(i);
+    assert(!demo_ai_audio_play_done(&s_audio_lease));
+    assert(ai_play_downlink()==1 && s_prebuffer_starts==1 && s_prebuffer_ready==1);
+    assert(submitted==1280 && s_prebuffer_wait_ms==0);cases++;
+    fresh();buffered=1920;done_at=now_ms+160;packet(1);
+    assert(ai_play_downlink()==0 && s_play_prebuffering && play_calls==0);
+    assert(s_play_pending_samples==320);cases++;
+}
+static void test_lengths_and_short_timeout(void){
+    unsigned lengths[]={320,640,960,1920};
+    for(unsigned i=0;i<4;i++){
+        fresh();decoded_length[1]=lengths[i];packet(1);
+        assert(ai_play_downlink()==(lengths[i]>=1280 ? 1:0));
+        if(lengths[i]<1280){
+            now_ms+=119;assert(ai_play_downlink()==0 && play_calls==0);
+            now_ms++;assert(ai_play_downlink()==1);
+            assert(s_prebuffer_timeouts==1 && s_prebuffer_wait_ms==120);
+        }else assert(s_prebuffer_ready==1 && s_prebuffer_wait_ms==0);
+        assert(submitted==lengths[i] && s_rx_dropped==0);cases++;
+    }
+    fresh();decoded_length[1]=960;packet(1);assert(ai_play_downlink()==0);
+    now_ms+=20;packet(2);assert(ai_play_downlink()==1);
+    assert(submitted==1280 && s_prebuffer_ready==1);cases++;
+    fresh();decoded_length[1]=960;packet(1);assert(ai_play_downlink()==0);
+    decoded_length[2]=1920;packet(2);assert(ai_play_downlink()==1);
+    assert(submitted==2880 && s_prebuffer_ready==1);cases++;
+}
+static void test_timeout_clocks(void){
+    for(unsigned i=0;i<2;i++){
+        fresh();now_ms=i ? UINT32_MAX-60U:0;packet(1);
+        assert(ai_play_downlink()==0);now_ms+=119;
+        assert(ai_play_downlink()==0);now_ms++;assert(ai_play_downlink()==1);
+        assert(s_prebuffer_wait_ms==120);cases++;
+    }
+    fresh();packet(1);assert(ai_play_downlink()==0);
+    now_ms+=100;assert(ai_play_downlink()==0);
+    /* Existing capture may occupy the owner for 120 ms. No new blocking wait. */
+    now_ms+=120;assert(ai_play_downlink()==1);
+    assert(s_prebuffer_max_ms==220 && s_prebuffer_timeouts==1);cases++;
+}
+static void test_backpressure_gate_once(void){
+    fresh();capacity=0;
+    for(unsigned i=1;i<=4;i++)packet(i);
+    assert(ai_play_downlink()==0 && s_prebuffer_ready==1 && !s_play_prebuffering);
+    int16_t copy[1280];memcpy(copy,s_play_pcm,sizeof(copy));
+    for(unsigned i=0;i<4;i++){now_ms+=20;assert(ai_play_downlink()==0);}
+    assert(s_prebuffer_starts==1 && s_prebuffer_ready==1 && s_prebuffer_timeouts==0);
+    assert(!memcmp(copy,s_play_pcm,sizeof(copy)) && s_play_pending_samples==1280);
+    capacity=4096;assert(ai_play_downlink()==1);expect_frames(1,4);
+    assert(s_rx_dropped==0);cases++;
+}
+static void test_rebuffer_and_remote_tail(void){
+    fresh();for(unsigned i=1;i<=4;i++)packet(i);assert(ai_play_downlink()==1);
+    buffered=0;now_ms+=80;packet(5);assert(ai_play_downlink()==1);
+    assert(s_prebuffer_starts==1); /* Conservative tail not fully drained yet. */
+    buffered=0;now_ms+=160;packet(6);assert(ai_play_downlink()==0);
+    assert(s_prebuffer_starts==2 && s_play_prebuffering);
+    s_remote_ended=true;assert(ai_play_downlink()==1);
+    assert(s_prebuffer_tail_flushes==1 && s_prebuffer_timeouts==0);
+    expect_frames(1,6);cases++;
+    fresh();s_remote_ended=true;packet(1);assert(ai_play_downlink()==1);
+    assert(s_prebuffer_starts==0);expect_frames(1,1);cases++;
+}
+static void test_cancel_interrupt_reentry(void){
+    fresh();packet(1);assert(ai_play_downlink()==0);
+    active=false;now_ms+=200;assert(ai_play_downlink()==0 && submitted==0);
+    reenter();assert(!s_play_prebuffering && s_play_pending_samples==0 && s_prebuffer_starts==0);
+    packet(2);assert(ai_play_downlink()==0);now_ms+=120;assert(ai_play_downlink()==1);
+    assert(submitted==320 && output[0]==2);cases++;
+    fresh();packet(1);assert(ai_play_downlink()==0);packet(2);
+    interrupt_now();assert(queued==0 && !s_play_prebuffering && !s_play_pending_samples);
+    packet(3);assert(ai_play_downlink()==0);now_ms+=120;assert(ai_play_downlink()==1);
+    assert(submitted==320 && output[0]==3 && s_prebuffer_starts==2);cases++;
+    fresh();packet(1);cancel_decode=true;
+    assert(ai_play_downlink()==0 && submitted==0 && !active);cases++;
+    fresh();active=false;packet(1);assert(ai_play_downlink()==0 && decode_calls==0 && queued==1);cases++;
+}
+static void cleanup_reset(void){
+    /* ACTUAL_CLEANUP_RESET */
+}
+static void test_cleanup_and_normal_batch(void){
+    fresh();packet(1);assert(ai_play_downlink()==0 && s_play_prebuffering);
+    active=false;cleanup_reset();
+    assert(!s_play_prebuffering && !s_play_pending_samples && !s_prebuffer_start_ms);
+    reenter();assert(!s_play_prebuffering && !s_prebuffer_starts);cases++;
+    fresh();for(unsigned i=1;i<=4;i++)packet(i);assert(ai_play_downlink()==1);
+    for(unsigned i=5;i<=12;i++)packet(i);
+    assert(ai_play_downlink()==1 && submitted==2240 && queued==5);
+    assert(s_prebuffer_starts==1);cases++;
+}
+static void test_invalid_not_started(void){
+    fresh();packet(65535);assert(ai_play_downlink()==0);
+    assert(!s_play_prebuffering && s_prebuffer_starts==0 && s_rx_dropped==1);
+    now_ms+=1000;packet(1);assert(ai_play_downlink()==0 && s_prebuffer_start_ms==now_ms);cases++;
+}
+#endif
+int main(void){
+    old_main();
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    unsigned before=cases;
+    test_regular_stream();test_fast_first_with_warmup();test_lengths_and_short_timeout();
+    test_timeout_clocks();test_backpressure_gate_once();test_rebuffer_and_remote_tail();
+    test_cancel_interrupt_reentry();test_invalid_not_started();test_cleanup_and_normal_batch();
+    printf("PASS actual AI prebuffer: %u scenarios; samples/time/long frames/retry/fast-warm-start/cancel/interrupt/reentry/tail/clock\n",cases-before);
+#endif
+    return 0;
+}
+'''
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -382,7 +539,21 @@ def main():
              "ai_command_slot_acquire", "ai_command_slot_release",
              "ai_callback_producer_done", "ai_on_audio", "ai_play_downlink",
              "ai_discard_audio_queue")
-    body = definitions + prefix + "".join(function(source, name) for name in names) + SUFFIX
+    # Exercise the actual reset statements, so lifecycle tests cannot silently
+    # model a reset that production forgot to perform.
+    interrupt_start = source.index('else if (strcmp(method_text, "interrupt")')
+    interrupt = source[source.index("            ai_discard_audio_queue();", interrupt_start):
+                       source.index("            (void)demo_ai_audio_stop", interrupt_start)]
+    run_start = source.index("static int ai_run_session(void)")
+    reentry = source[source.index("    s_play_pending_samples = 0U;", run_start):
+                     source.index("    ai_discard_command_queue();", run_start)]
+    scenarios = PREBUFFER_SCENARIOS.replace("/* ACTUAL_INTERRUPT_RESET */", interrupt)
+    scenarios = scenarios.replace("/* ACTUAL_REENTRY_RESET */", reentry)
+    cleanup_start = source.index("static void ai_session_cleanup(")
+    cleanup = source[source.index("    s_play_pending_samples = 0U;", cleanup_start):
+                     source.index("    s_whip_done = false;", cleanup_start)]
+    scenarios = scenarios.replace("/* ACTUAL_CLEANUP_RESET */", cleanup)
+    body = definitions + prefix + "".join(function(source, name) for name in names) + SUFFIX + scenarios
     with tempfile.TemporaryDirectory(prefix="lite-ai-downlink-buffer-") as temp:
         for enabled in (0, 1):
             c = Path(temp) / f"downlink-{enabled}.c"

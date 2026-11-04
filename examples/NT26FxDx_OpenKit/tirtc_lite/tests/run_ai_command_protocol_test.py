@@ -39,6 +39,7 @@ static char s_start_request_id[] = "nt26-ai-7";
 static bool s_start_response_done, s_server_speaking, s_remote_ended;
 static int s_start_response_error, s_audio_lease;
 static unsigned s_last_audio_ms, s_play_pending_samples, s_prebuffer_start_ms;
+static bool s_play_prebuffering;
 static unsigned actions, stops, discards, resets, allocations, cases;
 static unsigned queued_audio, queued_at_stop;
 static bool reply_during_stop, s_capture_timeout_active;
@@ -72,6 +73,7 @@ static void reset(void) {
     s_start_response_done = s_server_speaking = s_remote_ended = false;
     s_start_response_error = 99;
     s_play_pending_samples = 320U; s_prebuffer_start_ms = 10U;
+    s_play_prebuffering = true;
     s_last_audio_ms = actions = stops = discards = resets = 0U;
     queued_audio = 1U; queued_at_stop = 0U; reply_during_stop = false;
     s_capture_timeout_active = true;
@@ -140,11 +142,17 @@ int main(void) {
     ignored("{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"round_start\"}");
     reset(); dispatch("{\"jsonrpc\":\"2.0\",\"method\":\"interrupt\"}");
     assert(stops == 1U && discards == 1U && resets == 1U);
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    assert(!s_play_prebuffering);
+#endif
     assert(!s_play_pending_samples && !s_prebuffer_start_ms); ++cases;
     reset(); reply_during_stop = true;
     dispatch("{\"jsonrpc\":\"2.0\",\"method\":\"interrupt\"}");
     assert(stops == 1U && discards == 1U && resets == 1U);
     assert(queued_at_stop == 0U && queued_audio == 2U);
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    assert(!s_play_prebuffering);
+#endif
     assert(!s_play_pending_samples && !s_prebuffer_start_ms);
 #if DEMO_AI_AUDIO_AEC_ENABLE
     assert(!s_capture_timeout_active);

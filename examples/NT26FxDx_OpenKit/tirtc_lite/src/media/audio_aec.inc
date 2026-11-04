@@ -17,6 +17,8 @@
 #define AEC_ERR_FAULT (-41)
 #define AEC_ERR_BUSY DEMO_AI_AUDIO_ERR_PLAY_BUSY
 
+#include "audio_free_guard.h"
+
 static liot_task_t s_aec_task;
 static liot_mutex_t s_aec_levels_mutex;
 static bool s_aec_hw_ready;
@@ -39,6 +41,38 @@ static __attribute__((aligned(16))) int16_t s_aec_play_chunk[AEC_CHUNK_SAMPLES];
 
 static bool aec_levels_lock(uint32_t timeout_ms);
 static int aec_start(void);
+
+/* Only reclaim after the vendor stop handshake. A public success return
+ * does not itself prove STOP_CNF; the pinned SDK discards that wait result. */
+static Liot_AudErr_e aec_reclaim_stopped_capture(void)
+{
+#if defined(TIRTC_AUDIO_FREE_GUARD_ENABLE) && TIRTC_AUDIO_FREE_GUARD_ENABLE
+    int result = demo_audio_free_guard_reclaim();
+    demo_audio_free_guard_stats_t stats;
+    demo_audio_free_guard_snapshot(&stats);
+    AUDIO_RESULT_LOG(result,
+        "[AI-AEC] buffer guard ret=%d skipped=%lu free_pcb=%u pending=%lu reclaimed=%lu cnf=%lu fault=%lu\r\n",
+        result, (unsigned long)stats.skipped, (unsigned)stats.free_pcb,
+        (unsigned long)stats.pending, (unsigned long)stats.reclaimed,
+        (unsigned long)stats.stop_confirmations, (unsigned long)stats.fault);
+    return result == 0 ? L_AUD_ERR_SUCCESS : L_AUD_ERR_EXECUTE;
+#else
+    return L_AUD_ERR_SUCCESS;
+#endif
+}
+
+/* A failed capture rebuild has no TX
+ * stream to stop. Use the same late-ISR protection as normal duplex stop. */
+static Liot_AudErr_e aec_stop_capture_only(void)
+{
+    Liot_AudErr_e ret;
+#if defined(TIRTC_AUDIO_FREE_GUARD_ENABLE) && TIRTC_AUDIO_FREE_GUARD_ENABLE
+    demo_audio_free_guard_begin_stop();
+#endif
+    ret = Liot_AudioRecordStreamStop();
+    if (ret == L_AUD_ERR_SUCCESS) ret = aec_reclaim_stopped_capture();
+    return ret;
+}
 
 /* These deadlines are at most one slot/tail into the future. A stale
  * deadline after weeks of idle must not become a future signed timestamp. */
@@ -128,6 +162,9 @@ static void aec_worker_step(void)
              * Keep use3A/config alive so the existing engine can restart. */
             AUDIO_DEBUG_LOG("[AI-AEC] stop record begin t=%lu\r\n",
                        (unsigned long)liot_rtos_get_running_time());
+#if defined(TIRTC_AUDIO_FREE_GUARD_ENABLE) && TIRTC_AUDIO_FREE_GUARD_ENABLE
+            demo_audio_free_guard_begin_stop();
+#endif
             ret = Liot_AudioRecordStreamStop();
             AUDIO_RESULT_LOG(ret, "[AI-AEC] stop record done ret=%d t=%lu\r\n",
                        (int)ret, (unsigned long)liot_rtos_get_running_time());
@@ -139,6 +176,7 @@ static void aec_worker_step(void)
                            (int)play_ret, (unsigned long)liot_rtos_get_running_time());
                 if (play_ret != L_AUD_ERR_SUCCESS) ret = play_ret;
             }
+            if (ret == L_AUD_ERR_SUCCESS) ret = aec_reclaim_stopped_capture();
             AUDIO_RESULT_LOG(ret, "[AI-AEC] streams stopped combined_ret=%d t=%lu\r\n",
                        (int)ret, (unsigned long)liot_rtos_get_running_time());
             if (ret == L_AUD_ERR_SUCCESS && !s_aec_fault) {
@@ -150,7 +188,7 @@ static void aec_worker_step(void)
                 if (restart_ret != 0) {
                     /* The SDK may have partially started before failing. */
                     s_aec_running = false;
-                    (void)Liot_AudioRecordStreamStop();
+                    (void)aec_stop_capture_only();
                 } else {
                     /* Reinitialization resets codec registers. Keep Stop
                      * silent until a later record/play restores the levels. */

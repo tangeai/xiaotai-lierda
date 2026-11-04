@@ -29,10 +29,34 @@ CFLAGS_DEFS += -DFEATURE_LIERDA_AUDIO_3A -DFEATURE_SUPPORT_APP_PCM_MEM_POOL
 else
 CFLAGS_DEFS += -DDEMO_AI_AUDIO_AEC_ENABLE=0
 endif
+# Reuse Pro's verified F6D_D late-buffer guard only with its exact base ABI.
+TIRTC_AUDIO_FREE_GUARD_EN ?= $(TIRTC_AUDIO_AEC_EN)
+ifeq ($(filter y n,$(TIRTC_AUDIO_FREE_GUARD_EN)),)
+$(error TIRTC_AUDIO_FREE_GUARD_EN must be y or n)
+endif
+ifeq ($(TIRTC_AUDIO_FREE_GUARD_EN),y)
+ifneq ($(TIRTC_AUDIO_AEC_EN),y)
+$(error The F6D_D audio free guard requires TIRTC_AUDIO_AEC_EN=y)
+endif
+ifneq ($(MODEMPKG),F6D_D)
+$(error The audio free guard requires the verified F6D_D base package)
+endif
+TIRTC_AUDIO_GUARD_BASE_SHA256 := $(word 1,$(shell sha256sum "$(TOP)/components/basePkg/F6D_D/ap_lierda_app.elf"))
+ifneq ($(TIRTC_AUDIO_GUARD_BASE_SHA256),9553cae08079eab350557b86d5474464ffabb3086e7055739c7b57fccc930c3d)
+$(error F6D_D base ELF changed; re-audit the audio free guard ABI)
+endif
+CFLAGS_DEFS += -DTIRTC_AUDIO_FREE_GUARD_ENABLE=1
+LDFLAGS += -Wl,--wrap=audioFreeRecordBuf -Wl,--wrap=halSetVoiceEngRetCallback
+LDFLAGS += -Wl,--defsym=ccioGetAudioServEnt=0x00934725
+LDFLAGS += -Wl,--defsym=ccioRbufGetFreePcbCnt=0x009290d1
+LDFLAGS += -Wl,--defsym=ccioRbufUngetPtUlPcb=0x00928f4d
+LDFLAGS += -Wl,--defsym=pro_audio_pcb_pool=0x080600a8
+LDFLAGS += -Wl,--defsym=halSetVoiceEngRetCallback=0x00a27c31
+endif
 # Changing the backend/tuning must invalidate existing objects, even when the
 # command-line override changes without editing a file. Keep vendor rules intact.
 TIRTC_AEC_STAMP := $(BUILDDIR)/lite_aec_config.h
-TIRTC_AEC_STAMP_UPDATE := $(shell mkdir -p "$(BUILDDIR)"; printf '%s\n' '$(TIRTC_AUDIO_AEC_EN) $(TIRTC_AUDIO_AEC_DELAY)' > "$(TIRTC_AEC_STAMP).tmp"; cmp -s "$(TIRTC_AEC_STAMP).tmp" "$(TIRTC_AEC_STAMP)" || cp "$(TIRTC_AEC_STAMP).tmp" "$(TIRTC_AEC_STAMP)"; rm -f "$(TIRTC_AEC_STAMP).tmp")
+TIRTC_AEC_STAMP_UPDATE := $(shell mkdir -p "$(BUILDDIR)"; printf '%s\n' '$(TIRTC_AUDIO_AEC_EN) $(TIRTC_AUDIO_AEC_DELAY) $(TIRTC_AUDIO_FREE_GUARD_EN)' > "$(TIRTC_AEC_STAMP).tmp"; cmp -s "$(TIRTC_AEC_STAMP).tmp" "$(TIRTC_AEC_STAMP)" || cp "$(TIRTC_AEC_STAMP).tmp" "$(TIRTC_AEC_STAMP)"; rm -f "$(TIRTC_AEC_STAMP).tmp")
 
 CUSTOM_COBJSTEMP := $(TIRTC_SRC_ROOT)/app/app_entry.o
 
@@ -221,6 +245,9 @@ endif
 # Every voice feature shares one ES8311/I2S owner.
 ifneq ($(filter y,$(HWDEMO_AI_CHAT_EN) $(HWDEMO_WECHAT_EN) $(HWDEMO_DEV_CHAT_EN) $(HWDEMO_LIVE_TALK_EN) $(HWDEMO_GROUP_ROOM_EN)),)
 CUSTOM_COBJSTEMP += $(TIRTC_SRC_ROOT)/media/audio_device.o
+ifeq ($(TIRTC_AUDIO_FREE_GUARD_EN),y)
+CUSTOM_COBJSTEMP += $(TIRTC_SRC_ROOT)/media/audio_free_guard.o
+endif
 endif
 
 ifneq ($(filter y,$(HWDEMO_WECHAT_EN) $(HWDEMO_DEV_CHAT_EN) $(HWDEMO_LIVE_TALK_EN) $(HWDEMO_GROUP_ROOM_EN)),)

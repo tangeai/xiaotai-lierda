@@ -81,7 +81,14 @@
 #define AI_DIAG_DETAIL_LIMIT           16U
 #define AI_DIAG_REPORT_MS              1000U
 #define AI_DECODE_MAX_SAMPLES          1920U
+#define AI_PLAY_STREAM_BATCH_SAMPLES   2560U
+#if DEMO_AI_AUDIO_AEC_ENABLE
+#define AI_PLAY_BATCH_SAMPLES          3200U
+#define AI_PLAY_PREBUFFER_SAMPLES      1280U /* 80 ms at 16 kHz. */
+#define AI_PLAY_PREBUFFER_TIMEOUT_MS   120U
+#else
 #define AI_PLAY_BATCH_SAMPLES          2560U
+#endif
 
 #define AI_ERR_CANCELLED               (-1000)
 #define AI_ERR_GET_TOKEN               (-1001)
@@ -250,6 +257,11 @@ static bool s_remote_ended;
 static volatile uint32_t s_last_audio_ms;
 static uint32_t s_play_pending_samples;
 static uint32_t s_prebuffer_start_ms;
+#if DEMO_AI_AUDIO_AEC_ENABLE
+static bool s_play_prebuffering;
+static uint32_t s_prebuffer_starts, s_prebuffer_ready, s_prebuffer_timeouts;
+static uint32_t s_prebuffer_tail_flushes, s_prebuffer_wait_ms, s_prebuffer_max_ms;
+#endif
 static demo_ai_audio_lease_t s_audio_lease = DEMO_AI_AUDIO_LEASE_INIT;
 static volatile bool s_audio_owned;
 static volatile bool s_tirtc_owned;
@@ -1937,6 +1949,7 @@ static void ai_handle_command(const ai_command_message_t *message)
             s_play_pending_samples = 0U;
             s_prebuffer_start_ms = 0U;
 #if DEMO_AI_AUDIO_AEC_ENABLE
+            s_play_prebuffering = false;
             s_capture_timeout_active = false;
 #endif
             (void)demo_ai_audio_stop(&s_audio_lease);
@@ -2056,19 +2069,69 @@ static int ai_send_start_session(void)
     return s_start_response_error;
 }
 
+#if DEMO_AI_AUDIO_AEC_ENABLE
+static int ai_prewarm_playback(void)
+{
+    uint32_t slot;
+    int ret;
+
+    /* Only this AI task uses s_play_pcm. Callbacks queue encoded packets;
+     * aec_play copies PCM before returning. Prime three 40-ms DMA slots while
+     * waiting for the first reply, without consuming or counting real audio. */
+    memset(s_play_pcm, 0, 2U * DEMO_AI_PCM_SAMPLES_20MS * sizeof(s_play_pcm[0]));
+    for (slot = 0U; slot <= 3U; ++slot)
+    {
+        if (!ai_request_is_active() || s_remote_ended)
+            return AI_ERR_CANCELLED;
+        if (s_conn_error_pending || s_disconnected_pending)
+            return ai_connection_end_result();
+        if (s_conn == NULL)
+            return AI_ERR_CONNECTION;
+        if (!demo_ai_audio_is_ready(&s_audio_lease))
+            return AI_ERR_AUDIO_INIT;
+        if (slot == 3U)
+            break;
+        ret = demo_ai_audio_play(&s_audio_lease, s_play_pcm,
+                                 2U * DEMO_AI_PCM_SAMPLES_20MS);
+        if (ret != 0)
+        {
+            liot_trace("[AI] playback prewarm failed slot=%u ret=%d\r\n",
+                       (unsigned int)slot, ret);
+            return AI_ERR_AUDIO_INIT;
+        }
+    }
+    liot_trace("[AI] playback prewarm queued: 3x40ms silence\r\n");
+    return 0;
+}
+#endif
+
 static int ai_play_downlink(void)
 {
     ai_audio_message_t *message;
     uint8_t slot;
     uint32_t sample_count = s_play_pending_samples;
+    uint32_t batch_samples = AI_PLAY_STREAM_BATCH_SAMPLES;
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    /* Rebuffer only at startup or after the adapter's conservative drain
+     * estimate. Normal streaming and a busy submission retain their pacing. */
+    bool start_prebuffer = sample_count == 0U && !s_remote_ended &&
+        (!s_first_play_reported || demo_ai_audio_play_done(&s_audio_lease));
+    if (!ai_request_is_active()) return 0;
+    if (start_prebuffer || s_play_prebuffering) batch_samples = AI_PLAY_BATCH_SAMPLES;
+#endif
     int decoded;
     int ret;
 
     /* Do not overwrite s_play_pcm until the driver reports FINISH.  If the
      * driver applies backpressure, keep this decoded batch and retry it. */
-    while (sample_count + AI_DECODE_MAX_SAMPLES <=
-           AI_PLAY_BATCH_SAMPLES)
+    while (sample_count + AI_DECODE_MAX_SAMPLES <= batch_samples)
     {
+#if DEMO_AI_AUDIO_AEC_ENABLE
+        /* Leave room for a full 120-ms Opus packet, but stop collecting once
+         * this prebuffer reaches its time target. Packet sizes may differ. */
+        if (s_play_prebuffering && sample_count >= AI_PLAY_PREBUFFER_SAMPLES)
+            break;
+#endif
         if (liot_rtos_queue_wait(s_audio_queue, &slot, sizeof(slot),
                                  LIOT_NO_WAIT) != LIOT_OSI_SUCCESS)
         {
@@ -2102,6 +2165,14 @@ static int ai_play_downlink(void)
         memcpy(&s_play_pcm[sample_count], s_decode_pcm,
                (size_t)decoded * sizeof(int16_t));
         sample_count += (uint32_t)decoded;
+#if DEMO_AI_AUDIO_AEC_ENABLE
+        if (start_prebuffer) {
+            start_prebuffer = false;
+            s_play_prebuffering = true;
+            s_prebuffer_start_ms = liot_rtos_get_running_time();
+            ++s_prebuffer_starts;
+        }
+#endif
         s_audio_last_decoded_ts = message->ts;
         s_rx_frames++;
         if (s_rx_frames == 1U)
@@ -2117,6 +2188,22 @@ static int ai_play_downlink(void)
     {
         return 0;
     }
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    if (!ai_request_is_active()) return 0;
+    if (s_play_prebuffering) {
+        uint32_t waited = liot_rtos_get_running_time() - s_prebuffer_start_ms;
+        if (!s_remote_ended && sample_count < AI_PLAY_PREBUFFER_SAMPLES &&
+            waited < AI_PLAY_PREBUFFER_TIMEOUT_MS)
+            return 0; /* The owner loop still services commands and uplink. */
+        if (s_remote_ended) ++s_prebuffer_tail_flushes;
+        else if (sample_count >= AI_PLAY_PREBUFFER_SAMPLES) ++s_prebuffer_ready;
+        else ++s_prebuffer_timeouts;
+        s_prebuffer_wait_ms += waited;
+        if (waited > s_prebuffer_max_ms) s_prebuffer_max_ms = waited;
+        s_play_prebuffering = false;
+        s_prebuffer_start_ms = 0U;
+    }
+#endif
     ret = demo_ai_audio_play(&s_audio_lease, s_play_pcm, sample_count);
     if (ret != 0)
     {
@@ -2444,30 +2531,6 @@ static int ai_send_uplink_20ms(void)
     return 0;
 }
 
-/* One entry prefetch for the menus. Calls always request their own fresh
- * result; no periodic HTTP traffic is needed during a long conversation. */
-static void ai_refresh_call_contacts(void)
-{
-    bool active;
-
-    liot_rtos_enter_critical();
-    active = s_want_active && !s_call_committed &&
-             s_running_request_id != 0U &&
-             s_control_sequence == s_running_request_id;
-    liot_rtos_exit_critical();
-    if (!active || s_remote_ended)
-    {
-        return;
-    }
-#ifdef HWDEMO_WECHAT_EN
-    demo_wechat_refresh_contacts();
-#endif
-#ifdef HWDEMO_DEV_CHAT_EN
-    demo_dev_chat_refresh_contacts();
-#endif
-    liot_trace("[AI-CACHE] entry refresh requested\r\n");
-}
-
 static int ai_active_loop(void)
 {
     uint32_t audio_count = 0U;
@@ -2475,7 +2538,8 @@ static int ai_active_loop(void)
     int ret;
 
     ai_set_state(DEMO_AI_CHAT_LISTENING, 0);
-    ai_refresh_call_contacts();
+    /* Voice call actions fetch fresh contacts on demand. Entry prefetches
+     * would hold the shared HTTP client across a quick AI re-entry. */
     while (!s_remote_ended)
     {
         if (!ai_request_is_active())
@@ -2519,6 +2583,7 @@ static int ai_active_loop(void)
         }
         if (audio_count > 0U)
         {
+#if !DEMO_AI_AUDIO_AEC_ENABLE
             /* Liot_AudioPlay copies each block into its internal queue.  Feed
              * that queue while it is active for gap-free streaming.  On a
              * fresh/underrun start, collect roughly 60 ms first (or wait at
@@ -2544,6 +2609,7 @@ static int ai_active_loop(void)
                 }
             }
             s_prebuffer_start_ms = 0U;
+#endif
             (void)ai_play_downlink();
 #if DEMO_AI_AUDIO_AEC_ENABLE
             goto uplink_tick;
@@ -2770,6 +2836,14 @@ static void ai_session_cleanup(void)
     s_remote_ended = false;
     s_play_pending_samples = 0U;
     s_prebuffer_start_ms = 0U;
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    liot_trace("[AI-BUFFER] target=80ms timeout=120ms starts=%u ready=%u "
+               "timeout=%u tail=%u waited_ms=%u max_wait_ms=%u\r\n",
+               (unsigned int)s_prebuffer_starts, (unsigned int)s_prebuffer_ready,
+               (unsigned int)s_prebuffer_timeouts, (unsigned int)s_prebuffer_tail_flushes,
+               (unsigned int)s_prebuffer_wait_ms, (unsigned int)s_prebuffer_max_ms);
+    s_play_prebuffering = false;
+#endif
     s_whip_done = false;
     s_conn_error_pending = false;
     s_conn_error = 0;
@@ -2833,6 +2907,11 @@ static int ai_run_session(void)
     s_server_speaking = false;
     s_play_pending_samples = 0U;
     s_prebuffer_start_ms = 0U;
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    s_play_prebuffering = false;
+    s_prebuffer_starts = s_prebuffer_ready = s_prebuffer_timeouts = 0U;
+    s_prebuffer_tail_flushes = s_prebuffer_wait_ms = s_prebuffer_max_ms = 0U;
+#endif
     ai_discard_audio_queue();
     ai_discard_command_queue();
 
@@ -2965,6 +3044,13 @@ static int ai_run_session(void)
     s_levels_dirty = false;
     demo_ai_opus_reset();
 
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    ret = ai_prewarm_playback();
+    if (ret != 0)
+    {
+        return ret;
+    }
+#endif
     settle_remaining_ms = (int32_t)(settle_deadline -
                                     liot_rtos_get_running_time());
     if (settle_remaining_ms > 0)
