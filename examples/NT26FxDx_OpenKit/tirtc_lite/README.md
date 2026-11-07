@@ -8,6 +8,8 @@
 >
 > 从 [Lite 固件目录](../../../firmware/lite/) 下载当前完整包，按“启用自定义镜像 → 选择固件 → 全量下载”操作即可。工具、驱动与官方详细教程见第 3 节，按需查阅。
 
+![探鸽小钛功能示意（具体能力以板型与固件为准）](../docs/assets/xiaotai.gif)
+
 ## 1. 先看设备能做什么
 
 | 功能 | 使用体验 | 操作视频 |
@@ -65,7 +67,7 @@ https://github.com/user-attachments/assets/9f965419-72f7-4b59-abf2-69d00e6f0715
 <details>
 <summary>AI 对讲</summary>
 
-https://github.com/user-attachments/assets/92ab937b-5532-4236-b849-e90380c01f11
+https://github.com/user-attachments/assets/d78bf921-a7cc-4ff4-bad8-fac6a97e8d03
 
 [下载原视频](docs/assets/videos/ai-talk.mp4)
 
@@ -75,7 +77,7 @@ https://github.com/user-attachments/assets/92ab937b-5532-4236-b849-e90380c01f11
 <details>
 <summary>微信互叫</summary>
 
-https://github.com/user-attachments/assets/9f6a4002-9c00-4c24-a1c4-85dbf84ddf69
+https://github.com/user-attachments/assets/dbda77ee-4b92-46b9-ae94-044bdf87fccf
 
 [下载原视频](docs/assets/videos/wechat-call.mp4)
 
@@ -85,7 +87,7 @@ https://github.com/user-attachments/assets/9f6a4002-9c00-4c24-a1c4-85dbf84ddf69
 <details>
 <summary>设备互叫</summary>
 
-https://github.com/user-attachments/assets/c138f4ee-6627-421b-b2b0-6c3b4eca0962
+https://github.com/user-attachments/assets/c21397d9-6db8-4b8b-a51b-6e3c3cb433e2
 
 [下载原视频](docs/assets/videos/device-call.mp4)
 
