@@ -1,5 +1,9 @@
 # TiRTC × 利尔达 OpenKit
 
+探鸽小钛是面向带屏和无屏设备的开源 AI 音视频固件，让你的硬件支持 **AI 聊天、微信通话、设备对讲和远程实时音视频**。
+
+![探鸽小钛功能示意（具体能力以板型与固件为准）](examples/NT26FxDx_OpenKit/docs/assets/xiaotai.gif)
+
 基于利尔达 OpenKit 的小钛 4G 终端示例，通过 **TiRTC** 实现 AI 对话、微信与设备通话、远程对讲。选择你的产品，跟着演示和操作说明开始体验。
 
 > **首次烧录先看：[Lite / Pro 简明全量烧录图解（含两张操作截图）](examples/NT26FxDx_OpenKit/docs/全量烧录.md)**
