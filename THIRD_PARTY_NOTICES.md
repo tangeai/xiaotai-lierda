@@ -12,7 +12,7 @@
 
 | 范围 | 许可与阅读入口 |
 | --- | --- |
-| 利尔达公共 SDK、原厂 Demo 与工具链（`components/`、`config/`、`rules/`、`tools/` 及应用以外的原厂文件） | 利尔达原有开源代码继续适用 Apache-2.0；其中第三方库、工具及供应二进制按自身条款。根目录 [利尔达 Apache-2.0 许可](LICENSE) 保留原文，包括原版权归属。当前官方 SDK 1.7.0 的 [英文说明](README_SDK.md) / [中文说明](README_ZH.md) 保留原文，仅调整文档入口链接。 |
+| 外部利尔达 SDK、原厂 Demo 与工具链（由准备命令从官方仓库下载） | 利尔达原有开源代码继续适用 Apache-2.0；其中第三方库、工具及供应二进制按自身条款。根目录 [利尔达 Apache-2.0 许可](LICENSE) 保留原文，包括原版权归属。当前官方 SDK 1.7.0 的 [英文说明](https://github.com/lierda-iot/CAT1.bis_OpenCPU/blob/59f1250c4b8caad4bbf4f74167b7b39c79097f8c/README.md) / [中文说明](https://github.com/lierda-iot/CAT1.bis_OpenCPU/blob/59f1250c4b8caad4bbf4f74167b7b39c79097f8c/README_ZH.md) 由官方仓库提供，本仓库不重复保存。 |
 | lite 的利尔达派生文件 | `src/app/app_entry.c`、`src/ui/key_input.c`、`include/key_input.h`、`src/ui/ssd1306_display.c`、`include/ssd1306_display.h`、`board/iodriver.ini` 保持 Apache-2.0，见 [来源记录](examples/NT26FxDx_OpenKit/tirtc_lite/SOURCE_PROVENANCE.md)。 |
 | pro 板级依赖及原厂显示适配 | `board_compat/` 中的原厂文件保留各自许可；`port/tirtc_port.c` 源自利尔达 Demo，继续适用 Apache-2.0。见 [板级依赖](examples/NT26FxDx_OpenKit/tirtc_pro/board_compat/README.md)。 |
 | 两套 TiRTC SDK 头文件和 `.a` 库 | 仍按独立 TiRTC SDK 协议使用和分发，不属于应用 MIT 范围。见 [lite SDK](examples/NT26FxDx_OpenKit/tirtc_lite/sdk/README.md) / [pro SDK](examples/NT26FxDx_OpenKit/tirtc_pro/sdk/README.md)。 |

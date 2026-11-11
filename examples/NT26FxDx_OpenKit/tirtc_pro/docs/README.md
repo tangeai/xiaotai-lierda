@@ -79,7 +79,7 @@
 | 对外编译命令 | 根目录 `examples\NT26FxDx_OpenKit\tirtc_lite\build.bat` | 根目录 `examples\NT26FxDx_OpenKit\tirtc_pro\build.bat` |
 | 构建选择 | `APP_VARIANT=lite BUILD_MODE=demo DEMO_NAME=tirtc_app` | `APP_VARIANT=pro BUILD_MODE=tirtc` |
 | 正常应用输出 | `gccout/tirtc_lite` | `gccout/tirtc_pro` |
-| 当前烧录包 | 根目录 `firmware/lite/YYYY_MM_DD_HH_MM_SS_lite.binpkg` | 根目录 `firmware/pro/`：先 `_pro_assets.binpkg` 安装资源，再 `_pro_app.binpkg` 恢复正式应用；文件名与顺序见 [烧录说明](../../../../firmware/pro/README.md) |
+| 当前烧录包 | SDK 目录下的 `examples/NT26FxDx_OpenKit/firmware/lite/YYYY_MM_DD_HH_MM_SS_lite.binpkg` | 应用仓库 `examples/NT26FxDx_OpenKit/firmware/pro/` 提供预编译配套包；源码构建使用两个 `gccout` 输出，见[构建与固件](构建与固件.md)。烧录先资源、后应用，见[烧录说明](../../firmware/pro/README.md) |
 | 配置入口 | 应用内 `config/tirtc_config.mk` | 应用内 `config` 文件 |
 | 底包 | 公共 `components/basePkg/F6D_D`，SDK 1.7.0 | 同一公共 `components/basePkg/F6D_D`，SDK 1.7.0 |
 | TiRTC | lite 自己的匹配头文件和 `.a` | pro 自己的匹配头文件和 `.a` |

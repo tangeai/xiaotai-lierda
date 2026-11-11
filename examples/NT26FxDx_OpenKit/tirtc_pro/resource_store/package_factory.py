@@ -135,7 +135,7 @@ def main() -> None:
     app = Path(__file__).resolve().parent.parent
     build = repo / "gccout/tirtc_pro"
     output = repo / "gccout/tirtc_pro_factory"
-    release = repo / "firmware/pro"
+    release = app.parent / "firmware/pro"
     match = re.search(r"^APP_VERSION\s*:?=\s*(\w+)\s*$", (app / "config").read_text(), re.M)
     if not match:
         raise ValueError("Missing pro APP_VERSION")

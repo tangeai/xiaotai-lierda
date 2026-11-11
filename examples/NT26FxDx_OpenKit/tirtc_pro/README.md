@@ -6,7 +6,7 @@
 
 > **首次烧录先看：[简明全量烧录图解（含两张操作截图）](../docs/全量烧录.md)**
 >
-> 从 [Pro 固件目录](../../../firmware/pro/README.md) 下载配套包，首次安装按“资源安装包 → `INSTALL_OK` → 正式应用包”执行。工具、驱动与官方详细教程见第 3 节，按需查阅。
+> 从 [Pro 固件目录](../firmware/pro/README.md) 下载配套包，首次安装按“资源安装包 → `INSTALL_OK` → 正式应用包”执行。工具、驱动与官方详细教程见第 3 节，按需查阅。
 
 本项目基于 **L-CT4IT00-YP00W-01-V04 / NT26F6D0（EC718PM）**，工程目录为 `NT26FxDx_OpenKit`，展示 TiRTC 如何接入这套 OpenKit 硬件。先按本文把设备运行起来，再沿文档读懂平台接入、媒体传输和应用代码，最后替换成自己的产品界面与业务。
 
@@ -178,7 +178,7 @@ https://github.com/user-attachments/assets/c5d0ade8-9627-4e2a-9795-d41af390b7c8
 | 3 | [SDK 快速开始](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/zh_CN/general/quick_start.html) | 工程目录、编译环境、硬件型号选择 |
 | 4 | [固件下载工具说明](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/zh_CN/tools/flash/flash-tool.html) | 选择镜像、进入下载、确认成功与查看日志 |
 
-[利尔达文档首页](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/zh_CN/) · [本仓库保留的原始 SDK 英文说明](../../../README_SDK.md) · [原始 SDK 中文说明](../../../README_ZH.md)。
+[利尔达文档首页](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/zh_CN/) · [官方 SDK 英文说明](https://github.com/lierda-iot/CAT1.bis_OpenCPU/blob/59f1250c4b8caad4bbf4f74167b7b39c79097f8c/README.md) · [原始 SDK 中文说明](https://github.com/lierda-iot/CAT1.bis_OpenCPU/blob/59f1250c4b8caad4bbf4f74167b7b39c79097f8c/README_ZH.md)。
 
 **板卡应用补充：** [NT26FxDx OpenKit 应用指导（含 V04）](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/zh_CN/examples/NT26FxDx%20OpenKit/NT26FxDx%20OpenKit%20Application%20Guide_Rev0.1.html) · [OpenKit TiRTC 应用开发指导](https://opendocs.lierda.com/docs/CAT.1_Doc_Protal/zh_CN/examples/NT26FxDx%20OpenKit%20TiRTC/NT26FxDx%20OpenKit%20TiRTC%20Application%20Guide_Rev0.1.html)。原始 SDK 中的旧 V04 快速开始链接现已失效，改从这些入口查阅；原始 SDK 说明仍保留原文。官方示例的界面和业务可能与本触屏应用不同，编译选项和操作以本文为准。
 
@@ -191,13 +191,13 @@ https://github.com/user-attachments/assets/c5d0ade8-9627-4e2a-9795-d41af390b7c8
 
 当前使用公共官方 SDK 1.7.0 / `F6D_D`，应用位于 `examples/NT26FxDx_OpenKit/tirtc_pro`。从旧 A 底包升级时须完整烧录配套底包与 APP；编译参数和烧录步骤见 [操作说明](docs/当前设备操作.md#build-flash)。
 
-使用官方原版工具时，从 [当前 Pro 固件目录](../../../firmware/pro/) 下载配套的 `_pro_assets.binpkg` 资源安装包和 `_pro_app.binpkg` 正式应用包，按 [两次烧录详细说明](../../../firmware/pro/README.md)操作，并核对同目录的 [SHA-256 校验清单](../../../firmware/pro/SHA256SUMS.txt)。不能使用旧 A 包更新当前 D 应用。需要从源码构建时，先按 [源码准备](../../../README.md#编译与下载)获取包含本产品目录及公共 SDK 的完整工程（仅克隆原厂 SDK 不含本产品），再完成 [Python 环境准备](docs/当前设备操作.md#python-setup)，在工程根目录执行：
+使用官方原版工具时，从 [当前 Pro 固件目录](../firmware/pro/) 下载配套的 `_pro_assets.binpkg` 资源安装包和 `_pro_app.binpkg` 正式应用包，按 [两次烧录详细说明](../firmware/pro/README.md)操作，并核对同目录的 [SHA-256 校验清单](../firmware/pro/SHA256SUMS.txt)。不能使用旧 A 包更新当前 D 应用。需要从源码构建时，先按 [源码准备](../../../README.md#编译与下载)下载利尔达官方 `Release_V0107` SDK 和底包，再下载小钛应用仓库并执行合并命令，然后完成 [Python 环境准备](docs/当前设备操作.md#python-setup)，在准备好的 SDK 根目录执行：
 
 ```powershell
 .\examples\NT26FxDx_OpenKit\tirtc_pro\build.bat
 ```
 
-统一入口保留内部 `APP_VERSION=pro_release`，生成包含 D 底包、应用及外置资源镜像的 `_pro.binpkg` 合并包；该包仅适合已验证支持本板外置 Flash 写入的工具。普通正式应用包位于 `gccout/tirtc_pro/TiRTC_pro_NT26F6D0_pro_release.binpkg`，资源安装包需另运行 `build_assets.bat` 构建，两个输出对应发布目录中的 `_pro_app.binpkg` 和 `_pro_assets.binpkg`。时间取各自 `.bin` 的编译完成时间（UTC+8），不是重新命名的时间。设备日志中的版本字符串带有 SDK 前缀 `appVpro_release`。完整命令、产物来源和校验说明见 [构建与固件](docs/构建与固件.md)及 [发布目录说明](../../../firmware/pro/README.md)。
+统一入口保留内部 `APP_VERSION=pro_release`，生成包含 D 底包、应用及外置资源镜像的 `_pro.binpkg` 合并包；该包仅适合已验证支持本板外置 Flash 写入的工具。普通正式应用包位于 `gccout/tirtc_pro/TiRTC_pro_NT26F6D0_pro_release.binpkg`，资源安装包需另运行 `build_assets.bat` 构建，这两份 `gccout` 原始包可直接用于两次烧录；预编译发布副本使用 `_pro_app.binpkg`、`_pro_assets.binpkg` 后缀，保存在应用仓库的发布目录，构建不会自动复制或重命名为这两个副本。发布副本的时间取各自 `.bin` 的编译完成时间（UTC+8），不是重新命名的时间。设备日志中的版本字符串带有 SDK 前缀 `appVpro_release`。完整命令、产物来源和校验说明见 [构建与固件](docs/构建与固件.md)及 [发布目录说明](../firmware/pro/README.md)。
 
 ### 4.2 按顺序烧录资源安装包和正式应用包
 
@@ -210,7 +210,7 @@ https://github.com/user-attachments/assets/c5d0ade8-9627-4e2a-9795-d41af390b7c8
 5. 关闭日志串口，再选择配套的 `_pro_app.binpkg`，执行第二次“全量下载”。
 6. 正常启动后确认 `[assets14] LOAD_OK`，检查字体、背景与触摸，再继续联网绑定。
 
-**顺序不能反：先安装资源，后恢复正式应用。** 两次下载均写内部 Flash；第一次启动的安装程序再将七个资源文件写入外置 Flash，第二个包不携带外置文件系统镜像。安装器不会自动切换为正式应用。详细界面操作、失败处理和文件选择见 [两次烧录说明](../../../firmware/pro/README.md)；开发维护见 [资源说明](resource_store/README.md)。`F6D_D_base.binpkg` 不包含完整业务。
+**顺序不能反：先安装资源，后恢复正式应用。** 两次下载均写内部 Flash；第一次启动的安装程序再将七个资源文件写入外置 Flash，第二个包不携带外置文件系统镜像。安装器不会自动切换为正式应用。详细界面操作、失败处理和文件选择见 [两次烧录说明](../firmware/pro/README.md)；开发维护见 [资源说明](resource_store/README.md)。`F6D_D_base.binpkg` 不包含完整业务。
 
 ### 4.3 按这个顺序验收
 

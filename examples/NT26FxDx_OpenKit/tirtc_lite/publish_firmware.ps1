@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'Stop'
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
 $buildDirectory = Join-Path $repository 'gccout\tirtc_lite'
-$releaseDirectory = Join-Path $repository 'firmware\lite'
+$releaseDirectory = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\firmware\lite'))
 $versionMatch = [regex]::Match(
     [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'config\tirtc_config.mk')),
     '(?m)^APP_VERSION\s*:?=\s*(\w+)\s*$')

@@ -33,8 +33,8 @@ provenance. Integration details are in [runtime/README.md](../runtime/README.md)
 - [当前应用 MIT 许可](../LICENSE) / [应用许可范围](../THIRD_PARTY_NOTICES.md)
 - [上游 MIT 副本](../runtime/LICENSES/MIT.txt)
 - [历史上游 Apache-2.0 副本](../runtime/LICENSES/Apache-2.0.txt) / [利尔达原厂许可](../../../../LICENSE)
-- [cJSON 许可头](../../../../components/thirdparty/CJSON/cJSON.h)
-- [Opus 1.4 上游许可（当前 AI 编解码使用）](../../../../components/thirdparty/opus/opus-1.4/COPYING)
+- [cJSON 许可头](https://github.com/lierda-iot/CAT1.bis_OpenCPU/blob/59f1250c4b8caad4bbf4f74167b7b39c79097f8c/components/thirdparty/CJSON/cJSON.h)
+- [Opus 1.4 上游许可（当前 AI 编解码使用）](https://github.com/lierda-iot/CAT1.bis_OpenCPU/blob/59f1250c4b8caad4bbf4f74167b7b39c79097f8c/components/thirdparty/opus/opus-1.4/COPYING)
 - [保留的 mbedTLS 许可](../board_compat/licenses/mbedtls-LICENSE)
 
 以上提供当前应用与历史上游许可的阅读路径；原始供应 SDK、历史通知和上游许可副本均保持原文。

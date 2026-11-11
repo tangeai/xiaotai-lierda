@@ -78,7 +78,7 @@
 
 ## 当前 lite / pro 构建
 
-对外使用根目录 `examples\NT26FxDx_OpenKit\tirtc_pro\build.bat`，生成含外置资源的出厂初始化包 `firmware/pro/YYYY_MM_DD_HH_MM_SS_pro.binpkg`。其应用构建仍由 `examples\NT26FxDx_OpenKit\tirtc_pro\build_app.bat` / 板级 Makefile 选择 `APP_VARIANT=pro`，中间产物在 `gccout/tirtc_pro`。pro 的配置是 `tirtc_pro/config` 文件，业务、`board_compat`、`sdk` 和 `runtime` 均保留在自己的目录。
+对外使用 SDK 根目录 `examples\NT26FxDx_OpenKit\tirtc_pro\build.bat`，生成含外置资源的出厂初始化包 `examples/NT26FxDx_OpenKit/firmware/pro/YYYY_MM_DD_HH_MM_SS_pro.binpkg`。其应用构建仍由 `examples\NT26FxDx_OpenKit\tirtc_pro\build_app.bat` / 板级 Makefile 选择 `APP_VARIANT=pro`，中间产物在 `gccout/tirtc_pro`。pro 的配置是 `tirtc_pro/config` 文件，业务、`board_compat`、`sdk` 和 `runtime` 均保留在自己的目录。
 
 两产品共用当前官方 SDK、F6D_D 底包与工具链，不互相引用业务，不复用编译对象。后续升级仍应重新核查接口兼容及实机行为；不要通过删除哈希检查或盲目替换哈希来强行通过编译。
 

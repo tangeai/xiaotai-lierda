@@ -6,7 +6,7 @@
 
 > **首次烧录先看：[简明全量烧录图解（含两张操作截图）](../docs/全量烧录.md)**
 >
-> 从 [Lite 固件目录](../../../firmware/lite/) 下载当前完整包，按“启用自定义镜像 → 选择固件 → 全量下载”操作即可。工具、驱动与官方详细教程见第 3 节，按需查阅。
+> 从 [Lite 固件目录](../firmware/lite/) 下载当前完整包，按“启用自定义镜像 → 选择固件 → 全量下载”操作即可。工具、驱动与官方详细教程见第 3 节，按需查阅。
 
 ## 1. 先看设备能做什么
 
@@ -23,7 +23,7 @@
 
 设备通过三个按键操作，OLED 显示菜单、网络状态和时间。当前仅传输音频，同一时间运行一个媒体会话。GROUP 中收到微信或设备来电时，先暂停多人对讲；来电流程结束后恢复关麦收听，主页四项菜单不变。
 
-本地构建在根目录 `firmware/lite/YYYY_MM_DD_HH_MM_SS_lite.binpkg` 生成 Lite 完整烧录包，内部包标识为 **lite_release**，包含 AI、AI 呼叫联系人、微信、设备互呼、远端对讲和 GROUP 多人对讲功能。仓库仅保留当前发布包及同目录的 `SHA256SUMS.txt`，历史包与编译中间产物不随仓库发布。文件名时间取对应 `.bin` 的编译完成时间（UTC+8），不是重新命名的时间；克隆后可使用当前发布包，或按第 5 节重新构建。
+本地构建在 SDK 目录下的 `examples/NT26FxDx_OpenKit/firmware/lite/YYYY_MM_DD_HH_MM_SS_lite.binpkg` 生成 Lite 完整烧录包，内部包标识为 **lite_release**，包含 AI、AI 呼叫联系人、微信、设备互呼、远端对讲和 GROUP 多人对讲功能。仓库仅保留当前发布包及同目录的 `SHA256SUMS.txt`，历史包与编译中间产物不随仓库发布。文件名时间取对应 `.bin` 的编译完成时间（UTC+8），不是重新命名的时间；克隆后可使用当前发布包，或按第 5 节重新构建。
 
 ### 平台设备信息
 
@@ -142,7 +142,7 @@ https://github.com/user-attachments/assets/c50d1b5e-5ee8-42e2-9fe3-c2f724e4d636
 
 ## 4. 烧录并体验 TiRTC
 
-1. **取得固件**：使用根目录 [lite 固件目录](../../../firmware/lite/) 中的当前时间戳 `.binpkg`，或按第 5 节从源码构建。包包含底包、应用及多人对讲功能，只需这一个 `.binpkg`，适用于上述硬件配置。烧录前核对同目录的 [SHA-256 校验清单](../../../firmware/lite/SHA256SUMS.txt)。
+1. **取得固件**：使用 OpenKit 下的 [lite 固件目录](../firmware/lite/) 中的当前时间戳 `.binpkg`，或按第 5 节从源码构建。包包含底包、应用及多人对讲功能，只需这一个 `.binpkg`，适用于上述硬件配置。烧录前核对同目录的 [SHA-256 校验清单](../firmware/lite/SHA256SUMS.txt)。
 2. **烧录设备**：在利尔达烧录工具中选择“自定义镜像”，载入该文件进行**全量烧录**，最简操作见[全量烧录图解（含两张截图）](../docs/全量烧录.md)。该文件不是 OTA 升级包。
 3. **联网绑定**：接好 SIM 卡与天线后上电，等待 OLED 显示六位绑定码，在[设备演示平台](https://xiaotai.chat/)登录并添加设备，绑定成功后设备进入主页。
 4. **开始对讲**：按 `KEY0` 选择、`KEY1` 确认、`KEY2` 返回。使用 AI 前先配置并绑定平台智能体；使用 WX 时，在微信搜索“探鸽小钛”，登录同一账号并完成设备的 VoIP 授权与上报。详细步骤见[当前设备操作](docs/当前设备操作.md)。
@@ -151,13 +151,13 @@ https://github.com/user-attachments/assets/c50d1b5e-5ee8-42e2-9fe3-c2f724e4d636
 
 ## 5. 从源码接入与二次开发
 
-按 [源码准备](../../../README.md#编译与下载)获取包含本产品目录和公共 SDK 的完整工程；仅克隆原厂 SDK 不包含这两套产品应用。首次编译会自动解压自带工具链。本仓库已包含 lite 应用及其编译所需的官方 SDK 1.7.0、F6D_D 底包和工具。lite 的业务、配置及 TiRTC 库位于独立的 `tirtc_lite` 目录，不引用 pro 的业务代码。在仓库根目录执行 Windows 编译命令：
+按 [源码准备](../../../README.md#编译与下载)先下载利尔达官方 `Release_V0107`（含 SDK 1.7.0、F6D_D 底包和工具），再下载小钛应用仓库并执行合并命令，将应用自动放入 SDK 对应目录。首次编译会自动解压 SDK 自带工具链。lite 的业务、配置及 TiRTC 库位于独立的 `tirtc_lite` 目录，不引用 pro 的业务代码。在准备好的 SDK 根目录执行 Windows 编译命令：
 
 ```powershell
 .\examples\NT26FxDx_OpenKit\tirtc_lite\build.bat
 ```
 
-编译成功后自动更新根目录 `firmware/lite/YYYY_MM_DD_HH_MM_SS_lite.binpkg` 和同目录的 `SHA256SUMS.txt`，烧录方法同上。`gccout/tirtc_lite` 保存编译中间产物，不随仓库发布。修改功能或日志开关后，应清理该产品的旧输出或使用新的构建输出目录，说明见[应用构建说明](docs/应用说明.md#默认构建)。
+编译成功后自动更新 SDK 目录下的 `examples/NT26FxDx_OpenKit/firmware/lite/YYYY_MM_DD_HH_MM_SS_lite.binpkg` 和同目录的 `SHA256SUMS.txt`，烧录方法同上。`gccout/tirtc_lite` 保存编译中间产物，不随仓库发布。修改功能或日志开关后，应清理该产品的旧输出或使用新的构建输出目录，说明见[应用构建说明](docs/应用说明.md#默认构建)。
 
 <a id="aec-debug"></a>
 
@@ -171,7 +171,7 @@ AEC 配置位于 `config/tirtc_config.mk`，默认 `TIRTC_AUDIO_AEC_DELAY=10`。
 
 本脚本选择 `APP_VARIANT=lite BUILD_MODE=demo DEMO_NAME=tirtc_app`，并使用独立输出目录；必须明确选择 `APP_VARIANT=lite`；不传 `APP_VARIANT` 时走原厂 app/demo 分支，不会自动选择 Lite。
 
-若使用利尔达工具从源码编译，选择以下参数（路径相对于仓库根目录）：
+若使用利尔达工具从源码编译，选择以下参数（路径相对于准备好的 SDK 根目录）：
 
 | 配置项 | 选择 |
 | --- | --- |

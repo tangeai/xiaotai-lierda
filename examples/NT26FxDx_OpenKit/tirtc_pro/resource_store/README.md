@@ -2,7 +2,7 @@
 
 ## 默认用法：先安装资源，再烧正式程序
 
-使用原版利尔达工具时，按 [Pro 固件与两次烧录说明](../../../../firmware/pro/README.md) 下载配套的 `_pro_assets.binpkg` 和 `_pro_app.binpkg`：
+使用原版利尔达工具时，按 [Pro 固件与两次烧录说明](../../firmware/pro/README.md) 下载配套的 `_pro_assets.binpkg` 和 `_pro_app.binpkg`：
 
 1. 先全量下载资源安装包，让设备正常启动，等串口输出 `[assets14] INSTALL_OK files=7 ...`。
 2. 再全量下载正式 Pro 程序包，重启后确认 `[assets14] LOAD_OK ...` 和正常界面。
@@ -28,12 +28,16 @@
 
 ## 开发维护：重新提取资源与独立安装器
 
-在工程根目录执行：
+先在 `xiaotai-lierda` 应用仓库根目录生成资源并同步到 SDK，再进入 SDK 构建：
 
 ```powershell
 python examples/NT26FxDx_OpenKit/tirtc_pro/resource_store/prepare_external_assets.py
+python tools/setup_sdk.py
+cd ../CAT1.bis_OpenCPU-sdk
 .\examples\NT26FxDx_OpenKit\tirtc_pro\build_assets.bat
 ```
+
+若使用自定义 SDK 目录，准备命令附带相同的 `--sdk-dir`，并进入该目录编译。
 
 生成工具读取当前字库和背景源码，更新 `asset_manifest.h`、`installer_blob.c`
 以及 `examples/NT26FxDx_OpenKit/tirtc_pro/resource_store/assets14`。字库原件和生成工具仍在 `ui/tools`；图标和表情原始数据保留在非外置构建分支。提取工具不会压缩字形、改变像素或修改表情参数。
@@ -45,7 +49,7 @@ python examples/NT26FxDx_OpenKit/tirtc_pro/resource_store/prepare_external_asset
 
 存储驱动会初始化经两遍全片检查确认为空白的外置 Flash；已有有效文件系统按原有保护规则使用，未知或损坏数据不会自动清空。安装器没有自动重试写入、删除其他文件腾空间的行为。
 
-安装完成必须重新烧录正常应用包。安装器构建产物位于 `gccout/tirtc_pro_assets/TiRTC_pro_Assets_NT26F6D0_pro_release.binpkg`，正式程序位于 `gccout/tirtc_pro/TiRTC_pro_NT26F6D0_pro_release.binpkg`；当前配套发布副本分别使用 `_pro_assets.binpkg`、`_pro_app.binpkg` 后缀，放在根目录 `firmware/pro/`，具体文件见该目录 README。正式程序包不包含外置镜像；工具额外擦除选项和内部绑定数据仍需单独确认。
+安装完成必须重新烧录正常应用包。安装器构建产物位于 `gccout/tirtc_pro_assets/TiRTC_pro_Assets_NT26F6D0_pro_release.binpkg`，正式程序位于 `gccout/tirtc_pro/TiRTC_pro_NT26F6D0_pro_release.binpkg`；这两个 `gccout` 原始包可直接用于先资源、后应用的两次烧录。独立构建不会自动复制或重命名为发布副本；预编译的 `_pro_assets.binpkg`、`_pro_app.binpkg` 位于应用仓库的 `examples/NT26FxDx_OpenKit/firmware/pro/`，维护者发布步骤见[发布目录说明](../../firmware/pro/README.md)。正式程序包不包含外置镜像；工具额外擦除选项和内部绑定数据仍需单独确认。
 
 正常应用不包含资源安装入口和完整资源初始化大数组；它从外置文件区读取，
 保留文件系统保护、CRC 校验、失败重试和字体缓存逻辑。
@@ -54,7 +58,7 @@ python examples/NT26FxDx_OpenKit/tirtc_pro/resource_store/prepare_external_asset
 
 ### 出厂打包的检查
 
-`build_factory_image.py` 使用仓库自带的 `lfsutil` 生成 4 MiB、4 KiB 块的 LittleFS 2.0 镜像，检查几何信息并逐文件提取、比对资源。`package_factory.py` 使用自带 `fcelf` 合包，检查五项载荷的地址、容量、SHA-256，以及前四项与正常应用包一致后，才更新根目录 `firmware/pro/YYYY_MM_DD_HH_MM_SS_pro.binpkg` 和校验清单。文件名取对应应用 `.bin` 的编译完成时间（UTC+8），不改动内部应用版本或载荷。
+`build_factory_image.py` 使用准备好的官方 SDK 中的 `lfsutil` 生成 4 MiB、4 KiB 块的 LittleFS 2.0 镜像，检查几何信息并逐文件提取、比对资源。`package_factory.py` 使用 SDK 自带 `fcelf` 合包，检查五项载荷的地址、容量、SHA-256，以及前四项与正常应用包一致后，才更新 SDK 目录下的 `examples/NT26FxDx_OpenKit/firmware/pro/YYYY_MM_DD_HH_MM_SS_pro.binpkg` 和校验清单。文件名取对应应用 `.bin` 的编译完成时间（UTC+8），不改动内部应用版本或载荷。
 
 当前打包使用公共 `components/basePkg/F6D_D` 的 bootloader、AP 和 CP，应用区为 `0xAA6000` / 1112 KiB。应用扩容后，内部文件系统仍从物理地址 `0x3BC000` 开始、容量 160 KiB。出厂脚本会拒绝旧 A 底包或旧布局的正常固件包；迁移后必须先完整重建 Pro，再运行出厂打包。外置资源仍是原来的 4 MiB 文件系统，出厂初始化时覆盖外置文件的行为保持不变。
 

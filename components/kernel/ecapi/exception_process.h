@@ -1,4 +1,0 @@
-#ifndef _EXCEPTION_PROCESS_H
-#define _EXCEPTION_PROCESS_H
-
-#endif

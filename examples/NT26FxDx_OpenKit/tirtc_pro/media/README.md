@@ -2,7 +2,7 @@
 
 AI、微信电话、设备电话、LIVE 和 Room 共用同一 ES8311 录放硬件。派生自 [小钛利尔达参考](https://github.com/tangeai/xiaotai-lierda/tree/f159bfd3e82cc514dfe6b5b2269b2c96fa8e8f93/examples/L_CT4IT00_YP00W_01_V04/tirtc) 的 `audio_device/g711_codec`，保留探鸽版权归属；2026-09-28 按维护者要求将探鸽自有源码统一为 [MIT](LICENSE)，所调用的原厂音频 SDK 仍遵循自身授权。当前接口见 [audio_device.h](audio_device.h)。
 
-新增的 `opus_codec.c/.h` 适配器来自本仓库 Lite 的 [Opus 适配源码](../../tirtc_lite/src/media/opus_codec.c)和[头文件](../../tirtc_lite/include/opus_codec.h)，保留 MIT 版权头，并增加包时长检查与独立解码器重置；实际算法使用公共 [Opus 1.4](../../../../components/thirdparty/opus/opus-1.4/COPYING)，遵循其上游许可。
+新增的 `opus_codec.c/.h` 适配器来自本仓库 Lite 的 [Opus 适配源码](../../tirtc_lite/src/media/opus_codec.c)和[头文件](../../tirtc_lite/include/opus_codec.h)，保留 MIT 版权头，并增加包时长检查与独立解码器重置；实际算法使用公共 [Opus 1.4](https://github.com/lierda-iot/CAT1.bis_OpenCPU/blob/59f1250c4b8caad4bbf4f74167b7b39c79097f8c/components/thirdparty/opus/opus-1.4/COPYING)，遵循其上游许可。
 
 ## 硬件和格式
 
