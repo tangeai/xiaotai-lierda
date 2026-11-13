@@ -4,7 +4,7 @@
 # TiRTC 接口调用与模块流程
 
 > 适用工程：`NT26FxDx_OpenKit/tirtc_lite`；硬件：NT26F6D0 / F6D_D。  
-> 当前预编译 SDK：`v2.5.0-87c3c290`；2026-09-08 同步按次刷新后的 AI 联系人呼叫流程。<br>
+> 当前预编译 SDK：`v2.6.0-894972fb`（2026-11-13 更新）；2026-09-08 同步按次刷新后的 AI 联系人呼叫流程。<br>
 > 更新日期：2026-10-10；按当前 F6D_D 应用核对配置、AEC 收发与退出流程；源码定位以函数名为准。<br>
 > 本文解释“应用在哪里调用 SDK、传什么、等什么回调、完成什么功能”。2026-09-11 按当前代码补全 GROUP：`demo_tirtc_whip_connect` → `0x2200 join_room` → stream 1 G.711A → managed disconnect/release；接口及生命周期见第 9A 章，构建与验证见[应用说明](应用说明.md#当前固件与验证)。
 
@@ -30,7 +30,7 @@
 | 头文件 | 内容 | 当前应用使用情况 |
 | --- | --- | --- |
 | [tiRTC.h](../sdk/include/tirtc/tiRTC.h) | 生命周期、配置、连接、音视频、命令、订阅、日志、WHIP、服务请求；29 个函数声明 | 直接调用情况见第 14 章 |
-| [tgtrp.h](../sdk/include/tirtc/tgtrp.h) | 下层 listener / connection / channel、媒体传输、WHIP、统计及日志；44 个函数声明 | 只直接调用 2 个日志函数；错误回调注册另经链接 wrapper 适配 |
+| [tgtrp.h](../sdk/include/tirtc/tgtrp.h) | 下层 listener / connection / channel、媒体传输、WHIP、统计及日志；48 个函数声明 | 只直接调用 2 个日志函数；错误回调注册另经链接 wrapper 适配 |
 | [tiRTC_stat.h](../sdk/include/tirtc/tiRTC_stat.h) | 耗时统计、视频发送监控、连接方式选择标志；3 个函数声明 | 当前业务没有调用 |
 | [basedef.h](../sdk/include/tirtc/basedef.h) | 基础类型、导出宏、编译器与结构体打包定义 | 由 `tiRTC.h` 引入；没有可调用函数 |
 | [ticloudstorage.h](../sdk/include/tirtc/ticloudstorage.h) | 云存储服务、编码帧队列和上传请求；14 个函数声明 | 当前业务没有接入，不代表设备已有云录像功能 |
@@ -567,8 +567,8 @@ sequenceDiagram
     B->>A: TiRtcSendCommand(0x2000, room_id JSON)
     B->>B: 订阅 stream10，启动音频
     A->>A: 连接、room_id、确认房间一致后启动音频
-    A->>B: stream10 A-law
-    B->>A: stream10 A-law
+    A->>B: stream10 Opus / 16 kHz
+    B->>A: stream10 Opus / 16 kHz
 ```
 
 图按正常业务关系排列；网络回调可能交错到达。主叫端特意在呼叫 HTTP **之前**登记 `expect_incoming`，并在激活音频前核对房间，不能把这两步移到“全部 HTTP 已完成之后”才处理。
@@ -586,7 +586,9 @@ GROUP 页面收到真实设备来电时，先显示原来电状态并预约 GROU
 | 被叫主动 P2P | `dev_submit_callee_connect` | `demo_tirtc_connect` → `TiRtcConnect` |
 | 被叫发房间确认 | `dev_process_signals` | `demo_tirtc_send_command(0x2000, room_id JSON)` |
 | 订阅下行 | `dev_start_audio` | `demo_tirtc_subscribe_audio(10)` → `TiRtcSubscribeAudio` |
-| 发送麦克风数据 | `dev_send_uplink` | `demo_tirtc_send_audio` → `TiRtcSendAudioStream` |
+| 采集和编码 | `dev_capture_task` → `dev_send_uplink` | AEC 开启时独立采集20 ms PCM，`demo_opus_encode_20ms` 后非阻塞入队 |
+| 发送麦克风数据 | `dev_uplink_task` → `dev_send_uplink_job` | `demo_tirtc_send_audio` → `TiRtcSendAudioStream` |
+| 接收和播放 | `dev_on_audio` → `dev_service_downlink` → `dev_play_one` | 固定池入队、自适应预缓冲、Opus/A-law 解码、`demo_ai_audio_play` |
 | 通知对端挂断 | `dev_finish_session` | 条件允许时发送 `0x2001` / `{"reason":0}` |
 | 撤销等待 / 断开 | `dev_tirtc_begin_release` | cancel expected → `demo_tirtc_disconnect` |
 | 归还 owner | `dev_tirtc_try_release` | `demo_tirtc_session_release` |
@@ -598,7 +600,8 @@ DEV 的 `/v1/call/reject`、`/v1/call/cancel`、`/v1/call/hangup` 通过后台 r
 房间结束不表示 P2P 内存已经释放；`TiRtcDisconnect()` 提交成功也不表示服务器房间已经关闭。因此 `dev_finish_session()` 根据角色和结束原因分别处理 HTTP 房间动作、可选的对端挂断命令、本地音频和 managed connection。
 
 主叫固定保护由本会话 `s_late_incoming_possible` 决定：普通外呼提交 HTTP 前置位，冷恢复
-主叫默认置位，只有连接、房间确认及 `dev_start_audio()` 全部成功后才清除。结束时按
+主叫默认置位，当前连接的房间确认匹配后、调用 `dev_start_audio()` 前即清除；本地音频
+随后启动失败也不再额外等待未知迟到连接。结束时按
 `caller && s_late_incoming_possible` 同时设置 owner 归还等待和迟到入站拒绝期限。因此已接通
 后挂断、POST 前本地取消/失败不再额外等固定 10 秒；未接通的 `40201`、HTTP 不确定及
 `40202` 恢复仍保留保护。`[DEV] teardown late_peer_guard_ms=0/10000` 记录这一选择，不代表
@@ -611,8 +614,10 @@ SDK 已完成断开；真实 callback、closing、audio 和 owner 检查不变�
 ### 8.4 数据格式与超时
 
 - 命令严格匹配完整值：确认 `0x2000`、挂断 `0x2001`，不像 WX 有位掩码兼容。
-- 音频上下行均 stream10、A-law、8 kHz 单声道；上行 160 B / 20 ms。
-- 下行 callback 最多接受 640 B 合并包，不保证“一次回调就是一帧 20 ms”；它明确拒绝 16 kHz flags。
+- 双向 stream10；上行 Opus / 16 kHz / 单声道 / 20 ms，编码24 kbps、complexity 3，包长可变。两端均需支持 Opus；旧 Lite 及当前 Pro 不保证双向兼容，当前没有上行自动回退。
+- 下行支持 Opus / 16 kHz（最多1275 B、120 ms）和 A-law / 8或16 kHz（最多640 B），统一解码为板端16 kHz PCM；不把一次 callback 固定当作20 ms。
+- AEC 开启时，DEV 独立采集、编码和发送，下行采用自适应预缓冲；关闭 AEC 时保持主任务串行录音/播放。缓存、增益和释放顺序详见[代码与流程详解](代码与流程详解.md)的音频与设备呼叫章节。
+- 启动耗时日志统计到首次提交播放缓存，不是喇叭实测出声。通话结束的采集溢出、发送过期和接收失败统计用于区分本地丢帧，不能直接当作网络丢包率。
 - 被叫当前只提交一次主动连接尝试，应用等待 P2P callback 约 15 秒。超时结束本次业务，不整机复位；迟到连接由 runtime 保留的 context 安全接回并关闭。
 - 已提交但未接通的主叫清理仍保留约 10 秒迟到入站保护，避免未完成的反向连接被认成其他功能；已接通后挂断不再额外等待，仍须完成真实资源清理。
 - video 类型房间在本固件仍按 audio-only 处理，不代表调用了视频 SDK API。
@@ -830,7 +835,7 @@ connect-token 返回的 heartbeat / lease 均须为正整数，heartbeat 不超�
 | --- | --- | --- | --- | --- |
 | AI | 主动 WHIP | stream1 / Opus / 16 kHz | stream1 / Opus / 16 kHz | AEC 开启时回复期间继续上行，关闭时半双工 |
 | WX | 主动 WHIP；主叫被叫均如此 | stream0 / A-law / 8 kHz | stream0 / A-law / 8或16 kHz | 同时收发，随共享 AEC 开关 |
-| DEV | 被叫主动 P2P、主叫接受入站 | stream10 / A-law / 8 kHz | stream10 / A-law / 8 kHz | 同时收发，随共享 AEC 开关 |
+| DEV | 被叫主动 P2P、主叫接受入站 | stream10 / Opus / 16 kHz | stream10 / Opus / 16 kHz；兼容 A-law / 8或16 kHz | 同时收发，自适应预缓冲；随共享 AEC 开关 |
 | LIVE | 被动接收并 adopt | stream10 / A-law / 8 kHz | stream10或14 / A-law / 8或16 kHz | 同时收发，随共享 AEC 开关 |
 | GROUP | 主动 WHIP，再 `join_room` | stream1 / A-law / 8 kHz | stream1 / A-law / 8 kHz | 默认收听，KEY1 切换上行；开麦同时收发，随共享 AEC 开关 |
 
@@ -943,8 +948,8 @@ drain 等待上限5秒，Stop 事件等待上限10秒；失败后保留状态，
 | `TiRtcGetBuildInfo` | `runtime_dev_connect_needs_cleanup` | 读取构建信息，限定已核验的 DEV 失败句柄回收版本 |
 | `TiRtcGetErrorStr` | runtime及部分feature的错误日志 | 只用于可读描述，不代替数值错误判断 |
 
-`tgtrp.h` 的 `TGTRP_INTERFACE_VERSION="tag.v1.5.18"` 是头文件接口版本宏，不能和当前库的
-`TiRTC v2.5.0-87c3c290`、`tgtrp tag.v1.5.18-f72f5d3c` 或应用 `APP_VERSION=lite_release` 混为一个版本。
+`tgtrp.h` 的 `TGTRP_INTERFACE_VERSION="tag.v1.5.29"` 是头文件接口版本宏，不能和当前库的
+`TiRTC v2.6.0-894972fb`、`tgtrp tag.v1.5.29-64b74c0a` 或应用 `APP_VERSION=lite_release` 混为一个版本。
 
 ### 12.2 SDK 调用平台实现，是另一方向
 
@@ -963,7 +968,7 @@ drain 等待上限5秒，Stop 事件等待上限10秒；失败后保留状态，
 公开 callback 的方向是“SDK → 应用业务通知”；上述 ABI wrapper 的方向是“SDK → 平台能力”。不要把它们全部写成应用主动调用的 TiRtc API。
 
 失败句柄回收白名单为 `v2.4.0-7f41aae1 / 7750ab42` 和 `v2.5.0-87c3c290 / f72f5d3c`。
-更换未知 SDK 需重新核验，不以“版本较新”代替生命周期验证，也不修改供应库对象布局。
+当前 2.6 构建不命中该白名单，不启用这一旧版专用回收补丁；失败及重连场景仍须实机回归。更换未知 SDK 需重新核验，不以“版本较新”代替生命周期验证，也不修改供应库对象布局。
 
 移植时应配套核对头文件、静态库和底包，而非只修改 include 路径。[官方 C SDK 接入说明](https://docs.tange.ai/products/tirtc/guides/sdk-integration/c.html)也要求核对预编译包的构建契约；本项目现有 wrapper 不应原样套到不同模组/SDK版本。
 
@@ -1001,7 +1006,7 @@ drain 等待上限5秒，Stop 事件等待上限10秒；失败后保留状态，
 - `TiRtcSetVideoSendMonitor()`：视频发送监控。
 - `TiRtcSetConnFlag()`：连接方式选择标志；虽然放在统计头里，但不是统计查询。
 
-`tgtrp.h` 的其他 42 个函数包含 init/uninit、listener、connection、channel、WHIP、媒体发送和统计，当前业务均未直接调用；其中错误回调注册由第 12.2 节链接 wrapper 透传或适配。底层能力由高层 SDK 管理；不要绕开 runtime 另起一套 listener/connection 生命周期。
+`tgtrp.h` 的其他 46 个函数包含 init/uninit、listener、connection、channel、WHIP、媒体发送和统计，当前业务均未直接调用；其中错误回调注册由第 12.2 节链接 wrapper 透传或适配。底层能力由高层 SDK 管理；不要绕开 runtime 另起一套 listener/connection 生命周期。
 
 若以后接入 `tgtrp_connection_get_time_stats()` 或 `TiRtcConnGetTimeStats()`，窗口统计是最近有效数据样本的传输耗时/RTT汇总，不应解释成“最近10次设备建连用时”。`TGTRP_LOG_FLAG_STAT` 只是日志开关，打开它也不代表应用已经调用这些查询 API。
 

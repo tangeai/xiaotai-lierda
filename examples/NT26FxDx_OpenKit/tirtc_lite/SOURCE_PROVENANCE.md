@@ -95,7 +95,7 @@ TiRTC、ThingConnect、AI、微信通话、设备通话、平台 LIVE 及独立 
 - `sdk/include/tirtc/tiRTC.h`
 - `sdk/lib/libTiRTC.a`
 
-当前 TiRTC 库为 `v2.5.0-87c3c290`，与公开 `0.1.0` 的旧包不同；匹配摘要见
+当前 TiRTC 库为官方 `v2.6.0-894972fb`，传输库为 `tag.v1.5.29-64b74c0a`，配套头文件与库来自 eigencomm-ec71x / GCC 10.2.1 / mini 交付包；匹配摘要见
 [第三方组件与发布边界](THIRD_PARTY_NOTICES.md)。旧交付包备份不属于当前产品发布目录。
 2026-09-14 两项异常防护只增加应用侧检查和适配，未修改上述供应文件及 F6D_A 静态库。
 

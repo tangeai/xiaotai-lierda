@@ -150,12 +150,19 @@ LDFLAGS += -Wl,--defsym=netif_list=$(TIRTC_NETIF_LIST_ADDR)
 endif
 endif
 
+# AI and device calls reuse codec code, with separate codec contexts.
+ifneq ($(filter y,$(HWDEMO_AI_CHAT_EN) $(HWDEMO_DEV_CHAT_EN)),)
+ifneq ($(BUILD_THPART_OPUS_ENABLE),y)
+$(error AI/device calls require BUILD_THPART_OPUS_ENABLE=y)
+endif
+CUSTOM_COBJSTEMP += $(TIRTC_SRC_ROOT)/media/opus_codec.o
+endif
+
 ifeq ($(HWDEMO_AI_CHAT_EN), y)
 ifeq ($(HWDEMO_TIRTC_EN), y)
 ifeq ($(HWDEMO_BINDING_EN), y)
 ifeq ($(BUILD_THPART_OPUS_ENABLE), y)
 CUSTOM_COBJSTEMP += $(TIRTC_SRC_ROOT)/features/ai_chat.o
-CUSTOM_COBJSTEMP += $(TIRTC_SRC_ROOT)/media/opus_codec.o
 CFLAGS_DEFS += -DHWDEMO_AI_CHAT_EN
 CFLAGS_DEFS += -DTIRTC_AI_PREBUFFER_PACKETS=$(TIRTC_AI_PREBUFFER_PACKETS)
 else
@@ -196,6 +203,7 @@ ifeq ($(HWDEMO_BINDING_EN), y)
 ifeq ($(HWDEMO_LCD_SSD1306_EN), y)
 ifeq ($(HWDEMO_KEY_EN), y)
 CUSTOM_COBJSTEMP += $(TIRTC_SRC_ROOT)/features/device_call.o
+CUSTOM_COBJSTEMP += $(TIRTC_SRC_ROOT)/media/dev_playout.o
 CFLAGS_DEFS += -DHWDEMO_DEV_CHAT_EN
 else
 $(error HWDEMO_DEV_CHAT_EN=y requires HWDEMO_KEY_EN=y)

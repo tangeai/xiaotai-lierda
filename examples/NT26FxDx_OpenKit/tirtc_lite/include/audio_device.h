@@ -108,6 +108,16 @@ int demo_ai_audio_record_20ms(
     const demo_ai_audio_lease_t *lease,
     int16_t pcm[DEMO_AI_AUDIO_FRAME_SAMPLES]);
 
+/* DEVICE capture only: AEC builds retain up to eight continuous post-3A
+ * frames. Timestamp is anchored at session preparation and advances 20 ms
+ * per captured frame, preserving overflow gaps. Other owners use record_20ms.
+ * Non-AEC builds timestamp the synchronous capture completion instead. */
+int demo_ai_audio_record_20ms_timed(
+    const demo_ai_audio_lease_t *lease,
+    int16_t pcm[DEMO_AI_AUDIO_FRAME_SAMPLES], uint32_t *capture_ms);
+/* Overflow count for the current DEVICE audio lease; snapshot before release. */
+uint32_t demo_ai_audio_capture_dropped(const demo_ai_audio_lease_t *lease);
+
 /*
  * Queues PCM for asynchronous playback; both backends copy before returning.
  * The caller may immediately reuse pcm. A non-zero return means the complete

@@ -360,7 +360,6 @@ static void formal_event_cb(liot_mqtt_client_t *client,
     case LIOT_MQTT_PUB_EVENT:
         /* QoS 0 has no broker PUBACK.  This vendor event also reports local
          * asynchronous publish completion, where packet_id is normally 0. */
-        liot_trace("[FORMAL-MQTT] publish complete packet_id=%d\r\n", value);
         formal_signal();
         break;
 
@@ -1064,13 +1063,9 @@ void demo_formal_mqtt_maintenance(void)
     }
     ret = liot_mqtt_publish(s_client, s_up_topic, payload,
                             (unsigned short)length, 0, 0, NULL, NULL);
-    if (ret == LIOT_MQTTCLIENT_WOUNDBLOCK)
-    {
-        /* In this SDK -2 means the request was queued to the MQTT worker. */
-        liot_trace("[FORMAL-MQTT] heartbeat seq=%u queued\r\n",
-                   (unsigned int)s_heartbeat_seq);
-    }
-    else
+    /* Keep the heartbeat active without periodic success logs.
+     * In this SDK -2 means accepted by the asynchronous MQTT worker. */
+    if (ret != LIOT_MQTTCLIENT_SUCCESS && ret != LIOT_MQTTCLIENT_WOUNDBLOCK)
     {
         liot_trace("[FORMAL-MQTT] heartbeat seq=%u ret=%d\r\n",
                    (unsigned int)s_heartbeat_seq, ret);

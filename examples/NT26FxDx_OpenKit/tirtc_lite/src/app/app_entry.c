@@ -149,10 +149,9 @@ void user_main(void)
     /* Device-call MQTT routing must exist before formal MQTT comes online;
      * this also keeps every call HTTP/media operation off the UI task. */
     liot_task_t dev_chat_handle = NULL;
-    /* HTTP cleanup runs in a separate 12 KiB worker.  The DEV owner itself
-     * uses a conservative 32 KiB stack (its measured C call chain is well
-     * below this), preserving heap for TiRTC connection threads. */
-    if (liot_rtos_task_create(&dev_chat_handle, 32 * 1024,
+    /* Opus decode uses variable stack scratch; retain conservative headroom.
+     * AEC-disabled builds also encode here to preserve serial HAL access. */
+    if (liot_rtos_task_create(&dev_chat_handle, 64 * 1024,
                               LIOT_APP_TASK_PRIORITY,
                               "demo_dev_chat", demo_dev_chat_task,
                               NULL) != LIOT_OSI_SUCCESS)

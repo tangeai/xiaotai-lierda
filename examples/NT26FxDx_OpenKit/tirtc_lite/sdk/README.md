@@ -3,6 +3,11 @@
 
 # TiRTC SDK placement
 
+Current package: official TiRTC `v2.6.0-894972fb`, TGTRP
+`tag.v1.5.29-64b74c0a`, `eigencomm-ec71x` / ARM EABI / mini,
+built with GCC 10.2.1 (Arm 10-2020-q4-major). The matching headers and
+`libTiRTC.a` are copied unchanged from the supplied v2.6.0 archive.
+
 The headers and prebuilt archive below are proprietary TiRTC SDK materials.
 They are not covered by the MIT or Apache-2.0 licences applied to the product
 application source:

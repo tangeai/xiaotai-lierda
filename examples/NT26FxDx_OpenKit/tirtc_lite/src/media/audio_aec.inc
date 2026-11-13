@@ -39,6 +39,67 @@ static uint32_t s_aec_partial_since;
 static __attribute__((aligned(16))) int16_t s_aec_play_ring[AEC_PLAY_SAMPLES];
 static __attribute__((aligned(16))) int16_t s_aec_play_chunk[AEC_CHUNK_SAMPLES];
 
+/* DEVICE only: retain continuous post-3A PCM while its task encodes/sends.
+ * Other owners retain the validated one-request mailbox. The ISR never calls
+ * RTOS APIs: tasks mask it while changing the ring. Eight frames bound latency
+ * to 160 ms; overflow discards the oldest complete frame, not fresh speech. */
+#define AEC_DEVICE_CAPTURE_FRAMES 8U
+static __attribute__((aligned(16))) int16_t
+    s_device_capture_pcm[AEC_DEVICE_CAPTURE_FRAMES][DEMO_AI_AUDIO_FRAME_SAMPLES];
+static uint32_t s_device_capture_ts[AEC_DEVICE_CAPTURE_FRAMES];
+static volatile bool s_device_capture_enabled;
+static uint32_t s_device_capture_read, s_device_capture_count;
+static uint32_t s_device_capture_bytes, s_device_capture_epoch;
+static uint32_t s_device_capture_next_ms, s_device_capture_dropped;
+
+static int aec_device_capture_begin(const demo_ai_audio_lease_t *lease)
+{
+    uint32_t now = liot_rtos_get_running_time();
+    if (lease->owner != DEMO_AI_AUDIO_OWNER_DEVICE) return 0;
+    liot_rtos_enter_critical();
+    if (!demo_ai_audio_lease_valid_locked(lease) || s_aec_fault ||
+        s_aec_stopping || s_aec_retiring || s_aec_stop_requested) {
+        liot_rtos_exit_critical();
+        return DEMO_AI_AUDIO_ERR_INVALID_LEASE;
+    }
+    s_device_capture_read = s_device_capture_count = s_device_capture_bytes = 0U;
+    s_device_capture_dropped = 0U;
+    s_device_capture_epoch = s_aec_epoch;
+    s_device_capture_next_ms = now;
+    s_device_capture_enabled = true;
+    liot_rtos_exit_critical();
+    return 0;
+}
+
+/* Called only by the IPC ISR after validating the PCM and active generation.
+ * Frame timestamps advance for every captured frame, including overflow, so
+ * the network timeline does not conceal locally discarded microphone PCM. */
+static void aec_device_capture_push(const uint8_t *data, uint16_t length)
+{
+    while (length != 0U) {
+        uint32_t write, room, take;
+        if (s_device_capture_bytes == 0U &&
+            s_device_capture_count == AEC_DEVICE_CAPTURE_FRAMES) {
+            s_device_capture_read = (s_device_capture_read + 1U) % AEC_DEVICE_CAPTURE_FRAMES;
+            --s_device_capture_count;
+            if (s_device_capture_dropped != ~0U) ++s_device_capture_dropped;
+        }
+        write = (s_device_capture_read + s_device_capture_count) % AEC_DEVICE_CAPTURE_FRAMES;
+        room = DEMO_AI_AUDIO_FRAME_BYTES - s_device_capture_bytes;
+        take = length < room ? length : room;
+        memcpy((uint8_t *)s_device_capture_pcm[write] + s_device_capture_bytes, data, take);
+        s_device_capture_bytes += take;
+        data += take;
+        length = (uint16_t)(length - take);
+        if (s_device_capture_bytes == DEMO_AI_AUDIO_FRAME_BYTES) {
+            s_device_capture_ts[write] = s_device_capture_next_ms;
+            s_device_capture_next_ms += DEMO_AI_AUDIO_FRAME_MS;
+            s_device_capture_bytes = 0U;
+            ++s_device_capture_count;
+        }
+    }
+}
+
 static bool aec_levels_lock(uint32_t timeout_ms);
 static int aec_start(void);
 
@@ -117,6 +178,12 @@ static void aec_record_callback(uint8_t *data, uint16_t length)
     uint32_t room;
     if (!s_aec_running || data == NULL || length == 0U || (length & 1U)) return;
     s_aec_seen_capture = true;
+    if (s_device_capture_enabled &&
+        s_audio_owner == DEMO_AI_AUDIO_OWNER_DEVICE &&
+        s_device_capture_epoch == s_aec_epoch) {
+        aec_device_capture_push(data, length);
+        return;
+    }
     if (!s_aec_capture_waiting || s_aec_capture_epoch != s_aec_epoch) return;
     room = DEMO_AI_AUDIO_FRAME_BYTES - s_aec_capture_bytes;
     if (length > room) length = (uint16_t)room;
@@ -391,6 +458,8 @@ static int aec_stop(const demo_ai_audio_lease_t *lease)
         return s_aec_fault ? AEC_ERR_FAULT : 0;
     }
     ++s_aec_epoch;
+    s_device_capture_enabled = false;
+    s_device_capture_read = s_device_capture_count = s_device_capture_bytes = 0U;
     s_aec_capture_waiting = s_aec_capture_ready = false;
     s_aec_capture_bytes = 0U;
     s_aec_read = s_aec_count = 0U;
@@ -427,28 +496,40 @@ static int aec_stop(const demo_ai_audio_lease_t *lease)
     return !s_aec_fault ? 0 : AEC_ERR_FAULT;
 }
 
-static int aec_record(const demo_ai_audio_lease_t *lease, int16_t *pcm)
+static int aec_record(const demo_ai_audio_lease_t *lease, int16_t *pcm, uint32_t *capture_ms)
 {
     uint32_t started, epoch;
+    bool device_ring;
     int ret = DEMO_AI_AUDIO_ERR_CAPTURE_TIMEOUT;
     liot_rtos_enter_critical();
     if (!demo_ai_audio_lease_valid_locked(lease) || s_aec_fault ||
-        s_aec_stopping || s_aec_retiring || s_aec_stop_requested || s_aec_capture_call_busy) {
+        s_aec_stopping || s_aec_retiring || s_aec_stop_requested || s_aec_capture_call_busy ||
+        (capture_ms != NULL && !s_device_capture_enabled)) {
         liot_rtos_exit_critical();
         return AEC_ERR_BUSY;
     }
     epoch = s_aec_epoch;
+    device_ring = lease->owner == DEMO_AI_AUDIO_OWNER_DEVICE && s_device_capture_enabled;
     s_aec_capture_call_busy = true;
     s_aec_capture_epoch = epoch;
     s_aec_capture_bytes = 0U;
     s_aec_capture_ready = false;
-    s_aec_capture_waiting = true;
+    s_aec_capture_waiting = !device_ring;
     liot_rtos_exit_critical();
     started = liot_rtos_get_running_time();
     for (;;) {
         liot_rtos_enter_critical();
         if (epoch != s_aec_epoch || !demo_ai_audio_lease_valid_locked(lease) || s_aec_fault) {
             ret = DEMO_AI_AUDIO_ERR_INVALID_LEASE;
+        } else if (device_ring && s_device_capture_count != 0U) {
+            uint32_t slot = s_device_capture_read;
+            memcpy(pcm, s_device_capture_pcm[slot], DEMO_AI_AUDIO_FRAME_BYTES);
+            if (capture_ms != NULL) *capture_ms = s_device_capture_ts[slot];
+            s_device_capture_read = (slot + 1U) % AEC_DEVICE_CAPTURE_FRAMES;
+            --s_device_capture_count;
+            s_aec_capture_call_busy = false;
+            liot_rtos_exit_critical();
+            return 0;
         } else if (s_aec_capture_ready) {
             memcpy(pcm, s_record_frame, DEMO_AI_AUDIO_FRAME_BYTES);
             (void)lite_audio_guard_impulses(lease->owner, s_record_frame, pcm);
@@ -475,8 +556,7 @@ static int aec_play(const demo_ai_audio_lease_t *lease, const int16_t *pcm, uint
     uint32_t write;
     int volume, gain;
     if (samples > AEC_PLAY_SAMPLES) return AEC_ERR_BUSY;
-    volume = lease->owner == DEMO_AI_AUDIO_OWNER_DEVICE ? 10 :
-        s_speaker_volume_by_level[s_speaker_level - 1U];
+    volume = s_speaker_volume_by_level[s_speaker_level - 1U];
     gain = 256 * (volume / 10) + 26 * (volume % 10);
     liot_rtos_enter_critical();
     if (!demo_ai_audio_lease_valid_locked(lease) || s_aec_fault || s_aec_stopping || s_aec_retiring || s_aec_stop_requested ||

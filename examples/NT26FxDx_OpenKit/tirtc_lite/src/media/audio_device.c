@@ -37,14 +37,6 @@ static const uint8_t s_speaker_volume_by_level[DEMO_AI_AUDIO_LEVEL_MAX] = {
     30U, 33U, 37U, 40U, 43U, 47U, 50U, 53U, 57U, 60U
 };
 
-/* DEV receives full-range G.711 PCM. The SDK's software volume 10 is unity;
- * using the UI's codec value here first amplified PCM by 3..6x and clipped
- * it before the DAC attenuated it. Move that gain to the codec for DEV only.
- * These values preserve the former small-signal levels within 0.6 dB. */
-static const uint8_t s_dev_codec_volume_by_level[DEMO_AI_AUDIO_LEVEL_MAX] = {
-    38U, 41U, 46U, 50U, 53U, 57U, 61U, 64U, 69U, 72U
-};
-
 /* Keep L1 at 7/160; cap L10 at the previous L6 (9/199). */
 static const uint8_t s_mic_gain_by_level[DEMO_AI_AUDIO_LEVEL_MAX] = {
     7U, 7U, 7U, 8U, 8U, 8U, 8U, 9U, 9U, 9U
@@ -55,13 +47,24 @@ static const uint8_t s_mic_volume_by_level[DEMO_AI_AUDIO_LEVEL_MAX] = {
     182U, 186U, 190U, 195U, 199U
 };
 
+/* DEV-only microphone levels. Preserve L1-L6; L8 uses SDK gain/volume
+ * parameters 10/196. AI, WeChat and other owners keep the table above. */
+static const uint8_t s_dev_mic_gain_by_level[DEMO_AI_AUDIO_LEVEL_MAX] = {
+    7U, 7U, 7U, 8U, 8U, 8U, 9U, 10U, 10U, 10U
+};
+static const uint8_t s_dev_mic_volume_by_level[DEMO_AI_AUDIO_LEVEL_MAX] = {
+    160U, 164U, 169U, 173U, 177U,
+    182U, 186U, 196U, 199U, 202U
+};
+
 /* The driver DMA path requires aligned storage for capture. */
 static __attribute__((aligned(16))) int16_t
     s_record_frame[DEMO_AI_AUDIO_FRAME_SAMPLES];
 
 /* Work around isolated full-scale capture impulses observed in SDK Record
  * blocks. This does not repair the underlying capture fault or analog
- * clipping. Limit it to DEV/GROUP uplink, before their 16k-to-8k conversion.
+ * clipping. Limit it to GROUP uplink, before its 16k-to-8k conversion;
+ * DEV uses the same capture samples as WeChat.
  * Four quiet, consistent ORIGINAL neighbours are required: checking just
  * the adjacent pair would also remove legitimate 4 kHz waveform peaks.
  * The independently captured blocks must never borrow previous-frame data. */
@@ -71,13 +74,16 @@ static uint32_t lite_audio_guard_impulses(demo_ai_audio_owner_e owner,
     uint32_t cleaned = 0U;
     const uint32_t count = DEMO_AI_AUDIO_FRAME_SAMPLES;
 
-    if (owner != DEMO_AI_AUDIO_OWNER_DEVICE
 #ifdef HWDEMO_GROUP_ROOM_EN
-        && owner != DEMO_AI_AUDIO_OWNER_GROUP_ROOM
-#endif
-        ) {
+    if (owner != DEMO_AI_AUDIO_OWNER_GROUP_ROOM) {
         return 0U;
     }
+#else
+    (void)owner;
+    (void)raw;
+    (void)output;
+    return 0U;
+#endif
     if (count < 5U) {
         return 0U;
     }
@@ -136,7 +142,16 @@ static volatile uint8_t s_speaker_level = DEMO_AI_AUDIO_DEFAULT_SPK_LEVEL;
 static volatile uint8_t s_mic_level = DEMO_AI_AUDIO_DEFAULT_MIC_LEVEL;
 static demo_ai_audio_owner_e s_audio_owner = DEMO_AI_AUDIO_OWNER_NONE;
 static uint32_t s_audio_generation;
+
+typedef struct {
+    uint32_t generation;
+    int result[3];
+    bool active;
+} audio_error_log_state_t;
+
+static audio_error_log_state_t s_level_write_error_log;
 #if DEMO_AI_AUDIO_AEC_ENABLE
+static audio_error_log_state_t s_codec_read_error_log;
 /* The first 3A TX starts the codec asynchronously and writes SDK defaults
  * after capture has already started. A clean application setting therefore
  * still needs a bounded-rate hardware check while the stream is active. */
@@ -152,6 +167,37 @@ static bool demo_ai_audio_lease_valid_locked(
            lease->owner == s_audio_owner &&
            lease->generation != 0U &&
            lease->generation == s_audio_generation;
+}
+
+/* Keep the first failure and changed error codes. A successful operation or
+ * a new lease admits another failure; retry behavior remains unchanged. */
+static bool demo_ai_audio_error_should_log(audio_error_log_state_t *state,
+                                         const demo_ai_audio_lease_t *lease,
+                                         int first, int second, int third)
+{
+    bool report = false;
+    liot_rtos_enter_critical();
+    if (demo_ai_audio_lease_valid_locked(lease))
+    {
+        if (first == L_AUD_ERR_SUCCESS && second == L_AUD_ERR_SUCCESS &&
+            third == L_AUD_ERR_SUCCESS)
+        {
+            state->active = false;
+        }
+        else
+        {
+            report = !state->active || state->generation != lease->generation ||
+                state->result[0] != first || state->result[1] != second ||
+                state->result[2] != third;
+            state->active = true;
+            state->generation = lease->generation;
+            state->result[0] = first;
+            state->result[1] = second;
+            state->result[2] = third;
+        }
+    }
+    liot_rtos_exit_critical();
+    return report;
 }
 
 
@@ -382,13 +428,13 @@ static int demo_ai_audio_apply_levels_impl(const demo_ai_audio_lease_t *lease,
 
     speaker_volume = s_speaker_volume_by_level[speaker_level - 1U];
     codec_volume = speaker_volume;
-    if (lease->owner == DEMO_AI_AUDIO_OWNER_DEVICE)
-    {
-        speaker_volume = 10U;
-        codec_volume = s_dev_codec_volume_by_level[speaker_level - 1U];
-    }
     mic_gain = s_mic_gain_by_level[mic_level - 1U];
     mic_volume = s_mic_volume_by_level[mic_level - 1U];
+    if (lease->owner == DEMO_AI_AUDIO_OWNER_DEVICE)
+    {
+        mic_gain = s_dev_mic_gain_by_level[mic_level - 1U];
+        mic_volume = s_dev_mic_volume_by_level[mic_level - 1U];
+    }
 
 #if DEMO_AI_AUDIO_AEC_ENABLE
     if (!s_levels_dirty) {
@@ -398,6 +444,7 @@ static int demo_ai_audio_apply_levels_impl(const demo_ai_audio_lease_t *lease,
          * with the requested level would rewrite most settings forever. */
         int expected = ((255 * (int)codec_volume / 100) * 100) / 255;
         Liot_AudErr_e read_ret;
+        bool report_read_error;
         if (!s_aec_play_active || s_aec_primed < 3U ||
             (uint32_t)(liot_rtos_get_running_time() - s_aec_levels_checked_at) <
                 AEC_LEVELS_CHECK_MS) {
@@ -406,6 +453,8 @@ static int demo_ai_audio_apply_levels_impl(const demo_ai_audio_lease_t *lease,
         }
         read_ret = Liot_AudioGetCodecVolume(&actual);
         s_aec_levels_checked_at = liot_rtos_get_running_time();
+        report_read_error = demo_ai_audio_error_should_log(&s_codec_read_error_log,
+            lease, read_ret, L_AUD_ERR_SUCCESS, L_AUD_ERR_SUCCESS);
         if (read_ret == L_AUD_ERR_SUCCESS && actual == expected) {
             (void)liot_rtos_mutex_unlock(s_aec_levels_mutex);
             return 0;
@@ -415,8 +464,9 @@ static int demo_ai_audio_apply_levels_impl(const demo_ai_audio_lease_t *lease,
          * zero: a successful return is not proof of a successful read or
          * write, so subsequent 100-ms checks remain enabled after retry. */
         s_levels_dirty = true;
-        AUDIO_RESULT_LOG(read_ret, "[AI-AUDIO] codec level drift: read=%d expected=%d ret=%d; restoring\r\n",
-                   actual, expected, (int)read_ret);
+        if (report_read_error || DEMO_AI_AUDIO_DEBUG)
+            liot_trace("[AI-AUDIO] codec level drift: read=%d expected=%d ret=%d; restoring\r\n",
+                       actual, expected, (int)read_ret);
     }
     /* A read may yield to Stop or an owner change. Never restore volume
      * after cancellation has published its gate; Stop mutes after us. */
@@ -440,14 +490,19 @@ static int demo_ai_audio_apply_levels_impl(const demo_ai_audio_lease_t *lease,
         codec_ret != L_AUD_ERR_SUCCESS ||
         mic_ret != L_AUD_ERR_SUCCESS)
     {
+        bool report = demo_ai_audio_error_should_log(&s_level_write_error_log,
+            lease, sw_ret, codec_ret, mic_ret);
         s_levels_dirty = true;
 #if DEMO_AI_AUDIO_AEC_ENABLE
         (void)liot_rtos_mutex_unlock(s_aec_levels_mutex);
 #endif
-        liot_trace("[AI-AUDIO] level apply failed ret=%d/%d/%d\r\n",
-                   (int)sw_ret, (int)codec_ret, (int)mic_ret);
+        if (report)
+            liot_trace("[AI-AUDIO] level apply failed ret=%d/%d/%d\r\n",
+                       (int)sw_ret, (int)codec_ret, (int)mic_ret);
         return -2;
     }
+    (void)demo_ai_audio_error_should_log(&s_level_write_error_log,
+        lease, sw_ret, codec_ret, mic_ret);
 
     /* Stop may publish its gate while waiting for our codec writes. Preserve
      * dirty in that case so a later session restores the level after mute. */
@@ -529,6 +584,34 @@ int demo_ai_audio_get_levels(const demo_ai_audio_lease_t *lease,
     return 0;
 }
 
+/* Error-only evidence for DEVICE setup; never reset a latched driver fault. */
+static int demo_ai_audio_init_error(const demo_ai_audio_lease_t *lease,
+                                    const char *stage, int result)
+{
+    if (lease->owner == DEMO_AI_AUDIO_OWNER_DEVICE)
+    {
+#if DEMO_AI_AUDIO_AEC_ENABLE
+        unsigned int ready, fault, running, stopping, pending, worker, retiring;
+        liot_rtos_enter_critical();
+        ready = s_audio_ready;
+        fault = s_aec_fault;
+        running = s_aec_running;
+        stopping = s_aec_stopping;
+        pending = s_aec_stop_requested;
+        worker = s_aec_worker_busy;
+        retiring = s_aec_retiring;
+        liot_rtos_exit_critical();
+        liot_trace("[DEV-AUDIO] init stage=%s ret=%d ready=%u fault=%u "
+                   "running=%u stopping=%u pending=%u worker=%u retiring=%u\r\n",
+                   stage, result, ready, fault, running, stopping, pending,
+                   worker, retiring);
+#else
+        liot_trace("[DEV-AUDIO] init stage=%s ret=%d\r\n", stage, result);
+#endif
+    }
+    return result;
+}
+
 int demo_ai_audio_init(const demo_ai_audio_lease_t *lease)
 {
 #if DEMO_AI_AUDIO_AEC_ENABLE
@@ -552,7 +635,8 @@ int demo_ai_audio_init(const demo_ai_audio_lease_t *lease)
     {
 #if DEMO_AI_AUDIO_AEC_ENABLE
         int reset_ret = aec_stop(lease);
-        if (reset_ret != 0) return reset_ret;
+        if (reset_ret != 0)
+            return demo_ai_audio_init_error(lease, "warm_stop", reset_ret);
         s_levels_dirty = true;
 #else
         /* Liot_AudioStop() leaves F6D_A's internal playback state at STOP.
@@ -570,12 +654,20 @@ int demo_ai_audio_init(const demo_ai_audio_lease_t *lease)
             return -21;
         }
 #endif
-        if (demo_ai_audio_apply_levels(lease) != 0)
+        int levels_ret = demo_ai_audio_apply_levels(lease);
+        if (levels_ret != 0)
         {
+            (void)demo_ai_audio_init_error(lease, "warm_levels", levels_ret);
             return -20;
         }
         AUDIO_DEBUG_LOG("[AI-AUDIO] session playback state reset\r\n");
+#if DEMO_AI_AUDIO_AEC_ENABLE
+        int capture_ret = aec_device_capture_begin(lease);
+        return capture_ret == 0 ? 0 :
+            demo_ai_audio_init_error(lease, "capture_begin", capture_ret);
+#else
         return 0;
+#endif
     }
 
     Liot_AonPowerCtl(true);
@@ -612,7 +704,11 @@ int demo_ai_audio_init(const demo_ai_audio_lease_t *lease)
             return AEC_ERR_FAULT;
         }
         ret = Liot_AudioInit(&s_audio_config);
-        if (ret != L_AUD_ERR_SUCCESS) return -(int)ret - 1;
+        if (ret != L_AUD_ERR_SUCCESS)
+        {
+            (void)demo_ai_audio_init_error(lease, "codec_init", (int)ret);
+            return -(int)ret - 1;
+        }
         s_aec_hw_ready = true;
     }
     {
@@ -635,15 +731,23 @@ int demo_ai_audio_init(const demo_ai_audio_lease_t *lease)
     s_audio_ready = true;
     s_play_done = true;
     s_levels_dirty = true;
-    if (demo_ai_audio_apply_levels(lease) != 0)
+    int levels_ret = demo_ai_audio_apply_levels(lease);
+    if (levels_ret != 0)
     {
+        (void)demo_ai_audio_init_error(lease, "cold_levels", levels_ret);
         return -20;
     }
 
     liot_trace("[AI-AUDIO] ready ES8311 I2C0/I2S0 PA11 "
                "16kHz/16bit/mono-right AEC=%u\r\n",
                (unsigned int)DEMO_AI_AUDIO_AEC_ENABLE);
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    int capture_ret = aec_device_capture_begin(lease);
+    return capture_ret == 0 ? 0 :
+        demo_ai_audio_init_error(lease, "capture_begin", capture_ret);
+#else
     return 0;
+#endif
 }
 
 int demo_ai_audio_prepare_session(const demo_ai_audio_lease_t *lease,
@@ -678,9 +782,9 @@ int demo_ai_audio_prepare_session(const demo_ai_audio_lease_t *lease,
     return demo_ai_audio_init(lease);
 }
 
-int demo_ai_audio_record_20ms(
+static int demo_ai_audio_record_20ms_impl(
     const demo_ai_audio_lease_t *lease,
-    int16_t pcm[DEMO_AI_AUDIO_FRAME_SAMPLES])
+    int16_t pcm[DEMO_AI_AUDIO_FRAME_SAMPLES], uint32_t *capture_ms)
 {
 #if DEMO_AI_AUDIO_AEC_ENABLE
     demo_ai_audio_lease_t snapshot;
@@ -702,13 +806,15 @@ int demo_ai_audio_record_20ms(
         return -1;
     }
 
+    if (capture_ms != NULL && lease->owner != DEMO_AI_AUDIO_OWNER_DEVICE)
+        return DEMO_AI_AUDIO_ERR_INVALID_LEASE;
     levels_ret = demo_ai_audio_apply_levels(lease);
     if (levels_ret != 0)
     {
         return levels_ret;
     }
 #if DEMO_AI_AUDIO_AEC_ENABLE
-    return aec_record(lease, pcm);
+    return aec_record(lease, pcm, capture_ms);
 #else
     ret = Liot_AudioRecord((uint8_t *)s_record_frame,
                            (int)DEMO_AI_AUDIO_FRAME_BYTES);
@@ -719,8 +825,39 @@ int demo_ai_audio_record_20ms(
 
     memcpy(pcm, s_record_frame, DEMO_AI_AUDIO_FRAME_BYTES);
     (void)lite_audio_guard_impulses(lease->owner, s_record_frame, pcm);
+    if (capture_ms != NULL) *capture_ms = liot_rtos_get_running_time();
     return 0;
 #endif
+}
+
+int demo_ai_audio_record_20ms(
+    const demo_ai_audio_lease_t *lease,
+    int16_t pcm[DEMO_AI_AUDIO_FRAME_SAMPLES])
+{
+    return demo_ai_audio_record_20ms_impl(lease, pcm, NULL);
+}
+
+int demo_ai_audio_record_20ms_timed(
+    const demo_ai_audio_lease_t *lease,
+    int16_t pcm[DEMO_AI_AUDIO_FRAME_SAMPLES], uint32_t *capture_ms)
+{
+    if (lease == NULL || lease->owner != DEMO_AI_AUDIO_OWNER_DEVICE || capture_ms == NULL)
+        return DEMO_AI_AUDIO_ERR_INVALID_LEASE;
+    return demo_ai_audio_record_20ms_impl(lease, pcm, capture_ms);
+}
+
+uint32_t demo_ai_audio_capture_dropped(const demo_ai_audio_lease_t *lease)
+{
+    uint32_t dropped = 0U;
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    liot_rtos_enter_critical();
+    if (demo_ai_audio_lease_valid_locked(lease) && lease->owner == DEMO_AI_AUDIO_OWNER_DEVICE)
+        dropped = s_device_capture_dropped;
+    liot_rtos_exit_critical();
+#else
+    (void)lease;
+#endif
+    return dropped;
 }
 
 int demo_ai_audio_play(const demo_ai_audio_lease_t *lease,

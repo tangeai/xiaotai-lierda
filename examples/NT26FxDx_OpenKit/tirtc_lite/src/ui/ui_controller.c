@@ -374,9 +374,10 @@ static void ui_sync_live_policy(void)
 #endif
 #ifdef HWDEMO_DEV_CHAT_EN
     /* Device calls may ring on HOME or while browsing the idle DEV page.
-     * A call still owns the same single ES8311/TiRTC connection budget. */
+     * Pending entry also asks an uncommitted background room GET to yield;
+     * real audio/connection ownership must still become idle first. */
     demo_dev_chat_set_home_allowed(
-        s_startup_state == UI_STARTUP_READY &&
+        s_startup_state == UI_STARTUP_READY && !s_entry_pending &&
         (policy_page == UI_PAGE_HOME || policy_page == UI_PAGE_DEV_CHAT
 #ifdef HWDEMO_GROUP_ROOM_EN
          || group_page

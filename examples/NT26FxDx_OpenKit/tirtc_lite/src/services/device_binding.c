@@ -112,9 +112,9 @@ static const char s_device_profile_json[] =
 #ifdef HWDEMO_LIVE_TALK_EN
     ","
 #endif
-    "\"call\":{\"up_audio_mt\":[\"alaw\"],\"down_audio_mt\":[\"alaw\"],"
+    "\"call\":{\"up_audio_mt\":[\"opus\"],\"down_audio_mt\":[\"opus\",\"alaw\"],"
     "\"up_video_mt\":[],\"down_video_mt\":[],"
-    "\"audio_rate\":8000,\"audio_channels\":1,\"no_video\":true}"
+    "\"audio_rate\":16000,\"audio_channels\":1,\"no_video\":true}"
 #endif
 #ifdef HWDEMO_WECHAT_EN
 #if defined(HWDEMO_LIVE_TALK_EN) || defined(HWDEMO_DEV_CHAT_EN)
@@ -228,6 +228,12 @@ typedef struct
     volatile bool overflow;
     volatile bool open_failed;
     volatile bool socket_open_failed;
+    /* Diagnostic state belongs to this retained request, not its retries. */
+    bool reaper_create_error_logged;
+    bool retained_close_logged;
+    bool release_error_logged;
+    int reaper_create_error;
+    int release_error;
 } binding_http_ctx_t;
 
 static demo_binding_snapshot_t s_snapshot = {
@@ -586,8 +592,11 @@ static void binding_http_event_cb(liot_http_client_t *client,
         return;
     }
 
-    liot_trace("[BIND-HTTP] event=%d code=0x%x\r\n",
-               event, (unsigned int)event_code);
+    if (event_code != LIOT_HTTPC_SUCCESS)
+    {
+        liot_trace("[BIND-HTTP] event=%d code=0x%x\r\n",
+                   event, (unsigned int)event_code);
+    }
 
     switch (event)
     {
@@ -835,8 +844,32 @@ static void binding_http_retained_cleanup_complete(binding_http_ctx_t *ctx)
         liot_trace("[BIND-HTTP] cleanup detach invariant failed\r\n");
         return;
     }
+    if (ctx->reaper_create_error_logged)
+    {
+        liot_trace("[BIND-HTTP] retained cleanup recovered\r\n");
+    }
     memset(ctx, 0, sizeof(*ctx));
     liot_rtos_free(ctx);
+}
+
+static void binding_http_log_release_result(binding_http_ctx_t *ctx,
+                                            const char *phase, int result)
+{
+    if (result == LIOT_HTTPC_SUCCESS)
+    {
+        if (ctx->release_error_logged)
+        {
+            liot_trace("[BIND-HTTP] %s release recovered\r\n", phase);
+        }
+        ctx->release_error_logged = false;
+    }
+    else if (!ctx->release_error_logged || ctx->release_error != result)
+    {
+        ctx->release_error_logged = true;
+        ctx->release_error = result;
+        liot_trace("[BIND-HTTP] %s release failed ret=0x%x; retrying\r\n",
+                   phase, (unsigned int)result);
+    }
 }
 
 static void binding_http_reaper_task(void *arg)
@@ -852,11 +885,21 @@ static void binding_http_reaper_task(void *arg)
         liot_rtos_task_delete(NULL);
         return;
     }
+    /* The new task owns ctx; it may finish before task_create returns. */
+    if (ctx->reaper_create_error_logged)
+    {
+        ctx->reaper_create_error_logged = false;
+        liot_trace("[BIND-HTTP] reaper create recovered\r\n");
+    }
 
-    liot_trace("[BIND-HTTP] reaper waiting for close\r\n");
     while (!ctx->closed)
     {
         (void)binding_http_wait_close(ctx, BIND_HTTP_REAPER_RETRY_MS);
+    }
+    if (ctx->retained_close_logged)
+    {
+        ctx->retained_close_logged = false;
+        liot_trace("[BIND-HTTP] retained close recovered\r\n");
     }
 
     /* CLOSE is raised from the HTTP worker before that callback has fully
@@ -865,10 +908,8 @@ static void binding_http_reaper_task(void *arg)
     liot_rtos_task_sleep_s(BIND_HTTP_PRE_RELEASE_S);
     for (;;)
     {
-        liot_trace("[BIND-HTTP] reaper release begin\r\n");
         release_ret = liot_httpc_release(&ctx->client);
-        liot_trace("[BIND-HTTP] reaper release ret=0x%x\r\n",
-                   (unsigned int)release_ret);
+        binding_http_log_release_result(ctx, "reaper", release_ret);
         if (release_ret == LIOT_HTTPC_SUCCESS)
         {
             break;
@@ -889,6 +930,8 @@ static bool binding_http_start_reaper(void)
     binding_http_ctx_t *ctx = NULL;
     liot_task_t reaper_task = NULL;
     bool start = false;
+    bool report_error;
+    int create_ret;
 
     liot_rtos_enter_critical();
     if (s_http_cleanup_pending && s_http_cleanup_ctx != NULL &&
@@ -904,20 +947,29 @@ static bool binding_http_start_reaper(void)
     {
         return true;
     }
-    if (liot_rtos_task_create(&reaper_task,
+    create_ret = liot_rtos_task_create(&reaper_task,
                               BIND_HTTP_REAPER_STACK,
                               LIOT_APP_TASK_PRIORITY,
                               "bind_http_reaper",
                               binding_http_reaper_task,
-                              ctx) == LIOT_OSI_SUCCESS)
+                              ctx);
+    if (create_ret == LIOT_OSI_SUCCESS)
     {
         return true;
     }
 
     liot_rtos_enter_critical();
+    report_error = !ctx->reaper_create_error_logged ||
+                   ctx->reaper_create_error != create_ret;
+    ctx->reaper_create_error_logged = true;
+    ctx->reaper_create_error = create_ret;
     s_http_reaper_running = false;
     liot_rtos_exit_critical();
-    liot_trace("[BIND-HTTP] reaper create failed; retained for retry\r\n");
+    if (report_error)
+    {
+        liot_trace("[BIND-HTTP] reaper create failed ret=%d; retained for retry\r\n",
+                   create_ret);
+    }
     return false;
 }
 
@@ -973,12 +1025,16 @@ static bool binding_http_resume_retained_cleanup(void)
     (void)binding_http_wait_close(ctx, 0);
     if (ctx->closed)
     {
+        if (ctx->retained_close_logged)
+        {
+            ctx->retained_close_logged = false;
+            liot_trace("[BIND-HTTP] retained close recovered\r\n");
+        }
         /* No new worker task is needed after CLOSE.  This is the no-allocation
          * fallback when the original reaper task could not be created. */
         liot_rtos_task_sleep_s(BIND_HTTP_PRE_RELEASE_S);
         release_ret = liot_httpc_release(&ctx->client);
-        liot_trace("[BIND-HTTP] retained inline release ret=0x%x\r\n",
-                   (unsigned int)release_ret);
+        binding_http_log_release_result(ctx, "retained inline", release_ret);
         if (release_ret == LIOT_HTTPC_SUCCESS)
         {
             binding_http_retained_cleanup_complete(ctx);
@@ -988,7 +1044,11 @@ static bool binding_http_resume_retained_cleanup(void)
     else
     {
         /* Keep retaining callback storage until a real CLOSE is observed. */
-        liot_trace("[BIND-HTTP] retained close pending; restart reaper\r\n");
+        if (!ctx->retained_close_logged)
+        {
+            ctx->retained_close_logged = true;
+            liot_trace("[BIND-HTTP] retained close pending; restart reaper\r\n");
+        }
     }
 
     liot_rtos_enter_critical();
@@ -998,7 +1058,7 @@ static bool binding_http_resume_retained_cleanup(void)
     return true;
 }
 
-/* A deferred AI-token cleanup still owns libliot_https' singleton worker.
+/* Deferred credential cleanup still owns libliot_https' singleton worker.
  * Later feature requests wait for that worker to exit instead of failing with
  * a transient "previous request is still closing" error. */
 static int binding_http_wait_retained_cleanup(uint32_t timeout_ms)
@@ -1136,11 +1196,6 @@ static int binding_http_request_unlocked(const char *url_string,
         ret = -2;
         goto cleanup;
     }
-    liot_trace("[BIND-HTTP] parsed host=%s port=%u uri=%s scheme=%d\r\n",
-               (url.host != NULL) ? url.host : "(null)",
-               (unsigned int)url.port,
-               (url.uri != NULL) ? url.uri : "(null)",
-               url.scheme);
     if (liot_httpc_new(&ctx->client, binding_http_event_cb, ctx) !=
         LIOT_HTTPC_SUCCESS)
     {
@@ -1148,7 +1203,6 @@ static int binding_http_request_unlocked(const char *url_string,
         ret = -4;
         goto cleanup;
     }
-    liot_trace("[BIND-HTTP] client=%d created\r\n", ctx->client);
 
     /* F6D_A HTTP is SIM0-only; its SIM_ID option returns NOT_SUPPORT. */
     BIND_HTTP_SETOPT_OR_FAIL(LIOT_HTTP_CLIENT_OPT_PDPCID, BIND_PDP_CID);
@@ -1185,12 +1239,11 @@ static int binding_http_request_unlocked(const char *url_string,
         BIND_HTTP_SETOPT_OR_FAIL(LIOT_HTTP_CLIENT_OPT_RAW_REQUEST, 0);
     }
 
-    liot_trace("[BIND-HTTP] perform begin\r\n");
     perform_ret = binding_http_perform(ctx);
-    liot_trace("[BIND-HTTP] perform ret=0x%x\r\n",
-               (unsigned int)perform_ret);
     if (perform_ret != LIOT_HTTPC_SUCCESS)
     {
+        liot_trace("[BIND-HTTP] perform failed ret=0x%x\r\n",
+                   (unsigned int)perform_ret);
         ret = -5;
         goto cleanup;
     }
@@ -1241,22 +1294,20 @@ cleanup:
                             liot_httpc_is_running(&ctx->client);
         }
 
-        /* A completed AI-token response already lives in caller-owned
+        /* A completed credential response already lives in caller-owned
          * storage.  Let an existing STOP/CLOSE continue, or submit one stop
          * while still running, then let the reaper retain callback storage
-         * until SESSION_CLOSE while the AI task proceeds with WHIP. */
+         * until SESSION_CLOSE while the caller proceeds with RTC setup. */
         if (ret == 0 && defer_success_cleanup)
         {
-            liot_trace("[BIND-HTTP] successful cleanup deferred\r\n");
             if (stop_required)
             {
                 stop_ret = liot_httpc_stop(&ctx->client);
-                liot_trace("[BIND-HTTP] deferred stop ret=0x%x\r\n",
-                           (unsigned int)stop_ret);
-            }
-            else
-            {
-                liot_trace("[BIND-HTTP] deferred stop skipped: closing/closed\r\n");
+                if (stop_ret != LIOT_HTTPC_SUCCESS)
+                {
+                    liot_trace("[BIND-HTTP] deferred stop failed ret=0x%x\r\n",
+                               (unsigned int)stop_ret);
+                }
             }
             binding_http_retain_for_cleanup(ctx);
             ctx = NULL;
@@ -1265,15 +1316,12 @@ cleanup:
 
         if (stop_required)
         {
-            liot_trace("[BIND-HTTP] stop begin ret=%d\r\n", ret);
             stop_ret = liot_httpc_stop(&ctx->client);
-            liot_trace("[BIND-HTTP] stop ret=0x%x\r\n",
-                       (unsigned int)stop_ret);
-        }
-        else
-        {
-            liot_trace("[BIND-HTTP] stop skipped: closing/closed ret=%d\r\n",
-                       ret);
+            if (stop_ret != LIOT_HTTPC_SUCCESS)
+            {
+                liot_trace("[BIND-HTTP] stop failed ret=0x%x\r\n",
+                           (unsigned int)stop_ret);
+            }
         }
         if (!ctx->closed)
         {
@@ -1297,10 +1345,8 @@ cleanup:
         /* Match the stable F6D_A lifecycle: let the CLOSE callback unwind
          * before release touches the singleton. */
         liot_rtos_task_sleep_s(BIND_HTTP_PRE_RELEASE_S);
-        liot_trace("[BIND-HTTP] release begin\r\n");
         release_ret = liot_httpc_release(&ctx->client);
-        liot_trace("[BIND-HTTP] release ret=0x%x\r\n",
-                   (unsigned int)release_ret);
+        binding_http_log_release_result(ctx, "sync", release_ret);
         if (release_ret != LIOT_HTTPC_SUCCESS)
         {
             ret = -8;
@@ -1311,12 +1357,9 @@ cleanup:
         }
 
         /* release only posts the worker-exit message; let it consume it. */
-        liot_trace("[BIND-HTTP] worker settle begin socket_fail=%u\r\n",
-                   ctx->socket_open_failed ? 1U : 0U);
         liot_rtos_task_sleep_s(ctx->socket_open_failed ?
                                    BIND_HTTP_SOCKET_SETTLE_S :
                                    BIND_HTTP_NORMAL_SETTLE_S);
-        liot_trace("[BIND-HTTP] worker settle done\r\n");
     }
     if (ctx != NULL)
     {
@@ -1724,9 +1767,26 @@ int demo_binding_service_request_timeout(
 
     http_method = method == DEMO_BIND_HTTP_POST ?
                       LIOT_HTTPC_METHOD_POST : LIOT_HTTPC_METHOD_GET;
-    ret = binding_http_request_timeout(
-        request_url, http_method, json_body, auth_headers, response,
-        (int)response_size, http_status, timeout_ms);
+    /* Device setup/list display can continue after the response is copied.
+     * Keep close/release/settle in the existing reaper; the next HTTP request
+     * still waits for safe cleanup. Do not broaden this to other services. */
+    if (service == DEMO_BIND_SERVICE_CALL &&
+        ((method == DEMO_BIND_HTTP_POST &&
+          (strcmp(path, "/v1/call/request") == 0 ||
+           strcmp(path, "/v1/call/device/info") == 0)) ||
+         (method == DEMO_BIND_HTTP_GET &&
+          strcmp(path, "/v1/call/device/contacts") == 0)))
+    {
+        ret = binding_http_request_timeout_mode(
+            request_url, http_method, json_body, auth_headers, response,
+            (int)response_size, http_status, timeout_ms, true);
+    }
+    else
+    {
+        ret = binding_http_request_timeout(
+            request_url, http_method, json_body, auth_headers, response,
+            (int)response_size, http_status, timeout_ms);
+    }
 
 cleanup:
     binding_secure_zero(&services, sizeof(services));

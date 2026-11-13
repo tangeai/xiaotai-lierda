@@ -3,14 +3,15 @@
  * SPDX-FileCopyrightText: 2026 Shenzhen Tange Intelligent Technology Co., Ltd. <https://tange.ai>
  * SPDX-License-Identifier: MIT
  *
- * Device-to-device audio calling for NT26F6D0/F6D_A.
+ * Device-to-device audio calling for NT26F6D0/F6D_D.
  *
  * This is a small board port of the official TiRTC minimal-system call flow:
  *   call-server HTTP + formal MQTT signaling + one shared TiRTC P2P runtime.
  * The caller creates a room and waits for an inbound P2P connection.  The
  * callee obtains a one-shot token, connects to the caller and confirms the
- * room with command 0x2000.  Both directions then use G.711 A-law, 8 kHz,
- * mono, 20 ms on stream 10.  This board has no camera, so an incoming video
+ * room with command 0x2000. Both directions use Opus, 16 kHz, mono,
+ * 20 ms on stream 10; legacy G.711 receive remains supported. This board has
+ * no camera, so an incoming video
  * room is deliberately downgraded to its audio stream, matching the
  * official audio-only simulator policy.  SDK/MQTT callbacks only copy
  * bounded events; this worker owns HTTP, JSON, disconnect and ES8311.
@@ -33,6 +34,8 @@
 #include "device_binding.h"
 #include "formal_mqtt.h"
 #include "g711_codec.h"
+#include "opus_codec.h"
+#include "dev_playout.h"
 #ifdef HWDEMO_LIVE_TALK_EN
 #include "platform_intercom.h"
 #endif
@@ -50,7 +53,7 @@
 #define DEV_CONTACT_MAX                    8U
 #define DEV_ID_MAX                        65U
 #define DEV_ROOM_MAX                     129U
-/* Current F6D_A libTiRTC builds a bounded HTTP Authorization header.  Keep
+/* The TiRTC library builds a bounded HTTP Authorization header. Keep
  * the connect token below 601 bytes and fail visibly instead of passing an
  * oversized value into this library build. */
 #define DEV_TOKEN_MAX                    601U
@@ -61,23 +64,22 @@
 #define DEV_MQTT_EVENT_DEPTH                8U
 #define DEV_SIGNAL_EVENT_DEPTH              8U
 #define DEV_SIGNAL_PAYLOAD_MAX             160U
-/* Hold 480 ms of ordinary 20 ms packets to absorb late receive bursts. */
-#define DEV_AUDIO_QUEUE_DEPTH               24U
-/* Keep each receive service bounded so a larger queue cannot starve capture. */
+/* Retain short receive bursts without allocating in the SDK callback. */
+#define DEV_AUDIO_QUEUE_DEPTH               32U
+/* Keep receive draining bounded so capture/control get another turn. */
 #define DEV_PLAY_BATCH_MAX                   8U
-/* Return to capture after a slow playback submission. A single SDK call may
- * still block longer than this; do not compound that wait across a batch. */
 #define DEV_PLAY_BUDGET_MS                   20U
 /* Absorb brief TX scheduling delays without blocking capture (160 ms PCM). */
 #define DEV_UPLINK_QUEUE_DEPTH               8U
 /* Drop locally queued speech that is no longer useful after a TX stall. */
 #define DEV_UPLINK_MAX_AGE_MS               300U
 #define DEV_UPLINK_TASK_STACK       (12U * 1024U)
+#define DEV_CAPTURE_TASK_STACK      (64U * 1024U) /* Opus fixed-point VLA scratch. */
+#define DEV_CAPTURE_STOP_MS               1000U
 #define DEV_AUDIO_FRAME_BYTES              160U
-/* Accept up to four coalesced 20 ms G.711 A-law packets without allocating
- * from the heap in the SDK callback. */
-#define DEV_AUDIO_PAYLOAD_MAX \
-    (DEV_AUDIO_FRAME_BYTES * 4U)
+/* Bound both Opus packets and legacy coalesced A-law at the callback. */
+#define DEV_AUDIO_PAYLOAD_MAX DEMO_AI_OPUS_MAX_PACKET
+#define DEV_ALAW_PAYLOAD_MAX (DEV_AUDIO_FRAME_BYTES * 4U)
 /* The official minimal adapter permits exactly one asynchronous connect in
  * flight.  Keep its borrowed request storage intact until the SDK callback
  * completes, even when the business-side watchdog has ended the session. */
@@ -94,10 +96,7 @@
 #define DEV_STREAM_ID                       10U
 #define DEV_CMD_CONFIRM                 0x2000U
 #define DEV_CMD_HANGUP                  0x2001U
-#define DEV_UPLINK_SAMPLES_8K \
-    (DEMO_AI_AUDIO_FRAME_SAMPLES / 2U)
-#define DEV_PLAY_PCM_MAX_SAMPLES \
-    (DEV_AUDIO_PAYLOAD_MAX * 2U)
+#define DEV_PLAY_PCM_MAX_SAMPLES 1920U /* Opus maximum 120 ms at 16 kHz. */
 
 #define DEV_HTTP_TIMEOUT_MS              10000U
 #define DEV_OUTGOING_TIMEOUT_MS          30000U
@@ -109,14 +108,12 @@
 #define DEV_AUDIO_PRODUCER_TIMEOUT_MS      1000U
 #define DEV_LATE_INCOMING_GUARD_MS       10000U
 #define DEV_CONTACT_RETRY_MS             10000U
+#define DEV_CONTACT_CACHE_MS             30000U
 #define DEV_ROOM_FIRST_CHECK_MS            2000U
 #define DEV_ROOM_CHECK_INTERVAL_MS        30000U
 #define DEV_EXISTING_ROOM_RETRY_MS          1000U
 #define DEV_ERROR_VISIBLE_MS              3000U
 #define DEV_IDLE_WAIT_MS                    50U
-/* Trade startup/rebuffer latency for tolerance of uneven packet delivery. */
-#define DEV_PREBUFFER_MS                   200U
-#define DEV_PREBUFFER_TIMEOUT_MS           300U
 #ifdef HWDEMO_GROUP_ROOM_EN
 #define DEV_GROUP_HANDOFF_TIMEOUT_MS     30000U
 #endif
@@ -193,8 +190,11 @@ typedef struct
 typedef struct
 {
     uint16_t length;
+    uint16_t samples; /* decoded duration at 16 kHz, never compressed bytes */
     uint8_t flags;
+    uint8_t media;
     uint32_t generation;
+    uint32_t timestamp;
     uint8_t payload[DEV_AUDIO_PAYLOAD_MAX];
 } dev_audio_frame_t;
 
@@ -223,8 +223,9 @@ typedef struct
 {
     uint32_t generation;
     uint32_t tirtc_generation;
+    uint32_t enqueue_ms; /* wall clock for TX expiry, distinct from capture timeline */
     TIRTCFRAMEINFO frame;
-    uint8_t payload[DEV_UPLINK_SAMPLES_8K];
+    uint8_t payload[DEMO_AI_OPUS_MAX_PACKET];
 } dev_uplink_job_t;
 
 typedef struct
@@ -233,7 +234,7 @@ typedef struct
     uint8_t attempt;
     volatile bool pending;
     /* TiRtcConnect is asynchronous.  Keep its string arguments alive until
-     * the matching callback even though the current F6D_A archive consumes
+     * the matching callback even though the current archive consumes
      * them synchronously; this also matches the official minimal runtime. */
     char remote_id[DEV_ID_MAX];
     char token[DEV_TOKEN_MAX];
@@ -255,6 +256,13 @@ typedef struct
 } dev_room_action_job_t;
 
 static liot_sem_t s_event_sem;
+static liot_sem_t s_capture_sem;
+static volatile bool s_capture_busy;
+static demo_opus_context_t s_dev_opus;
+static dev_playout_t s_playout;
+static uint32_t s_play_pending_samples;
+static uint32_t s_encode_max_ms;
+static uint32_t s_decode_max_ms;
 static liot_queue_t s_mqtt_queue;
 static liot_queue_t s_signal_queue;
 static liot_queue_t s_audio_queue;
@@ -275,6 +283,7 @@ static volatile bool s_request_call;
 /* Covers the worker-owned request before DIALING becomes visible to KEY2. */
 static volatile bool s_call_starting;
 static volatile uint32_t s_request_call_sequence;
+static volatile uint32_t s_request_call_ms;
 static volatile bool s_request_hangup;
 static volatile bool s_request_conn_error;
 static volatile int s_request_conn_error_code;
@@ -292,6 +301,7 @@ static bool s_request_contact_valid;
 static uint8_t s_contact_count;
 static uint8_t s_selected_contact;
 static uint32_t s_contacts_revision;
+static uint32_t s_contacts_updated_ms;
 static bool s_contacts_refreshing;
 static uint32_t s_call_refresh_requested;
 static uint32_t s_call_refresh_completed;
@@ -343,6 +353,7 @@ static volatile bool s_recovery_inflight;
 static bool s_recovery_cancelled;
 static bool s_recovery_committing;
 static volatile uint32_t s_audio_queued;
+/* Queued output samples at DEMO_AI_AUDIO_SAMPLE_RATE (16 kHz). */
 static volatile uint32_t s_audio_queued_samples;
 static volatile uint32_t s_audio_producers;
 static volatile uint32_t s_room_action_pending;
@@ -356,10 +367,6 @@ static uint32_t s_tx_dropped;
 static uint32_t s_tx_session_queue_full;
 static uint32_t s_tx_session_sdk_busy;
 static uint32_t s_tx_session_expired;
-static uint32_t s_prebuffer_start_ms;
-static uint32_t s_play_tail_ms;
-static uint8_t s_play_tail_fraction;
-static bool s_play_continuing;
 static bool s_prebuffering;
 static bool s_downlink_reject_logged;
 static bool s_playback_error_logged;
@@ -367,6 +374,7 @@ static bool s_playback_error_logged;
 static tirtc_conn_t volatile s_conn;
 static volatile bool s_tirtc_claimed;
 static volatile bool s_tirtc_release_pending;
+static bool s_tirtc_release_error_logged;
 static volatile uint32_t s_tirtc_generation;
 static uint32_t s_tirtc_release_at;
 static dev_connect_context_t s_connect_contexts[DEV_CONNECT_CONTEXT_COUNT];
@@ -376,17 +384,21 @@ static uint8_t s_connect_attempt;
 static char s_http_response[DEV_HTTP_RESPONSE_MAX];
 static __attribute__((aligned(16))) int16_t
     s_capture_pcm[DEMO_AI_AUDIO_FRAME_SAMPLES];
-static uint8_t s_uplink_alaw[DEV_UPLINK_SAMPLES_8K];
 static __attribute__((aligned(16))) int16_t
     s_play_pcm[DEV_PLAY_PCM_MAX_SAMPLES];
 static demo_ai_audio_lease_t s_audio_lease = DEMO_AI_AUDIO_LEASE_INIT;
 
 static void dev_process_mqtt(void);
 #if DEMO_AI_AUDIO_AEC_ENABLE
+static void dev_capture_task(void *argv);
+#endif
+#if DEMO_AI_AUDIO_AEC_ENABLE
 #define DEV_RECORD_FAILURE_LIMIT_MS 2000U
 static bool s_record_failure_active;
 static uint32_t s_record_failure_since;
 #endif
+
+#include "device_call_timing.inc"
 
 static void dev_signal(void)
 {
@@ -424,8 +436,7 @@ static void dev_drain_uplink(void)
            liot_rtos_queue_wait(s_uplink_queue, (uint8 *)&job,
                                 sizeof(job), LIOT_NO_WAIT) == LIOT_OSI_SUCCESS)
     {
-        /* Only the call worker produces jobs, so no new call can enqueue
-         * while this worker drains the previous call during start/stop. */
+        /* Capture is quiesced before start/stop drains the previous call. */
     }
 }
 
@@ -434,12 +445,13 @@ static void dev_send_uplink_job(const dev_uplink_job_t *job)
     bool current;
     bool signal = false;
     bool first = false;
+    uint32_t age;
     int ret;
 
     liot_rtos_enter_critical();
     current = dev_uplink_job_current_locked(job);
-    if (current && (uint32_t)(liot_rtos_get_running_time() - job->frame.ts) >
-                       DEV_UPLINK_MAX_AGE_MS)
+    age = liot_rtos_get_running_time() - job->enqueue_ms;
+    if (current && age > DEV_UPLINK_MAX_AGE_MS)
     {
         ++s_tx_dropped;
         ++s_tx_session_expired;
@@ -477,7 +489,8 @@ static void dev_send_uplink_job(const dev_uplink_job_t *job)
     liot_rtos_exit_critical();
     if (first)
     {
-        liot_trace("[DEV] first uplink ALAW bytes=%u\r\n",
+        dev_timing_now("first_tx", job->generation, ret);
+        liot_trace("[DEV] first uplink OPUS/16k/20ms bytes=%u\r\n",
                    (unsigned int)job->frame.length);
     }
     if (signal) dev_signal();
@@ -571,6 +584,7 @@ static int dev_tirtc_claim(void)
     liot_rtos_enter_critical();
     s_tirtc_claimed = true;
     s_tirtc_release_pending = false;
+    s_tirtc_release_error_logged = false;
     s_tirtc_generation = generation;
     s_tirtc_release_at = 0U;
     liot_rtos_exit_critical();
@@ -668,8 +682,10 @@ static bool dev_tirtc_try_release(void)
         liot_rtos_exit_critical();
         return true;
     }
-    if (ret != TIRTC_E_BUSY)
+    /* This is polled by the owner loop; report only the first failure. */
+    if (ret != TIRTC_E_BUSY && !s_tirtc_release_error_logged)
     {
+        s_tirtc_release_error_logged = true;
         liot_trace("[DEV] TiRTC session release deferred ret=%d\r\n", ret);
     }
     return false;
@@ -1133,6 +1149,7 @@ static int dev_fetch_contacts(void)
         memcpy(s_display_name, "NO DEVICE", sizeof("NO DEVICE"));
     }
     s_contacts_ready = true;
+    s_contacts_updated_ms = liot_rtos_get_running_time();
     liot_rtos_exit_critical();
     liot_trace("[DEV] contacts ready count=%u revision=%u\r\n",
                (unsigned int)count,
@@ -1278,7 +1295,7 @@ static void dev_audio_slot_release(uint8_t slot)
 static void dev_audio_queued_decrement(uint8_t slot)
 {
     uint32_t samples = slot < DEV_AUDIO_QUEUE_DEPTH ?
-                           s_audio_pool[slot].length : 0U;
+                           s_audio_pool[slot].samples : 0U;
 
     liot_rtos_enter_critical();
     if (s_audio_queued > 0U)
@@ -1292,11 +1309,8 @@ static void dev_audio_queued_decrement(uint8_t slot)
 
 static void dev_reset_downlink(void)
 {
-    s_prebuffer_start_ms = 0U;
     s_prebuffering = false;
-    s_play_tail_ms = 0U;
-    s_play_tail_fraction = 0U;
-    s_play_continuing = false;
+    s_play_pending_samples = 0U;
 }
 
 static void dev_reset_rx_session_stats(void)
@@ -1343,13 +1357,6 @@ static void dev_snapshot_rx_session(dev_rx_session_stats_t *snapshot)
                                   now - snapshot->last_callback_ms : 0U;
 }
 
-static bool dev_play_tail_pending(uint32_t now)
-{
-    return s_play_continuing &&
-           ((int32_t)(s_play_tail_ms - now) > 0 ||
-            (s_play_tail_ms == now && s_play_tail_fraction != 0U));
-}
-
 static void dev_drain_audio(void)
 {
     uint8_t slot;
@@ -1360,6 +1367,7 @@ static void dev_drain_audio(void)
     {
         dev_audio_slot_release((uint8_t)s_play_pending_slot);
         s_play_pending_slot = -1;
+        s_play_pending_samples = 0U;
     }
 #endif
     while (s_audio_queue != NULL &&
@@ -1384,6 +1392,10 @@ static void dev_drain_audio(void)
 
 static bool dev_queue_signal(const dev_signal_event_t *event)
 {
+    if (event != NULL && event->error == 0 && event->connection != NULL &&
+        (event->type == DEV_SIGNAL_INCOMING_CONNECTED ||
+         event->type == DEV_SIGNAL_OUTGOING_CONNECTED))
+        dev_timing_note_p2p(event->generation, liot_rtos_get_running_time());
     if (s_signal_queue == NULL || event == NULL ||
         liot_rtos_queue_release(s_signal_queue, sizeof(*event),
                                 (uint8 *)event,
@@ -1637,6 +1649,8 @@ static void dev_on_audio(tirtc_conn_t hconn,
     dev_audio_frame_t *message;
     uint32_t generation = 0U;
     uint8_t slot;
+    int samples = 0;
+    uint32_t arrival_ms;
     int acquired;
 
     /* Runtime callbacks are broadcast to feature listeners.  Ignore another
@@ -1650,12 +1664,20 @@ static void dev_on_audio(tirtc_conn_t hconn,
     {
         return;
     }
-    if (frame == NULL || data == NULL ||
-        frame->stream_id != DEV_STREAM_ID ||
-        frame->media != TIRTC_AUDIO_ALAW ||
-        frame->length == 0U ||
-        frame->length > DEV_AUDIO_PAYLOAD_MAX ||
-        frame->flags != TIRTC_AUDIOSAMPLE_8K16B1C)
+    if (frame != NULL && data != NULL && frame->stream_id == DEV_STREAM_ID &&
+        frame->length != 0U && frame->length <= DEV_AUDIO_PAYLOAD_MAX)
+    {
+        if (frame->media == TIRTC_AUDIO_OPUS &&
+            frame->flags == TIRTC_AUDIOSAMPLE_16K16B1C)
+            samples = demo_opus_packet_samples(data, (int)frame->length);
+        else if (frame->media == TIRTC_AUDIO_ALAW &&
+                 frame->length <= DEV_ALAW_PAYLOAD_MAX &&
+                 (frame->flags == TIRTC_AUDIOSAMPLE_8K16B1C ||
+                  frame->flags == TIRTC_AUDIOSAMPLE_16K16B1C))
+            samples = frame->length *
+                (frame->flags == TIRTC_AUDIOSAMPLE_8K16B1C ? 2 : 1);
+    }
+    if (samples <= 0 || (uint32_t)samples > DEV_PLAY_PCM_MAX_SAMPLES)
     {
         ++s_rx_dropped;
         dev_rx_note(DEV_RX_FORMAT_REJECT, generation);
@@ -1663,7 +1685,7 @@ static void dev_on_audio(tirtc_conn_t hconn,
         {
             s_downlink_reject_logged = true;
             liot_trace("[DEV] reject downlink stream=%u media=%u flags=%u "
-                       "bytes=%u; want stream=10 ALAW 8k <=%u\r\n",
+                       "bytes=%u; want stream=10 OPUS/16k or ALAW/8k/16k <=%u\r\n",
                        (unsigned int)frame->stream_id,
                        (unsigned int)frame->media,
                        (unsigned int)frame->flags,
@@ -1673,6 +1695,7 @@ static void dev_on_audio(tirtc_conn_t hconn,
         return;
     }
     dev_rx_note(DEV_RX_RECEIVED, generation);
+    dev_timing_note_rx(generation, liot_rtos_get_running_time());
     acquired = dev_audio_slot_acquire(hconn, &generation);
     if (acquired < 0)
     {
@@ -1684,11 +1707,15 @@ static void dev_on_audio(tirtc_conn_t hconn,
     message = &s_audio_pool[slot];
     message->length = (uint16_t)frame->length;
     message->flags = frame->flags;
+    message->media = frame->media;
+    message->samples = (uint16_t)samples;
+    message->timestamp = frame->ts;
     message->generation = generation;
+    arrival_ms = liot_rtos_get_running_time();
     memcpy(message->payload, data, frame->length);
     liot_rtos_enter_critical();
     ++s_audio_queued;
-    s_audio_queued_samples += message->length;
+    s_audio_queued_samples += message->samples;
     liot_rtos_exit_critical();
     if (s_audio_queue == NULL ||
         liot_rtos_queue_release(s_audio_queue, sizeof(slot), &slot,
@@ -1701,6 +1728,11 @@ static void dev_on_audio(tirtc_conn_t hconn,
         dev_rx_note(DEV_RX_QUEUE_FAIL, generation);
         return;
     }
+    liot_rtos_enter_critical();
+    if (s_generation == generation && s_state == DEMO_DEV_CHAT_IN_CALL)
+        dev_playout_observe(&s_playout, frame->ts,
+                           ((uint32_t)samples + 15U) / 16U, arrival_ms);
+    liot_rtos_exit_critical();
     dev_audio_producer_done();
     dev_signal();
 }
@@ -1918,10 +1950,12 @@ static int dev_submit_callee_connect(const char *token)
                (unsigned int)DEV_CONNECT_MAX_ATTEMPTS,
                stable_token != NULL ? 1U : 0U,
                stable_token != NULL ? (unsigned int)strlen(stable_token) : 0U);
+    dev_timing_now("connect_begin", s_generation, 0);
     ret = demo_tirtc_connect(DEMO_TIRTC_OWNER_DEV_CHAT,
                              s_tirtc_generation,
                              context->remote_id, stable_token,
                              dev_connect_callback, context);
+    dev_timing_now("connect_submitted", s_generation, ret);
     if (ret != 0)
     {
         liot_rtos_enter_critical();
@@ -1994,6 +2028,7 @@ static void dev_finish_session(int result,
 {
     tirtc_conn_t connection;
     dev_rx_session_stats_t rx_stats;
+    dev_playout_t playout_stats;
     char room_id[DEV_ROOM_MAX];
     bool caller;
     bool keep_late_incoming_guard;
@@ -2003,11 +2038,18 @@ static void dev_finish_session(int result,
     uint32_t i;
     int action_ret = 0;
     int audio_release_ret = 0;
+    uint32_t timing_generation;
+    uint32_t stop_ms;
+    bool had_media;
 
     if (!dev_state_has_session(s_state))
     {
         return;
     }
+    timing_generation = s_generation;
+    stop_ms = liot_rtos_get_running_time();
+    had_media = s_state == DEMO_DEV_CHAT_IN_CALL;
+    dev_timing_now("stop_begin", timing_generation, result);
 
     /* TiRtcConnect has no public cancel operation.  If the user or peer ends
      * the room while it is pending, advance the generation below and let the
@@ -2034,6 +2076,35 @@ static void dev_finish_session(int result,
     }
 
     dev_set_state(DEMO_DEV_CHAT_STOPPING, 0);
+    /* The capture worker owns the encoder and borrowed lease until it exits. */
+    {
+        uint32_t started = liot_rtos_get_running_time();
+        while (s_capture_busy)
+        {
+            if ((uint32_t)(liot_rtos_get_running_time() - started) >= DEV_CAPTURE_STOP_MS)
+            {
+                liot_trace("[DEV] capture stop timeout; resources retained\r\n");
+                demo_tirtc_require_restart(DEV_ERR_AUDIO);
+                return;
+            }
+            liot_rtos_task_sleep_ms(1U);
+        }
+    }
+    /* Failed setup has no media statistics for this session. */
+    if (had_media)
+    {
+        liot_rtos_enter_critical();
+        playout_stats = s_playout;
+        liot_rtos_exit_critical();
+        liot_trace("[DEV-MEDIA] capture_drop=%u encode_max_ms=%u "
+                   "target_ms=%u min_ms=%u max_ms=%u underruns=%u free_heap=%u\r\n",
+                   (unsigned)demo_ai_audio_capture_dropped(&s_audio_lease),
+                   (unsigned)s_encode_max_ms, (unsigned)playout_stats.target_ms,
+                   (unsigned)playout_stats.min_target_ms, (unsigned)playout_stats.peak_target_ms,
+                   (unsigned)playout_stats.underruns, (unsigned)liot_xPortGetFreeHeapSize());
+        liot_trace("[DEV-MEDIA] decode_max_ms=%u\r\n", (unsigned)s_decode_max_ms);
+    }
+    demo_opus_deinit(&s_dev_opus);
 #if DEMO_AI_AUDIO_AEC_ENABLE
     s_record_failure_active = false;
 #endif
@@ -2110,7 +2181,12 @@ static void dev_finish_session(int result,
     }
     if (s_audio_owned)
     {
-        (void)demo_ai_audio_stop(&s_audio_lease);
+        int stop_ret = demo_ai_audio_stop(&s_audio_lease);
+        if (stop_ret != 0)
+        {
+            liot_trace("[DEV-AUDIO] stop failed ret=%d session=%u\r\n",
+                       stop_ret, (unsigned int)s_session_sequence);
+        }
         audio_release_ret = demo_ai_audio_release(&s_audio_lease);
         if (audio_release_ret == 0)
         {
@@ -2185,6 +2261,7 @@ static void dev_finish_session(int result,
                (unsigned int)rx_stats.max_callback_gap_ms,
                (unsigned int)rx_stats.tail_silence_ms,
                (unsigned int)rx_stats.rebuffer_count);
+    dev_timing_end(timing_generation, result, stop_ms);
 }
 
 static int dev_start_audio(void)
@@ -2198,6 +2275,10 @@ static int dev_start_audio(void)
     {
         return DEV_ERR_CONNECTION;
     }
+    /* A duplicate matching room confirmation must not reset live codec or
+     * audio state while the capture worker is using it. */
+    if (s_state == DEMO_DEV_CHAT_IN_CALL) return 0;
+    dev_timing_now("audio_begin", s_generation, 0);
     liot_rtos_enter_critical();
     speaker_level = s_speaker_level;
     mic_level = s_mic_level;
@@ -2207,6 +2288,7 @@ static int dev_start_audio(void)
                                 &s_audio_lease);
     if (ret != 0)
     {
+        liot_trace("[DEV-AUDIO] start failed stage=acquire ret=%d\r\n", ret);
         return DEV_ERR_AUDIO;
     }
     liot_rtos_enter_critical();
@@ -2217,13 +2299,26 @@ static int dev_start_audio(void)
     ret = demo_ai_audio_init(&s_audio_lease);
     if (ret != 0)
     {
+        liot_trace("[DEV-AUDIO] start failed stage=init ret=%d\r\n", ret);
         return DEV_ERR_AUDIO;
     }
     ret = demo_ai_audio_apply_levels(&s_audio_lease);
     if (ret != 0)
     {
+        liot_trace("[DEV-AUDIO] start failed stage=levels ret=%d\r\n", ret);
         return DEV_ERR_AUDIO;
     }
+    ret = demo_opus_init(&s_dev_opus);
+    if (ret != 0)
+    {
+        liot_trace("[DEV-AUDIO] start failed stage=opus ret=%d\r\n", ret);
+        return DEV_ERR_AUDIO;
+    }
+    demo_opus_reset(&s_dev_opus);
+    dev_timing_now("audio_ready", s_generation, 0);
+    s_encode_max_ms = 0U;
+    s_decode_max_ms = 0U;
+    dev_playout_init(&s_playout);
     ret = demo_tirtc_subscribe_audio(DEMO_TIRTC_OWNER_DEV_CHAT,
                                      s_tirtc_generation,
                                      DEV_STREAM_ID);
@@ -2245,8 +2340,12 @@ static int dev_start_audio(void)
     s_existing_answered_caller = false;
     s_late_incoming_possible = false;
     dev_set_state(DEMO_DEV_CHAT_IN_CALL, 0);
-    liot_trace("[DEV] media started bidirectional G711A/8k/mono/20ms "
-               "stream=10\r\n");
+    dev_timing_now("media_started", s_generation, 0);
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    (void)liot_rtos_semaphore_release(s_capture_sem);
+#endif
+    liot_trace("[DEV] media started bidirectional OPUS/16k/mono/20ms "
+               "24kbps stream=10 adaptive=60..240ms initial=100ms\r\n");
     return 0;
 }
 
@@ -2262,148 +2361,129 @@ static int dev_try_activate_caller(void)
         liot_trace("[DEV] room confirmation mismatch\r\n");
         return DEV_ERR_ROOM;
     }
+    /* The current peer has confirmed this room. Even if local audio fails,
+     * there is no unknown reverse connect to quarantine for another 10 s.
+     * Actual SDK disconnect/callback ownership still gates the next call. */
+    s_late_incoming_possible = false;
     return dev_start_audio();
 }
 
 static int dev_play_one(void)
 {
     dev_audio_frame_t *message;
-    uint8_t slot;
-    uint32_t input_samples;
-    uint32_t output_samples;
-    uint32_t i;
-    uint32_t peak = 0U;
-    uint32_t now;
-    uint32_t duration_samples;
-    uint8_t input_flags;
+    uint8_t slot, media;
+    uint32_t output_samples, i, started, elapsed, peak = 0U;
+    bool decoded = false;
     int ret;
-
+#if !DEMO_AI_AUDIO_AEC_ENABLE
+    /* The legacy asynchronous HAL borrows s_play_pcm until FINISH. */
+    if (!demo_ai_audio_play_done(&s_audio_lease)) return 0;
+#endif
 #if DEMO_AI_AUDIO_AEC_ENABLE
     if (s_play_pending_slot >= 0)
     {
         slot = (uint8_t)s_play_pending_slot;
         s_play_pending_slot = -1;
+        decoded = true;
     }
     else
 #endif
     {
         if (liot_rtos_queue_wait(s_audio_queue, &slot, sizeof(slot),
-                                 LIOT_NO_WAIT) != LIOT_OSI_SUCCESS)
-        {
-            return 0;
-        }
+                                LIOT_NO_WAIT) != LIOT_OSI_SUCCESS) return 0;
         dev_audio_queued_decrement(slot);
     }
-    if (slot >= DEV_AUDIO_QUEUE_DEPTH)
-    {
-        ++s_rx_dropped;
-        return 0;
-    }
+    if (slot >= DEV_AUDIO_QUEUE_DEPTH) { ++s_rx_dropped; return 0; }
     message = &s_audio_pool[slot];
     if (message->generation != s_generation)
     {
+        s_play_pending_samples = 0U;
         dev_audio_slot_release(slot);
         return 1;
     }
-    input_samples = message->length;
-    input_flags = message->flags;
-    if (input_flags == TIRTC_AUDIOSAMPLE_8K16B1C)
+    media = message->media;
+    output_samples = message->samples;
+    if (!decoded)
     {
-        output_samples = input_samples * 2U;
-        if (output_samples > DEV_PLAY_PCM_MAX_SAMPLES)
+        if (message->media == TIRTC_AUDIO_OPUS)
         {
-            dev_audio_slot_release(slot);
+            started = liot_rtos_get_running_time();
+            ret = demo_opus_decode(&s_dev_opus, message->payload,
+                                   message->length, s_play_pcm,
+                                   DEV_PLAY_PCM_MAX_SAMPLES);
+            elapsed = liot_rtos_get_running_time() - started;
+            if (elapsed > s_decode_max_ms) s_decode_max_ms = elapsed;
+            if (ret != (int)output_samples)
+            {
+                ++s_rx_dropped;
+                ++s_rx_session.play_fail;
+                dev_audio_slot_release(slot);
+                return 1;
+            }
+        }
+        else if (message->flags == TIRTC_AUDIOSAMPLE_8K16B1C)
+        {
+            for (i = 0U; i < message->length; ++i)
+            {
+                int16_t sample = demo_g711_alaw_decode_sample(message->payload[i]);
+                s_play_pcm[i * 2U] = sample;
+                s_play_pcm[i * 2U + 1U] = sample;
+            }
+        }
+        else if (demo_g711_alaw_decode(message->payload, s_play_pcm,
+                                      message->length) != message->length)
+        {
             ++s_rx_dropped;
+            dev_audio_slot_release(slot);
             return 1;
         }
-        for (i = 0U; i < input_samples; ++i)
-        {
-            int16_t sample =
-                demo_g711_alaw_decode_sample(message->payload[i]);
-            s_play_pcm[i * 2U] = sample;
-            s_play_pcm[i * 2U + 1U] = sample;
-        }
+        s_play_pending_samples = output_samples;
     }
-    else
-    {
-        output_samples = input_samples;
-        if (demo_g711_alaw_decode(message->payload, s_play_pcm,
-                                  input_samples) != input_samples)
-        {
-            dev_audio_slot_release(slot);
-            ++s_rx_dropped;
-            return 1;
-        }
-    }
-    for (i = 0U; i < output_samples; ++i)
-    {
-        int32_t sample = s_play_pcm[i];
-        uint32_t magnitude = (uint32_t)(sample < 0 ? -sample : sample);
-        if (magnitude > peak)
-        {
-            peak = magnitude;
-        }
-    }
+    else output_samples = s_play_pending_samples;
     ret = demo_ai_audio_play(&s_audio_lease, s_play_pcm, output_samples);
 #if DEMO_AI_AUDIO_AEC_ENABLE
     if (ret == DEMO_AI_AUDIO_ERR_PLAY_BUSY)
     {
-        /* No PCM was accepted. Preserve FIFO order and yield to uplink/control. */
+        /* Opus is stateful: retry retained PCM, never decode this packet twice. */
         s_play_pending_slot = slot;
         return 0;
     }
 #endif
+    s_play_pending_samples = 0U;
     dev_audio_slot_release(slot);
     if (ret != 0)
     {
         ++s_rx_dropped;
-        liot_rtos_enter_critical();
         ++s_rx_session.play_fail;
-        liot_rtos_exit_critical();
         if (!s_playback_error_logged)
         {
             s_playback_error_logged = true;
-            liot_trace("[DEV] playback failed ret=%d samples=%u peak=%u\r\n",
-                       ret, (unsigned int)output_samples,
-                       (unsigned int)peak);
+            liot_trace("[DEV] playback failed ret=%d samples=%u\r\n",
+                       ret, (unsigned)output_samples);
         }
         return 0;
     }
-    /* FINISH is delivered by a separate SDK task and may refer to an older
-     * burst. Track accepted PCM duration as well before restarting buffering.
-     * Keep fractional milliseconds for valid short/coalesced A-law packets. */
-    now = liot_rtos_get_running_time();
-    if (!dev_play_tail_pending(now))
+    if (++s_rx_frames == 1U)
     {
-        s_play_tail_ms = now;
-        s_play_tail_fraction = 0U;
-    }
-    duration_samples = output_samples + s_play_tail_fraction;
-    s_play_tail_ms += duration_samples / (DEMO_AI_AUDIO_SAMPLE_RATE / 1000U);
-    s_play_tail_fraction = (uint8_t)(duration_samples %
-                                    (DEMO_AI_AUDIO_SAMPLE_RATE / 1000U));
-    s_play_continuing = true;
-    ++s_rx_frames;
-    if (s_rx_frames == 1U)
-    {
-        liot_trace("[DEV] first downlink ALAW bytes=%u flags=%u "
-                   "pcm_samples=%u peak=%u\r\n",
-                   (unsigned int)input_samples,
-                   (unsigned int)input_flags,
-                   (unsigned int)output_samples,
-                   (unsigned int)peak);
+        dev_timing_first_play(s_generation);
+        for (i = 0U; i < output_samples; ++i)
+        {
+            int32_t value = s_play_pcm[i];
+            uint32_t magnitude = value < 0 ? -value : value;
+            if (magnitude > peak) peak = magnitude;
+        }
+        liot_trace("[DEV] first downlink media=%u pcm_samples=%u peak=%u\r\n",
+                   (unsigned)media, (unsigned)output_samples, (unsigned)peak);
     }
     return 1;
 }
 
 static void dev_service_downlink(void)
 {
-    uint32_t queued;
-    uint32_t samples;
-    uint32_t now;
-    uint32_t started;
-    uint32_t i;
-
+    uint32_t queued, samples, now, started, i;
+    bool done, ready = true;
+    done = demo_ai_audio_play_done(&s_audio_lease);
+    now = liot_rtos_get_running_time();
     liot_rtos_enter_critical();
     queued = s_audio_queued;
     samples = s_audio_queued_samples;
@@ -2411,98 +2491,60 @@ static void dev_service_downlink(void)
     if (s_play_pending_slot >= 0)
     {
         ++queued;
-        samples += s_audio_pool[s_play_pending_slot].length;
+        samples += s_play_pending_samples;
     }
 #endif
-    liot_rtos_exit_critical();
-    now = liot_rtos_get_running_time();
-    if (s_play_continuing && !dev_play_tail_pending(now) &&
-        demo_ai_audio_play_done(&s_audio_lease))
-    {
-        s_play_continuing = false;
-        s_prebuffering = false;
-    }
-    if (queued == 0U)
-    {
-        s_prebuffering = false;
-        return;
-    }
-    if (!s_play_continuing
-#if DEMO_AI_AUDIO_AEC_ENABLE
-        && s_play_pending_slot < 0
+    if (done && !s_prebuffering
+#if !DEMO_AI_AUDIO_AEC_ENABLE
+        /* FINISH is per packet here; queued audio can continue immediately. */
+        && (queued == 0U || s_rx_frames == 0U)
 #endif
        )
     {
-        if (!s_prebuffering)
+        s_prebuffering = true;
+        if (s_rx_frames != 0U)
         {
-            s_prebuffering = true;
-            s_prebuffer_start_ms = now;
-            if (s_rx_frames != 0U)
-            {
-                liot_rtos_enter_critical();
-                ++s_rx_session.rebuffer_count;
-                liot_rtos_exit_critical();
-            }
-        }
-        /* All admitted payloads are 8-kHz A-law: one byte is one sample.
-         * Start short packets early when slots, rather than audio duration,
-         * become the limit. Leave one batch of free slots for arrivals while
-         * the worker returns to capture. Normal 20-ms packets still use the
-         * duration threshold. */
-        if (samples < DEV_PREBUFFER_MS * 8U &&
-            queued < DEV_AUDIO_QUEUE_DEPTH - DEV_PLAY_BATCH_MAX &&
-            (uint32_t)(now - s_prebuffer_start_ms) <
-                DEV_PREBUFFER_TIMEOUT_MS)
-        {
-            return;
+            ++s_rx_session.rebuffer_count;
+            dev_playout_underrun(&s_playout);
         }
     }
-    s_prebuffering = false;
+    if (s_prebuffering)
+        ready = dev_playout_should_start(&s_playout, (samples + 15U) / 16U,
+                                        queued, DEV_AUDIO_QUEUE_DEPTH, now);
+    if (ready && queued != 0U)
+    {
+        s_prebuffering = false;
+        dev_playout_started(&s_playout);
+    }
+    liot_rtos_exit_critical();
+    if (!ready || queued == 0U) return;
     started = liot_rtos_get_running_time();
     for (i = 0U; i < DEV_PLAY_BATCH_MAX; ++i)
     {
-        if (dev_play_one() <= 0)
-        {
+        if (dev_play_one() <= 0) break;
+        if ((uint32_t)(liot_rtos_get_running_time() - started) >= DEV_PLAY_BUDGET_MS)
             break;
-        }
-        if ((uint32_t)(liot_rtos_get_running_time() - started) >=
-            DEV_PLAY_BUDGET_MS)
-        {
-            break;
-        }
     }
 }
 
 static int dev_send_uplink(void)
 {
     dev_uplink_job_t job;
-    uint32_t i;
+    uint32_t capture_ms, started, elapsed;
     bool current;
-    int ret;
-
-#if DEMO_AI_AUDIO_AEC_ENABLE
+    int ret, bytes;
     liot_rtos_enter_critical();
     job.generation = s_generation;
     job.tirtc_generation = s_tirtc_generation;
     current = dev_uplink_job_current_locked(&job);
     liot_rtos_exit_critical();
-    if (!current)
-    {
-        s_record_failure_active = false;
-        return 0;
-    }
-#endif
-    ret = demo_ai_audio_record_20ms(&s_audio_lease, s_capture_pcm);
-#if DEMO_AI_AUDIO_AEC_ENABLE
+    if (!current) return 0;
+    ret = demo_ai_audio_record_20ms_timed(&s_audio_lease, s_capture_pcm, &capture_ms);
     liot_rtos_enter_critical();
     current = dev_uplink_job_current_locked(&job);
     liot_rtos_exit_critical();
-    if (!current)
-    {
-        s_record_failure_active = false;
-        memset(s_capture_pcm, 0, sizeof(s_capture_pcm));
-        return 0;
-    }
+    if (!current) return 0;
+#if DEMO_AI_AUDIO_AEC_ENABLE
     if (ret == DEMO_AI_AUDIO_ERR_CAPTURE_TIMEOUT)
     {
         uint32_t now = liot_rtos_get_running_time();
@@ -2516,33 +2558,24 @@ static int dev_send_uplink(void)
     }
     s_record_failure_active = false;
 #endif
-    if (ret != 0)
-    {
-        return DEV_ERR_AUDIO;
-    }
-    for (i = 0U; i < DEV_UPLINK_SAMPLES_8K; ++i)
-    {
-        int32_t mixed = (int32_t)s_capture_pcm[i * 2U] +
-                        (int32_t)s_capture_pcm[i * 2U + 1U];
-        s_uplink_alaw[i] =
-            demo_g711_alaw_encode_sample((int16_t)(mixed / 2));
-    }
-    memset(&job, 0, sizeof(job));
+    if (ret != 0) return DEV_ERR_AUDIO;
+    started = liot_rtos_get_running_time();
+    bytes = demo_opus_encode_20ms(&s_dev_opus, s_capture_pcm,
+                                 job.payload, sizeof(job.payload));
+    elapsed = liot_rtos_get_running_time() - started;
+    if (elapsed > s_encode_max_ms) s_encode_max_ms = elapsed;
+    if (bytes <= 0) return DEV_ERR_AUDIO;
+    memset(&job.frame, 0, sizeof(job.frame));
     job.frame.stream_id = DEV_STREAM_ID;
-    job.frame.media = TIRTC_AUDIO_ALAW;
-    job.frame.flags = TIRTC_AUDIOSAMPLE_8K16B1C;
-    job.frame.ts = liot_rtos_get_running_time();
-    job.frame.length = DEV_UPLINK_SAMPLES_8K;
-    memcpy(job.payload, s_uplink_alaw, sizeof(job.payload));
+    job.frame.media = TIRTC_AUDIO_OPUS;
+    job.frame.flags = TIRTC_AUDIOSAMPLE_16K16B1C;
+    job.frame.ts = capture_ms;
+    job.enqueue_ms = liot_rtos_get_running_time();
+    job.frame.length = (uint32_t)bytes;
     liot_rtos_enter_critical();
-    job.generation = s_generation;
-    job.tirtc_generation = s_tirtc_generation;
     current = dev_uplink_job_current_locked(&job);
     liot_rtos_exit_critical();
-    if (!current)
-    {
-        return 0;
-    }
+    if (!current) return 0;
     ret = liot_rtos_queue_release(s_uplink_queue, sizeof(job),
                                   (uint8 *)&job, LIOT_NO_WAIT);
     if (ret != LIOT_OSI_SUCCESS)
@@ -2558,9 +2591,47 @@ static int dev_send_uplink(void)
     return 0;
 }
 
+#if DEMO_AI_AUDIO_AEC_ENABLE
+/* Capture/encoding cannot wait for playback, HTTP, or an SDK send. */
+static void dev_capture_task(void *argv)
+{
+    bool active;
+    int ret;
+    (void)argv;
+    for (;;)
+    {
+        liot_rtos_enter_critical();
+        active = s_state == DEMO_DEV_CHAT_IN_CALL && s_audio_owned &&
+                 !s_request_hangup && !s_request_conn_error;
+        if (active) s_capture_busy = true;
+        liot_rtos_exit_critical();
+        if (!active)
+        {
+            (void)liot_rtos_semaphore_wait(s_capture_sem, LIOT_WAIT_FOREVER);
+            continue;
+        }
+        ret = dev_send_uplink();
+        liot_rtos_enter_critical();
+        if (ret < 0 && s_state == DEMO_DEV_CHAT_IN_CALL)
+        {
+            s_request_conn_error_code = ret;
+            s_request_conn_error = true;
+        }
+        s_capture_busy = false;
+        liot_rtos_exit_critical();
+        if (ret < 0) dev_signal();
+        /* Yield even when queued capture is ready or a peer just unsubscribed. */
+        liot_rtos_task_sleep_ms(1U);
+    }
+}
+
+#endif
+
 static void dev_begin_session(bool caller, const char *peer_id,
                               const char *peer_name)
 {
+    bool action_seen = caller && s_request_call_sequence != 0U;
+    uint32_t action_ms = s_request_call_ms;
 #if DEMO_AI_AUDIO_AEC_ENABLE
     s_record_failure_active = false;
 #endif
@@ -2584,6 +2655,8 @@ static void dev_begin_session(bool caller, const char *peer_id,
             ++s_session_sequence;
         }
     }
+    dev_timing_begin(caller, s_generation, s_session_sequence,
+                     action_seen, action_ms);
     dev_secure_zero(s_room_id, sizeof(s_room_id));
     dev_secure_zero(s_peer_id, sizeof(s_peer_id));
     dev_secure_zero(s_peer_name, sizeof(s_peer_name));
@@ -2614,6 +2687,7 @@ static void dev_begin_session(bool caller, const char *peer_id,
         (void)snprintf(s_peer_name, sizeof(s_peer_name), "%s", peer_name);
     }
     dev_set_display(peer_name, peer_id);
+    dev_timing_now("session_begin", s_generation, 0);
 }
 
 static bool dev_other_features_idle(void)
@@ -2897,7 +2971,6 @@ static int dev_recover_existing_room(void)
     char role[12];
     char caller[DEV_ID_MAX];
     char call_type[12];
-    tirtc_conn_t unexpected = NULL;
     bool tombstoned;
     bool leave_requested;
     bool answered;
@@ -3061,7 +3134,6 @@ static int dev_recover_existing_room(void)
      * completed and re-created.  Any connection captured before the role was
      * known cannot belong to an unaccepted callee and is closed separately. */
     liot_rtos_enter_critical();
-    unexpected = (tirtc_conn_t)s_conn;
     s_conn = NULL;
     s_expect_incoming = false;
     ++s_generation;
@@ -3088,29 +3160,34 @@ static int dev_recover_existing_room(void)
         ++s_incoming_generation;
     }
     liot_rtos_exit_critical();
+    dev_timing_begin(false, s_generation, s_session_sequence, false, 0U);
     dev_flush_signal_queue();
     dev_set_display(caller, caller);
     if (strcmp(call_type, "video") == 0)
     {
         liot_trace("[DEV] recovered video callee as audio-only\r\n");
     }
-    s_deadline_ms = liot_rtos_get_running_time() + DEV_INCOMING_TIMEOUT_MS;
-    dev_set_state(DEMO_DEV_CHAT_RINGING, 0);
-    if (unexpected != NULL)
+    /* The adapter may still expect an incoming connection, or may have
+     * installed one before its feature callback records s_conn.  Retire both
+     * cases before exposing RINGING and allowing an outbound callee connect. */
+    ret = demo_tirtc_cancel_expected_incoming(DEMO_TIRTC_OWNER_DEV_CHAT,
+                                             s_tirtc_generation);
+    if (ret == 0)
     {
         ret = demo_tirtc_disconnect(DEMO_TIRTC_OWNER_DEV_CHAT,
                                     s_tirtc_generation);
-        if ((ret != 0 && ret != TIRTC_E_INVALID_HANDLE) ||
-            !demo_tirtc_wait_connections_idle(
-                DEV_CONNECT_TIMEOUT_MS))
-        {
-            liot_trace("[DEV] role-change P2P teardown failed ret=%d\r\n",
-                       ret);
-            dev_finish_session(ret != 0 ? ret : DEV_ERR_TIMEOUT,
-                               DEV_PLATFORM_HANGUP, false);
-            return ret != 0 ? ret : DEV_ERR_TIMEOUT;
-        }
+        if (ret == TIRTC_E_INVALID_HANDLE) ret = 0;
     }
+    if (ret != 0 ||
+        !demo_tirtc_wait_connections_idle(DEV_CONNECT_TIMEOUT_MS))
+    {
+        liot_trace("[DEV] role-change P2P teardown failed ret=%d\r\n", ret);
+        dev_finish_session(ret != 0 ? ret : DEV_ERR_TIMEOUT,
+                           DEV_PLATFORM_HANGUP, false);
+        return ret != 0 ? ret : DEV_ERR_TIMEOUT;
+    }
+    s_deadline_ms = liot_rtos_get_running_time() + DEV_INCOMING_TIMEOUT_MS;
+    dev_set_state(DEMO_DEV_CHAT_RINGING, 0);
     liot_trace("[DEV] recovered active callee room generation=%u\r\n",
                (unsigned int)s_incoming_generation);
     return 0;
@@ -3213,7 +3290,9 @@ static int dev_start_outgoing_call(void)
     /* From this point a transport error does not prove the server failed to
      * create/notify a room. Keep the late-peer guard for uncertain results. */
     s_late_incoming_possible = true;
+    dev_timing_now("call_http_begin", s_generation, 0);
     ret = dev_http(DEMO_BIND_HTTP_POST, "/v1/call/request", body);
+    dev_timing_now("call_http_end", s_generation, ret);
     cJSON_free(body);
     if (ret != 0)
     {
@@ -3261,6 +3340,7 @@ static int dev_start_outgoing_call(void)
     s_deadline_ms = liot_rtos_get_running_time() +
                     DEV_OUTGOING_TIMEOUT_MS;
     liot_trace("[DEV] outgoing room ready; waiting callee P2P\r\n");
+    dev_timing_now("room_ready", s_generation, 0);
     if (s_conn != NULL)
     {
         dev_set_state(DEMO_DEV_CHAT_WAIT_CONFIRM, 0);
@@ -3327,6 +3407,7 @@ static int dev_accept_incoming(void)
     memcpy(expected_peer_id, s_peer_id, sizeof(expected_peer_id));
     memcpy(expected_room_id, s_room_id, sizeof(expected_room_id));
     liot_rtos_exit_critical();
+    dev_timing_now("answer_worker", generation, 0);
     dev_set_state(DEMO_DEV_CHAT_CONNECTING, 0);
     s_deadline_ms = liot_rtos_get_running_time() +
                     DEV_HTTP_TIMEOUT_MS;
@@ -3346,7 +3427,9 @@ static int dev_accept_incoming(void)
         dev_finish_session(DEV_ERR_CONNECT, DEV_PLATFORM_HANGUP, false);
         return DEV_ERR_CONNECT;
     }
+    dev_timing_now("accept_http_begin", generation, 0);
     ret = dev_http(DEMO_BIND_HTTP_POST, "/v1/call/device/info", body);
+    dev_timing_now("accept_http_end", generation, ret);
     cJSON_free(body);
     /* MQTT callbacks can enqueue room_cancel while the synchronous HTTP
      * request owns this worker.  Apply those events before trusting the
@@ -3382,7 +3465,7 @@ static int dev_accept_incoming(void)
                (unsigned int)(DEV_TOKEN_MAX - 1U));
     if (token_length >= DEV_TOKEN_MAX)
     {
-        liot_trace("[DEV] device info token exceeds F6D_A SDK limit\r\n");
+        liot_trace("[DEV] device info token exceeds TiRTC SDK limit\r\n");
     }
     if (business != 0 && business != 200)
     {
@@ -3670,6 +3753,7 @@ static void dev_process_signals(void)
         }
         if (event.type == DEV_SIGNAL_INCOMING_CONNECTED)
         {
+            dev_timing_log_p2p(s_generation);
             liot_trace("[DEV] caller accepted callee P2P\r\n");
             if (s_state == DEMO_DEV_CHAT_IN_CALL)
             {
@@ -3728,6 +3812,7 @@ static void dev_process_signals(void)
             }
             {
                 char confirmation[DEV_ROOM_MAX + 20U];
+                dev_timing_log_p2p(s_generation);
                 int length = snprintf(confirmation, sizeof(confirmation),
                                       "{\"room_id\":\"%s\"}",
                                       s_room_id);
@@ -3746,6 +3831,7 @@ static void dev_process_signals(void)
                 continue;
             }
             liot_trace("[DEV] room confirmation sent\r\n");
+            dev_timing_now("confirm_sent", s_generation, 0);
             ret = dev_start_audio();
             if (ret < 0)
             {
@@ -3773,6 +3859,7 @@ static void dev_process_signals(void)
                 continue;
             }
             liot_trace("[DEV] room confirmation received\r\n");
+            dev_timing_now("confirm_received", s_generation, 0);
             ret = dev_try_activate_caller();
             if (ret < 0)
             {
@@ -4068,19 +4155,28 @@ void demo_dev_chat_task(void *argv)
 {
     liot_task_t room_action_handle = NULL;
     liot_task_t uplink_handle = NULL;
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    liot_task_t capture_handle = NULL;
+#endif
     bool mqtt_registered = false;
     bool transport_was_ready = false;
     bool transport_ready;
     bool levels_dirty;
     uint8_t speaker_level;
     uint8_t mic_level;
+#if !DEMO_AI_AUDIO_AEC_ENABLE
     int ret;
+#endif
 
     (void)argv;
     if (liot_rtos_semaphore_create(&s_event_sem, 0U) != LIOT_OSI_SUCCESS)
     {
         goto init_failed;
     }
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    if (liot_rtos_semaphore_create(&s_capture_sem, 0U) != LIOT_OSI_SUCCESS)
+        goto init_failed;
+#endif
     if (liot_rtos_queue_create(&s_mqtt_queue, sizeof(dev_mqtt_event_t),
                                DEV_MQTT_EVENT_DEPTH) != LIOT_OSI_SUCCESS)
     {
@@ -4116,13 +4212,20 @@ void demo_dev_chat_task(void *argv)
     {
         goto init_failed;
     }
-    /* Keep capture runnable ahead of TX; its DMA wait gives TX time to run. */
+    /* Share time slices with capture/playback: a continuously ready media
+     * worker must not starve the bounded uplink queue. Empty TX blocks. */
     if (liot_rtos_task_create(&uplink_handle, DEV_UPLINK_TASK_STACK,
-                              LIOT_APP_TASK_PRIORITY - 1U, "dev_call_tx",
+                              LIOT_APP_TASK_PRIORITY, "dev_call_tx",
                               dev_uplink_task, NULL) != LIOT_OSI_SUCCESS)
     {
         goto init_failed;
     }
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    if (liot_rtos_task_create(&capture_handle, DEV_CAPTURE_TASK_STACK,
+                             LIOT_APP_TASK_PRIORITY, "dev_call_capture",
+                             dev_capture_task, NULL) != LIOT_OSI_SUCCESS)
+        goto init_failed;
+#endif
     if (demo_formal_mqtt_register_handler(dev_formal_mqtt_handler,
                                           NULL) != 0)
     {
@@ -4237,18 +4340,27 @@ void demo_dev_chat_task(void *argv)
         if (s_state == DEMO_DEV_CHAT_IN_CALL)
         {
             dev_service_downlink();
+#if DEMO_AI_AUDIO_AEC_ENABLE
+            (void)liot_rtos_semaphore_wait(s_event_sem, 5U);
+#else
+            /* The legacy synchronous HAL keeps its original one-task order. */
             ret = dev_send_uplink();
-            if (ret < 0)
-            {
-                liot_trace("[DEV] uplink/audio failed ret=%d\r\n", ret);
-                dev_finish_session(ret, DEV_PLATFORM_HANGUP, false);
-            }
+            if (ret < 0) dev_finish_session(ret, DEV_PLATFORM_HANGUP, false);
+#endif
             continue;
         }
         (void)liot_rtos_semaphore_wait(s_event_sem, DEV_IDLE_WAIT_MS);
     }
 
 init_failed:
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    if (capture_handle != NULL) (void)liot_rtos_task_delete(capture_handle);
+#endif
+    if (s_capture_sem != NULL)
+    {
+        (void)liot_rtos_semaphore_delete(s_capture_sem);
+        s_capture_sem = NULL;
+    }
     if (mqtt_registered)
     {
         demo_formal_mqtt_unregister_handler(dev_formal_mqtt_handler, NULL);
@@ -4303,9 +4415,15 @@ void demo_dev_chat_mark_unavailable(void)
 
 void demo_dev_chat_enter(void)
 {
+    uint32_t now;
     liot_rtos_enter_critical();
+    now = liot_rtos_get_running_time();
+    /* Only coalesce ordinary page entry. Never clear a pending MQTT update,
+     * explicit refresh or AI call ticket; offline/failure invalidates ready. */
     if ((s_state == DEMO_DEV_CHAT_READY ||
-         s_state == DEMO_DEV_CHAT_ERROR) && !s_contacts_refreshing)
+         s_state == DEMO_DEV_CHAT_ERROR) && !s_contacts_refreshing &&
+        (s_state == DEMO_DEV_CHAT_ERROR || !s_contacts_ready ||
+         (uint32_t)(now - s_contacts_updated_ms) >= DEV_CONTACT_CACHE_MS))
     {
         s_request_refresh = true;
     }
@@ -4360,6 +4478,7 @@ uint32_t demo_dev_chat_call_selected(void)
             ++s_session_sequence;
         }
         s_request_call_sequence = s_session_sequence;
+        s_request_call_ms = liot_rtos_get_running_time();
         s_request_contact_valid = false;
         s_request_call = true;
         sequence = s_request_call_sequence;
@@ -4472,6 +4591,7 @@ uint32_t demo_dev_chat_call_device(const char *device_id)
                 ++s_session_sequence;
             }
             s_request_call_sequence = s_session_sequence;
+            s_request_call_ms = liot_rtos_get_running_time();
             s_request_call = true;
             sequence = s_request_call_sequence;
         }
@@ -4495,6 +4615,7 @@ bool demo_dev_chat_answer(uint32_t incoming_generation)
         s_request_answer_generation == 0U)
     {
         s_request_answer_generation = incoming_generation;
+        dev_timing_action_locked(s_generation, liot_rtos_get_running_time());
         accepted = true;
     }
     liot_rtos_exit_critical();

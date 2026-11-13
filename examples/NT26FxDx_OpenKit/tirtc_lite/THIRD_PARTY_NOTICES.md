@@ -12,7 +12,7 @@
 | Tange minimal-system examples | TiRTC 生命周期、绑定和会话流程参考 | MIT，Copyright (c) 2026 探鸽智能 | 保留 [MIT 版权和许可全文](LICENSES/MIT.txt) |
 | TiRTC SDK | `sdk/include/tirtc/*`、`sdk/lib/libTiRTC.a` | proprietary / 单独 SDK 协议 | 本次随包提供编译必需的 SDK；不得标成 Apache/MIT，后续使用和分发仍遵循 SDK 授权 |
 | cJSON | JSON 解析和生成，当前 F6D_D 链接预编译 `libcjson.a`，应用增加解析前深度保护 | MIT，Copyright (c) 2009-2017 Dave Gamble and cJSON contributors | 保留 [cJSON.h 文件头中的 MIT 通知](https://github.com/lierda-iot/CAT1.bis_OpenCPU/blob/59f1250c4b8caad4bbf4f74167b7b39c79097f8c/components/thirdparty/CJSON/cJSON.h) |
-| Opus 1.4 | AI 上下行语音编解码 | BSD 3-Clause 风格许可证，版权主体见上游 `COPYING` | 保留完整 [COPYING](https://github.com/lierda-iot/CAT1.bis_OpenCPU/blob/59f1250c4b8caad4bbf4f74167b7b39c79097f8c/components/thirdparty/opus/opus-1.4/COPYING) |
+| Opus 1.4 | AI、设备互呼上下行语音编解码 | BSD 3-Clause 风格许可证，版权主体见上游 `COPYING` | 保留完整 [COPYING](https://github.com/lierda-iot/CAT1.bis_OpenCPU/blob/59f1250c4b8caad4bbf4f74167b7b39c79097f8c/components/thirdparty/opus/opus-1.4/COPYING) |
 | Mbed TLS 2.28.10 | HMAC、SHA-256、Base64 | Apache-2.0 | 保留 [LICENSE](LICENSES/mbedtls-LICENSE) 和各文件版权通知 |
 
 ## TiRTC SDK 特别说明
@@ -21,12 +21,12 @@
 应用自有代码的 MIT 许可证覆盖；SDK 和底包的其他使用、修改及再分发条件
 仍以各自授权为准。本说明不扩大这些组件的许可范围。
 
-当前文件身份（2026-09-14 核对；TiRTC `v2.5.0-87c3c290` 配套交付，替换此前旧版摘要）：
+当前文件身份（2026-11-13 核对；官方 TiRTC `v2.6.0-894972fb` / TGTRP `tag.v1.5.29-64b74c0a` 配套交付，替换此前旧版摘要）：
 
 | 文件 | 大小/摘要 |
 | --- | --- |
-| `sdk/lib/libTiRTC.a` | SHA-256 `D0807049076CA7D718DBE691F5FE8893B00132EB91F70B6C2FB738A54AAE99E3` |
-| `sdk/include/tirtc/tiRTC.h` | SHA-256 `B1315121ABF843C43C669F754382CAB302C3B0B35BDFE41F4C4756EF95636293` |
+| `sdk/lib/libTiRTC.a` | SHA-256 `9E5A3F2DB5EFCFF668A6844CC6543B67E90913DF81F37AFBD1E5AA7EAA61A315` |
+| `sdk/include/tirtc/tiRTC.h` | SHA-256 `5BE9426E45530933DEF84DD5E8FB2ADEE3BD98702EAB8070C030884592AF5744` |
 
 摘要只能证明当前字节身份，不能证明 SDK 版本或授权。后续更换 SDK 时，应重新
 核对交付版本、目标 ABI 和分发条件，并更新上述摘要。
