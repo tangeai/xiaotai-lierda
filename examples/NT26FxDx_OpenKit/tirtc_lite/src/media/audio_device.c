@@ -169,6 +169,17 @@ static bool demo_ai_audio_lease_valid_locked(
            lease->generation == s_audio_generation;
 }
 
+/* These owners retain continuous capture; the remaining paths keep their
+ * existing one-request mailbox and codec settings. */
+static bool demo_ai_audio_ring_owner(demo_ai_audio_owner_e owner)
+{
+    return owner == DEMO_AI_AUDIO_OWNER_DEVICE
+#ifdef HWDEMO_GROUP_ROOM_EN
+        || owner == DEMO_AI_AUDIO_OWNER_GROUP_ROOM
+#endif
+        ;
+}
+
 /* Keep the first failure and changed error codes. A successful operation or
  * a new lease admits another failure; retry behavior remains unchanged. */
 static bool demo_ai_audio_error_should_log(audio_error_log_state_t *state,
@@ -806,7 +817,7 @@ static int demo_ai_audio_record_20ms_impl(
         return -1;
     }
 
-    if (capture_ms != NULL && lease->owner != DEMO_AI_AUDIO_OWNER_DEVICE)
+    if (capture_ms != NULL && !demo_ai_audio_ring_owner(lease->owner))
         return DEMO_AI_AUDIO_ERR_INVALID_LEASE;
     levels_ret = demo_ai_audio_apply_levels(lease);
     if (levels_ret != 0)
@@ -841,7 +852,7 @@ int demo_ai_audio_record_20ms_timed(
     const demo_ai_audio_lease_t *lease,
     int16_t pcm[DEMO_AI_AUDIO_FRAME_SAMPLES], uint32_t *capture_ms)
 {
-    if (lease == NULL || lease->owner != DEMO_AI_AUDIO_OWNER_DEVICE || capture_ms == NULL)
+    if (lease == NULL || !demo_ai_audio_ring_owner(lease->owner) || capture_ms == NULL)
         return DEMO_AI_AUDIO_ERR_INVALID_LEASE;
     return demo_ai_audio_record_20ms_impl(lease, pcm, capture_ms);
 }
@@ -851,7 +862,7 @@ uint32_t demo_ai_audio_capture_dropped(const demo_ai_audio_lease_t *lease)
     uint32_t dropped = 0U;
 #if DEMO_AI_AUDIO_AEC_ENABLE
     liot_rtos_enter_critical();
-    if (demo_ai_audio_lease_valid_locked(lease) && lease->owner == DEMO_AI_AUDIO_OWNER_DEVICE)
+    if (demo_ai_audio_lease_valid_locked(lease) && demo_ai_audio_ring_owner(lease->owner))
         dropped = s_device_capture_dropped;
     liot_rtos_exit_critical();
 #else
@@ -859,6 +870,40 @@ uint32_t demo_ai_audio_capture_dropped(const demo_ai_audio_lease_t *lease)
 #endif
     return dropped;
 }
+
+#ifdef HWDEMO_GROUP_ROOM_EN
+int demo_ai_audio_group_capture_reset(const demo_ai_audio_lease_t *lease,
+                                     bool enabled)
+{
+    int ret = 0;
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    uint32_t now = liot_rtos_get_running_time();
+#else
+    (void)enabled;
+#endif
+    liot_rtos_enter_critical();
+    if (!demo_ai_audio_lease_valid_locked(lease) ||
+        lease->owner != DEMO_AI_AUDIO_OWNER_GROUP_ROOM) {
+        ret = DEMO_AI_AUDIO_ERR_INVALID_LEASE;
+    }
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    else if (!s_aec_running || s_aec_fault || s_aec_stopping ||
+             s_aec_retiring || s_aec_stop_requested) {
+        ret = DEMO_AI_AUDIO_ERR_BUSY;
+    } else {
+        /* A mic edge discards old/partial PCM without stopping playback.
+         * Keep the session overflow total; muted time does not enter the ring. */
+        s_device_capture_enabled = false;
+        s_device_capture_read = s_device_capture_count = s_device_capture_bytes = 0U;
+        s_device_capture_epoch = s_aec_epoch;
+        s_device_capture_next_ms = now;
+        s_device_capture_enabled = enabled;
+    }
+#endif
+    liot_rtos_exit_critical();
+    return ret;
+}
+#endif
 
 int demo_ai_audio_play(const demo_ai_audio_lease_t *lease,
                        const int16_t *pcm, uint32_t samples)

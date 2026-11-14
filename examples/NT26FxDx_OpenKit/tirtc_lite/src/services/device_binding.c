@@ -1773,7 +1773,8 @@ int demo_binding_service_request_timeout(
     if (service == DEMO_BIND_SERVICE_CALL &&
         ((method == DEMO_BIND_HTTP_POST &&
           (strcmp(path, "/v1/call/request") == 0 ||
-           strcmp(path, "/v1/call/device/info") == 0)) ||
+           strcmp(path, "/v1/call/device/info") == 0 ||
+           strcmp(path, "/v1/call/group/device/connect-token") == 0)) ||
          (method == DEMO_BIND_HTTP_GET &&
           strcmp(path, "/v1/call/device/contacts") == 0)))
     {

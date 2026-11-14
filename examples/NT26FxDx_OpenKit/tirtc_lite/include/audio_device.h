@@ -108,15 +108,26 @@ int demo_ai_audio_record_20ms(
     const demo_ai_audio_lease_t *lease,
     int16_t pcm[DEMO_AI_AUDIO_FRAME_SAMPLES]);
 
-/* DEVICE capture only: AEC builds retain up to eight continuous post-3A
+/* DEVICE/GROUP capture only: AEC builds retain up to eight continuous post-3A
  * frames. Timestamp is anchored at session preparation and advances 20 ms
- * per captured frame, preserving overflow gaps. Other owners use record_20ms.
+ * per captured frame, preserving overflow gaps. GROUP reanchors on mic edges.
+ * Other owners use record_20ms.
  * Non-AEC builds timestamp the synchronous capture completion instead. */
 int demo_ai_audio_record_20ms_timed(
     const demo_ai_audio_lease_t *lease,
     int16_t pcm[DEMO_AI_AUDIO_FRAME_SAMPLES], uint32_t *capture_ms);
-/* Overflow count for the current DEVICE audio lease; snapshot before release. */
+/* Overflow count for the current DEVICE/GROUP lease; snapshot before release. */
 uint32_t demo_ai_audio_capture_dropped(const demo_ai_audio_lease_t *lease);
+
+#ifdef HWDEMO_GROUP_ROOM_EN
+/* GROUP owner task only: discard queued/partial PCM on both mic edges, then
+ * enable/disable continuous capture. Playback and the session overflow count
+ * are preserved. Initial GROUP preparation leaves capture disabled. An in-flight
+ * read must additionally be rejected by the caller's mic-generation check.
+ * Non-AEC builds validate the GROUP lease and otherwise perform no operation. */
+int demo_ai_audio_group_capture_reset(const demo_ai_audio_lease_t *lease,
+                                     bool enabled);
+#endif
 
 /*
  * Queues PCM for asynchronous playback; both backends copy before returning.

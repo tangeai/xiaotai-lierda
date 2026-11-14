@@ -26,9 +26,15 @@
 #define ROOM_CONNECT_MAX           1152U
 #define ROOM_HTTP_MAX              4096U
 #define ROOM_HTTP_TIMEOUT          10000U
-#define ROOM_RX_SLOTS              8U
+#define ROOM_RX_SLOTS              16U
 #define ROOM_RX_MAX                640U
-#define ROOM_RX_MAX_AGE            160U
+#define ROOM_RX_MAX_BYTES          2560U
+#define ROOM_RX_MAX_AGE            400U
+#define ROOM_RX_PREBUFFER_BYTES    480U /* 60 ms, G.711 A-law/8 kHz */
+#define ROOM_RX_PREBUFFER_WAIT     100U
+#define ROOM_TX_SLOTS              8U
+#define ROOM_TX_MAX_AGE            200U
+#define ROOM_ASSIGNMENT_CACHE_MS   30000U
 #define ROOM_COMMAND_SLOTS         2U
 #define ROOM_COMMAND_MAX           4096U
 #define ROOM_SYNC_INTERVAL         60000U
@@ -63,6 +69,7 @@ typedef struct {
     uint32_t intent;
     uint32_t epoch;
     uint32_t sync_sequence;
+    uint32_t binding_epoch;
     uint32_t version;
     uint32_t timeout_ms;
     char room_id[ROOM_ID_MAX];
@@ -97,24 +104,34 @@ typedef struct {
     char bytes[ROOM_COMMAND_MAX + 1U];
 } room_command_slot_t;
 
+typedef struct {
+    uint32_t epoch, generation, mic_generation, queued_ms;
+    TIRTCFRAMEINFO frame;
+    uint8_t bytes[160];
+} room_tx_job_t;
+
 static liot_sem_t s_wake;
 static liot_sem_t s_http_wake;
+static liot_queue_t s_tx_queue;
 static bool s_init_attempted;
 static volatile bool s_initialized;
 /* These fields are shared only in short critical sections. */
 static bool s_enabled;
 static bool s_foreground;
+static bool s_enter_foreground_pending;
 static bool s_suspend_requested;
 static bool s_media_idle = true;
 static bool s_accept_audio;
 static bool s_accept_commands;
 static bool s_mic_gate;
-#if DEMO_AI_AUDIO_AEC_ENABLE
 static uint32_t s_mic_capture_generation;
+#if DEMO_AI_AUDIO_AEC_ENABLE
 #define ROOM_RECORD_FAILURE_LIMIT_MS 2000U
 static uint32_t s_record_failure_generation;
 static uint32_t s_record_failure_since;
 static bool s_record_failure_active;
+static bool s_capture_gate;
+static uint32_t s_capture_gate_generation;
 #endif
 static bool s_mic_dirty;
 static bool s_levels_dirty;
@@ -194,6 +211,69 @@ static bool s_terminal_pending;
 static room_job_t s_terminal;
 static bool s_transport_was_ready;
 static bool s_bound_seen;
+static bool s_assignment_cached;
+static uint32_t s_binding_epoch=1U;
+static uint32_t s_assignment_received_ms;
+static uint32_t s_enter_started_ms;
+static bool s_rx_primed, s_first_play;
+static struct {
+    uint32_t rx_pool, rx_capacity, rx_age, rx_play, rx_peak;
+    uint32_t tx_full, tx_old, tx_busy, tx_sent, send_max_ms;
+} s_media_stats;
+static void room_wake(void);
+
+/* Sender jobs own their payload, never the audio lease or mutable PCM.
+ * Runtime generation/refcount guards the SDK handle during a concurrent stop. */
+static bool room_tx_current_locked(const room_tx_job_t *job) {
+    return s_initialized && s_claimed && !s_stopping && s_joined &&
+        s_enabled && s_foreground && s_call == DEMO_GROUP_CALL_NONE &&
+        s_mic_gate && s_accept_audio && job->epoch == s_epoch &&
+        job->generation == s_generation &&
+        job->mic_generation == s_mic_capture_generation;
+}
+static void room_send_tx(const room_tx_job_t *job) {
+    bool current;
+    size_t used;
+    uint32_t started, elapsed;
+    int ret;
+    liot_rtos_enter_critical();
+    current=room_tx_current_locked(job);
+    if (current && liot_rtos_get_running_time()-job->queued_ms > ROOM_TX_MAX_AGE) {
+        ++s_media_stats.tx_old; ++s_snapshot.tx_dropped; current=false;
+    }
+    liot_rtos_exit_critical();
+    if (!current) return;
+    started=liot_rtos_get_running_time();
+    ret=demo_tirtc_get_send_buffer_used(DEMO_TIRTC_OWNER_GROUP_ROOM,job->generation,&used);
+    if (ret == 0 && used > ROOM_SEND_HIGH_WATER) ret=TIRTC_E_BUSY;
+    liot_rtos_enter_critical();
+    current=room_tx_current_locked(job);
+    if (current && liot_rtos_get_running_time()-job->queued_ms > ROOM_TX_MAX_AGE) {
+        ++s_media_stats.tx_old; ++s_snapshot.tx_dropped; current=false;
+    }
+    liot_rtos_exit_critical();
+    if (!current) return;
+    if (ret == 0) ret=demo_tirtc_send_audio(DEMO_TIRTC_OWNER_GROUP_ROOM,
+        job->generation,&job->frame,job->bytes);
+    elapsed=liot_rtos_get_running_time()-started;
+    liot_rtos_enter_critical();
+    if (room_tx_current_locked(job)) {
+        if (elapsed>s_media_stats.send_max_ms) s_media_stats.send_max_ms=elapsed;
+        if (ret == TIRTC_E_BUSY) { ++s_media_stats.tx_busy; ++s_snapshot.tx_dropped; }
+        else if (ret < 0) { s_callback_error=ret; s_callback_epoch=job->epoch; }
+        else ++s_media_stats.tx_sent;
+    }
+    liot_rtos_exit_critical();
+    if (ret < 0 && ret != TIRTC_E_BUSY) room_wake();
+}
+static void room_tx_task(void *unused) {
+    room_tx_job_t job;
+    (void)unused;
+    for (;;) {
+        if (liot_rtos_queue_wait(s_tx_queue,(uint8 *)&job,sizeof(job),
+                LIOT_WAIT_FOREVER) == LIOT_OSI_SUCCESS) room_send_tx(&job);
+    }
+}
 
 static void room_wake(void) {
     if (s_wake != NULL) (void)liot_rtos_semaphore_release(s_wake);
@@ -216,8 +296,9 @@ static void room_state(demo_group_state_e state, int error) {
     s_snapshot.state = state;
     s_snapshot.error = error;
     liot_rtos_exit_critical();
-    if (changed) liot_trace("[ROOM] state=%u error=%d epoch=%u\r\n",
-        (unsigned int)state, error, (unsigned int)s_epoch);
+    if (changed) liot_trace("[ROOM] state=%u error=%d epoch=%u enter_ms=%u\r\n",
+        (unsigned int)state, error, (unsigned int)s_epoch,
+        (unsigned int)(liot_rtos_get_running_time()-s_enter_started_ms));
 }
 static bool room_allowed(void) {
     bool allowed;
@@ -384,7 +465,7 @@ static void room_on_audio(tirtc_conn_t connection,
     }
     for (slot=0U; slot<ROOM_RX_SLOTS && s_rx[slot].used; ++slot) {}
     if (slot == ROOM_RX_SLOTS) {
-        ++s_snapshot.rx_dropped; liot_rtos_exit_critical(); return;
+        ++s_media_stats.rx_pool; ++s_snapshot.rx_dropped; liot_rtos_exit_critical(); return;
     }
     s_rx[slot].used = true;
     ++s_producers;
@@ -396,12 +477,12 @@ static void room_on_audio(tirtc_conn_t connection,
     s_rx[slot].received_ms = liot_rtos_get_running_time();
     liot_rtos_enter_critical();
     if (s_accept_audio && epoch == s_epoch && s_rx_count < ROOM_RX_SLOTS &&
-        s_rx_bytes + frame->length <= 1280U) {
+        s_rx_bytes + frame->length <= ROOM_RX_MAX_BYTES) {
         s_rx_ring[s_rx_write] = (uint8_t)slot;
         s_rx_write = (uint8_t)((s_rx_write + 1U) % ROOM_RX_SLOTS);
         ++s_rx_count;
         s_rx_bytes += frame->length;
-    } else { s_rx[slot].used=false; ++s_snapshot.rx_dropped; }
+    } else { s_rx[slot].used=false; ++s_media_stats.rx_capacity; ++s_snapshot.rx_dropped; }
     --s_producers;
     liot_rtos_exit_critical();
     room_wake();
@@ -609,6 +690,7 @@ static bool room_schedule(room_job_kind_e kind, const char *presence) {
     s_http_job.epoch=s_epoch;
     liot_rtos_enter_critical();
     s_http_job.sync_sequence=s_sync_sequence;
+    s_http_job.binding_epoch=s_binding_epoch;
     liot_rtos_exit_critical();
     s_http_job.timeout_ms=ROOM_HTTP_TIMEOUT;
     s_http_job.version=s_assignment.version;
@@ -689,6 +771,13 @@ static bool room_cleanup(void) {
         s_cleanup_sent=true;
     }
     if (!s_stopped_audio) {
+        liot_trace("[ROOM-MEDIA] epoch=%u rx_pool=%u rx_capacity=%u rx_age=%u "
+            "rx_play=%u peak=%u tx_full=%u tx_old=%u tx_busy=%u tx_sent=%u send_max_ms=%u capture_drop=%u\r\n",
+            (unsigned)s_epoch,(unsigned)s_media_stats.rx_pool,(unsigned)s_media_stats.rx_capacity,
+            (unsigned)s_media_stats.rx_age,(unsigned)s_media_stats.rx_play,(unsigned)s_media_stats.rx_peak,
+            (unsigned)s_media_stats.tx_full,(unsigned)s_media_stats.tx_old,(unsigned)s_media_stats.tx_busy,
+            (unsigned)s_media_stats.tx_sent,(unsigned)s_media_stats.send_max_ms,
+            (unsigned)demo_ai_audio_capture_dropped(&s_audio));
         if (demo_ai_audio_lease_is_valid(&s_audio)) (void)demo_ai_audio_stop(&s_audio);
         s_stopped_audio=true;
     }
@@ -802,14 +891,21 @@ static void room_audio_tick(void) {
     uint8_t slot;
     unsigned int count, i;
     uint32_t epoch;
-#if DEMO_AI_AUDIO_AEC_ENABLE
     uint32_t mic_capture_generation;
-#endif
-    bool on, active;
-    size_t used;
+    bool on, active, play_ready;
+    bool backend_done=demo_ai_audio_play_done(&s_audio);
     int ret;
-    TIRTCFRAMEINFO frame;
-    for (count=0U;count<ROOM_RX_SLOTS;++count) {
+    room_tx_job_t job;
+    liot_rtos_enter_critical();
+    /* An empty application queue may already be buffered in the HAL. Do not
+     * insert a new prebuffer pause until that playback has actually drained. */
+    if (backend_done) s_rx_primed=false;
+    if (s_rx_count != 0U && !s_rx_primed && (s_rx_bytes >= ROOM_RX_PREBUFFER_BYTES ||
+        liot_rtos_get_running_time()-s_rx[s_rx_ring[s_rx_read]].received_ms >= ROOM_RX_PREBUFFER_WAIT))
+        s_rx_primed=true;
+    play_ready=s_rx_primed;
+    liot_rtos_exit_critical();
+    for (count=0U;play_ready && count<ROOM_RX_SLOTS;++count) {
         liot_rtos_enter_critical();
         if (s_rx_count == 0U) { liot_rtos_exit_critical(); break; }
         slot=s_rx_ring[s_rx_read];
@@ -823,10 +919,18 @@ static void room_audio_tick(void) {
             liot_rtos_get_running_time()-s_rx[slot].received_ms <= ROOM_RX_MAX_AGE) {
             for (i=0U;i<s_rx[slot].length;++i) {
                 int16_t sample=demo_g711_alaw_decode_sample(s_rx[slot].bytes[i]);
+                uint32_t peak=sample < 0 ? (uint32_t)(-(int32_t)sample) : (uint32_t)sample;
+                if (peak>s_media_stats.rx_peak) s_media_stats.rx_peak=peak;
                 s_play[2U*i]=sample; s_play[2U*i+1U]=sample;
             }
             ret=demo_ai_audio_play(&s_audio,s_play,2U*s_rx[slot].length);
-        } else ret=-1;
+            if (ret == 0 && !s_first_play) {
+                s_first_play=true;
+                liot_trace("[ROOM-TIME] epoch=%u first_play_submit_ms=%u\r\n",
+                    (unsigned)s_epoch,(unsigned)(liot_rtos_get_running_time()-s_enter_started_ms));
+            }
+            if (ret != 0 && ret != DEMO_AI_AUDIO_ERR_PLAY_BUSY) ++s_media_stats.rx_play;
+        } else { ++s_media_stats.rx_age; ret=-1; }
 #if DEMO_AI_AUDIO_AEC_ENABLE
         /* Keep the fresh head until accepted; the next tick still enforces age.
          * Break only the downlink loop, so an open microphone continues uplink. */
@@ -842,18 +946,27 @@ static void room_audio_tick(void) {
         liot_rtos_exit_critical();
     }
     liot_rtos_enter_critical(); on=s_mic_gate && s_accept_audio; epoch=s_epoch;
-#if DEMO_AI_AUDIO_AEC_ENABLE
     mic_capture_generation=s_mic_capture_generation;
-#endif
     liot_rtos_exit_critical();
 #if DEMO_AI_AUDIO_AEC_ENABLE
+    if (s_capture_gate != on || s_capture_gate_generation != mic_capture_generation) {
+        ret=demo_ai_audio_group_capture_reset(&s_audio,on);
+        if (ret != 0) { room_fail(ROOM_ERR_AUDIO); return; }
+        s_capture_gate=on; s_capture_gate_generation=mic_capture_generation;
+    }
     /* OFF/ON between owner ticks must start a fresh failure budget. */
     if (!on || s_record_failure_generation != mic_capture_generation)
         s_record_failure_active=false;
     s_record_failure_generation=mic_capture_generation;
 #endif
     if (!on) return;
+    memset(&job,0,sizeof(job));
+    job.queued_ms=liot_rtos_get_running_time();
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    ret=demo_ai_audio_record_20ms_timed(&s_audio,s_capture,&job.queued_ms);
+#else
     ret=demo_ai_audio_record_20ms(&s_audio,s_capture);
+#endif
     liot_rtos_enter_critical();
     on=s_mic_gate && s_accept_audio && epoch == s_epoch && s_enabled && s_foreground && s_call == DEMO_GROUP_CALL_NONE;
 #if DEMO_AI_AUDIO_AEC_ENABLE
@@ -881,32 +994,16 @@ static void room_audio_tick(void) {
     if (ret != 0) { room_fail(ROOM_ERR_AUDIO); return; }
     for (i=0U;i<160U;++i) s_alaw[i]=demo_g711_alaw_encode_sample(
         (int16_t)(((int32_t)s_capture[2U*i]+s_capture[2U*i+1U])/2));
-    ret=demo_tirtc_get_send_buffer_used(DEMO_TIRTC_OWNER_GROUP_ROOM,s_generation,&used);
-    if (ret == 0 && used > ROOM_SEND_HIGH_WATER) ret=TIRTC_E_BUSY;
-    else if (ret == 0) {
-        memset(&frame,0,sizeof(frame));
-        frame.stream_id=ROOM_STREAM; frame.media=TIRTC_AUDIO_ALAW;
-        frame.flags=TIRTC_AUDIOSAMPLE_8K16B1C; frame.length=sizeof(s_alaw);
-        frame.ts=liot_rtos_get_running_time()-s_session_started;
-        liot_rtos_enter_critical(); on=s_mic_gate && s_accept_audio && epoch == s_epoch;
-#if DEMO_AI_AUDIO_AEC_ENABLE
-        on=on && mic_capture_generation == s_mic_capture_generation;
-#endif
-        liot_rtos_exit_critical();
-#if DEMO_AI_AUDIO_AEC_ENABLE
-        if (!on) {
-            room_zero(s_capture,sizeof(s_capture));
-            room_zero(s_alaw,sizeof(s_alaw));
-            return;
-        }
-#else
-        if (!on) return;
-#endif
-        ret=demo_tirtc_send_audio(DEMO_TIRTC_OWNER_GROUP_ROOM,s_generation,&frame,s_alaw);
+    job.epoch=epoch; job.generation=s_generation;
+    job.mic_generation=mic_capture_generation;
+    job.frame.stream_id=ROOM_STREAM; job.frame.media=TIRTC_AUDIO_ALAW;
+    job.frame.flags=TIRTC_AUDIOSAMPLE_8K16B1C; job.frame.length=sizeof(job.bytes);
+    job.frame.ts=job.queued_ms-s_session_started;
+    memcpy(job.bytes,s_alaw,sizeof(job.bytes));
+    ret=liot_rtos_queue_release(s_tx_queue,sizeof(job),(uint8 *)&job,LIOT_NO_WAIT);
+    if (ret != LIOT_OSI_SUCCESS) {
+        liot_rtos_enter_critical(); ++s_media_stats.tx_full; ++s_snapshot.tx_dropped; liot_rtos_exit_critical();
     }
-    if (ret == TIRTC_E_BUSY) {
-        liot_rtos_enter_critical(); ++s_snapshot.tx_dropped; liot_rtos_exit_critical();
-    } else if (ret < 0) room_fail(ret);
 }
 
 static void room_consume_http(void) {
@@ -917,9 +1014,13 @@ static void room_consume_http(void) {
     if (!done) return;
     kind=s_http_job.kind; code=s_http_result.code;
     valid=s_http_job.intent == s_seen_intent && s_http_job.epoch == s_epoch && !s_stopping;
-    liot_trace("[ROOM] service kind=%u code=%d epoch=%u\r\n",(unsigned int)kind,code,(unsigned int)s_http_job.epoch);
+    liot_trace("[ROOM] service kind=%u code=%d epoch=%u cost_ms=%u\r\n",(unsigned int)kind,code,
+        (unsigned int)s_http_job.epoch,(unsigned)(liot_rtos_get_running_time()-s_http_result.started_ms));
     /* Consume before clearing the mailbox; helper cannot overwrite it yet. */
-    if (kind == ROOM_JOB_ASSIGNMENT && s_http_job.intent == s_seen_intent && !s_stopping) {
+    /* Assignment belongs to the bound identity, independently of UI intent.
+     * An in-flight HOME query can satisfy a new enter; a reprovision cannot.
+     * Only its own sync ticket is completed, preserving newer MQTT hints. */
+    if (kind == ROOM_JOB_ASSIGNMENT && s_http_job.binding_epoch == s_binding_epoch && !s_stopping) {
         if (code == 200) {
             /* A stale response still completes this sync request. Only a new
              * hint/periodic sync should query again, never a busy retry loop. */
@@ -935,6 +1036,8 @@ static void room_consume_http(void) {
                 }
                 liot_rtos_enter_critical();
                 s_assignment=s_http_result.assignment;
+                s_assignment_cached=s_transport_was_ready;
+                s_assignment_received_ms=liot_rtos_get_running_time();
                 memcpy(s_snapshot.room_code,s_assignment.room_code,sizeof(s_snapshot.room_code));
                 liot_rtos_exit_critical();
                 if (changed) { s_manual_error=false; s_failures=0U; s_conflict_wait=false; }
@@ -945,12 +1048,14 @@ static void room_consume_http(void) {
                 s_deadline=liot_rtos_get_running_time()+ROOM_RESOURCE_TIMEOUT;
             }
         } else if (s_enabled && s_media_idle) {
+            s_assignment_cached=false;
             s_sync_done=s_http_job.sync_sequence;
             room_fail(code);
         } else {
             /* A background failure does not retry every 20/100 ms and cannot
              * monopolize the shared HTTP client. The next hint/online edge
              * (or enabled periodic sync) starts a fresh attempt. */
+            s_assignment_cached=false;
             s_sync_done=s_http_job.sync_sequence;
         }
     } else if (valid && kind == ROOM_JOB_TOKEN) {
@@ -1019,6 +1124,11 @@ static bool room_start_session(void) {
         s_claimed=true;
         s_epoch=room_next(s_epoch);
         speaker=s_speaker; mic=s_mic_level;
+        memset(&s_media_stats,0,sizeof(s_media_stats));
+        s_rx_primed=false; s_first_play=false;
+#if DEMO_AI_AUDIO_AEC_ENABLE
+        s_capture_gate=false; s_capture_gate_generation=0U;
+#endif
         liot_rtos_exit_critical();
     }
     if (ret != 0) {
@@ -1034,7 +1144,10 @@ static bool room_start_session(void) {
     room_zero(&identity,sizeof(identity));
     if (ret != 0 || s_device[0] == '\0') { room_fail(ROOM_ERR_OFFLINE); return true; }
     ret=demo_ai_audio_acquire(DEMO_AI_AUDIO_OWNER_GROUP_ROOM,&s_audio);
+    uint32_t audio_started=liot_rtos_get_running_time();
     if (ret == 0) ret=demo_ai_audio_prepare_session(&s_audio,speaker,mic);
+    liot_trace("[ROOM-TIME] audio_prepare_ms=%u ret=%d\r\n",
+        (unsigned)(liot_rtos_get_running_time()-audio_started),ret);
     if (ret != 0) { room_fail(ROOM_ERR_AUDIO); return true; }
     if (!room_allowed()) { room_close(DEMO_GROUP_SUSPENDED,0,"suspended"); return true; }
     (void)snprintf(s_session,sizeof(s_session),"%08x%08x%08x%08x",
@@ -1073,6 +1186,8 @@ static uint32_t room_step(void) {
             liot_rtos_enter_critical();
             s_intent=room_next(s_intent);
             memset(&s_assignment,0,sizeof(s_assignment));
+            s_assignment_cached=false;
+            s_binding_epoch=room_next(s_binding_epoch);
             memset(s_snapshot.room_code,0,sizeof(s_snapshot.room_code));
             intent=s_intent;
             liot_rtos_exit_critical();
@@ -1080,14 +1195,25 @@ static uint32_t room_step(void) {
         ready=binding.state == DEMO_BIND_BOUND && demo_net_time_is_data_ready() &&
               demo_formal_mqtt_is_online() && demo_tirtc_is_ready();
         if (intent != s_seen_intent) {
+            bool force_refresh=s_manual_error;
             s_seen_intent=intent;
             s_manual_error=false; s_failures=0U; s_retry_at=0U; s_conflict_wait=false;
             if (!s_media_idle && !s_stopping) room_close(DEMO_GROUP_IDLE,0,enabled ? "connect_failed" : "left");
             if (enabled) {
-                liot_rtos_enter_critical(); s_sync_sequence=room_next(s_sync_sequence); sync=s_sync_sequence; liot_rtos_exit_critical();
+                bool query_covers_sync=s_http_busy && s_http_job.kind == ROOM_JOB_ASSIGNMENT &&
+                    s_http_job.binding_epoch == s_binding_epoch && s_http_job.sync_sequence == sync;
+                /* Reuse only a successful, fresh, unchanged assignment.
+                 * MQTT hints/online edges and an explicit error retry still
+                 * require server validation; no token/lease is cached. */
+                if (force_refresh || (!query_covers_sync && (!s_assignment_cached ||
+                    liot_rtos_get_running_time()-s_assignment_received_ms >= ROOM_ASSIGNMENT_CACHE_MS ||
+                    sync != s_sync_done))) {
+                    liot_rtos_enter_critical(); s_sync_sequence=room_next(s_sync_sequence); sync=s_sync_sequence; liot_rtos_exit_critical();
+                }
                 s_deadline=liot_rtos_get_running_time()+ROOM_RESOURCE_TIMEOUT;
             }
         }
+        if (!ready) s_assignment_cached=false;
         if (ready && !s_transport_was_ready) {
             liot_rtos_enter_critical(); s_sync_sequence=room_next(s_sync_sequence); sync=s_sync_sequence; liot_rtos_exit_critical();
             s_sync_at=liot_rtos_get_running_time()+ROOM_SYNC_INTERVAL;
@@ -1218,6 +1344,7 @@ int demo_group_intercom_init(void) {
     s_snapshot.state=DEMO_GROUP_IDLE;
     if (liot_rtos_semaphore_create(&s_wake,0U) != LIOT_OSI_SUCCESS ||
         liot_rtos_semaphore_create(&s_http_wake,0U) != LIOT_OSI_SUCCESS) goto failed;
+    if (liot_rtos_queue_create(&s_tx_queue,sizeof(room_tx_job_t),ROOM_TX_SLOTS) != LIOT_OSI_SUCCESS) goto failed;
     if (demo_formal_mqtt_register_handler(room_mqtt,NULL) != 0) goto failed;
     demo_tirtc_set_feature_listener(DEMO_TIRTC_FEATURE_GROUP_ROOM,&s_listener);
     if (liot_rtos_task_create(&task,12U*1024U,LIOT_APP_TASK_PRIORITY,
@@ -1225,14 +1352,20 @@ int demo_group_intercom_init(void) {
     task=NULL;
     if (liot_rtos_task_create(&task,24U*1024U,LIOT_APP_TASK_PRIORITY,
             "group_room",room_task,NULL) != LIOT_OSI_SUCCESS) goto unregister;
+    /* Create TX last: on an earlier failure no task can reference its queue.
+     * Existing workers wait behind s_initialized and retain their old policy. */
+    task=NULL;
+    if (liot_rtos_task_create(&task,12U*1024U,LIOT_APP_TASK_PRIORITY,
+            "room_tx",room_tx_task,NULL) != LIOT_OSI_SUCCESS) goto unregister;
     s_initialized=true;
     room_wake();
-    liot_trace("[ROOM] ready; media stack=24576 service stack=12288 rx=8x640 command=2x4096\r\n");
+    liot_trace("[ROOM] ready; media=24576 service/tx=12288 rx=16x640/320ms tx=8x20ms command=2x4096\r\n");
     return 0;
 unregister:
     demo_formal_mqtt_unregister_handler(room_mqtt,NULL);
     demo_tirtc_set_feature_listener(DEMO_TIRTC_FEATURE_GROUP_ROOM,NULL);
 failed:
+    if (s_tx_queue != NULL) { (void)liot_rtos_queue_delete(s_tx_queue); s_tx_queue=NULL; }
     /* Never delete a task which may already own callbacks/RTOS state. */
     s_snapshot.state=DEMO_GROUP_ERROR; s_snapshot.error=ROOM_ERR_INIT;
     liot_trace("[ROOM] init failed; other features remain available\r\n");
@@ -1241,20 +1374,29 @@ failed:
 void demo_group_intercom_enter(void) {
     if (!s_initialized) return;
     liot_rtos_enter_critical();
-    if (!s_enabled) { s_enabled=true; s_intent=room_next(s_intent); }
+    if (!s_enabled) {
+        s_enabled=true; s_intent=room_next(s_intent);
+        s_enter_foreground_pending=true;
+        s_enter_started_ms=liot_rtos_get_running_time();
+    }
     s_mic_gate=false;
     liot_rtos_exit_critical(); room_wake();
 }
 void demo_group_intercom_exit(void) {
     liot_rtos_enter_critical();
     if (s_enabled) { s_enabled=false; s_intent=room_next(s_intent); }
+    s_enter_foreground_pending=false;
     s_mic_gate=false; s_accept_audio=false; s_accept_commands=false;
     liot_rtos_exit_critical(); room_wake();
 }
 void demo_group_intercom_retry(void) {
     if (!s_initialized) return;
     liot_rtos_enter_critical();
-    if (s_enabled) s_intent=room_next(s_intent);
+    if (s_enabled) {
+        s_intent=room_next(s_intent);
+        s_assignment_cached=false;
+        s_enter_started_ms=liot_rtos_get_running_time();
+    }
     s_mic_gate=false;
     liot_rtos_exit_critical(); room_wake();
 }
@@ -1269,19 +1411,23 @@ bool demo_group_intercom_toggle_mic_for_generation(uint32_t generation) {
     if (generation != 0U && generation == s_generation && s_enabled && s_foreground &&
         s_call == DEMO_GROUP_CALL_NONE && s_accept_audio && !s_stopping) {
         s_mic_gate=!s_mic_gate; s_mic_dirty=true; changed=true;
-#if DEMO_AI_AUDIO_AEC_ENABLE
         /* Reject a capture spanning a quick OFF/ON pair (key debounce is
          * 80 ms, shorter than the bounded 120 ms AEC capture wait). */
         s_mic_capture_generation=room_next(s_mic_capture_generation);
-#endif
     }
     liot_rtos_exit_critical(); room_wake(); return changed;
 }
 void demo_group_intercom_set_foreground_allowed(bool allowed) {
     liot_rtos_enter_critical();
+    bool entering=s_enter_foreground_pending;
+    if (allowed) s_enter_foreground_pending=false;
     if (s_foreground != allowed) {
         s_foreground=allowed;
-        if (allowed) s_sync_sequence=room_next(s_sync_sequence);
+        if (allowed) {
+            /* A new enter intent selects cache/refresh in room_step(). A
+             * resumed existing session still revalidates its assignment. */
+            if (!entering) s_sync_sequence=room_next(s_sync_sequence);
+        }
         else {
             s_suspend_requested=true;
             s_mic_gate=false; s_accept_audio=false; s_accept_commands=false;

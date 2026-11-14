@@ -689,7 +689,7 @@ GROUP 是独立业务，使用 `DEMO_TIRTC_OWNER_GROUP_ROOM` 和 `DEMO_AI_AUDIO_
 
 | 应用接口 | 当前调用与完成边界 |
 | --- | --- |
-| `demo_group_intercom_init()` | `user_main()` 在绑定 / 正式 MQTT 启动前同步注册路由，创建 GROUP worker 和 service worker；返回 0 为初始化成功，失败返回 `-6105`，不阻止原业务启动 |
+| `demo_group_intercom_init()` | `user_main()` 在绑定 / 正式 MQTT 启动前同步注册路由，创建GROUP worker、service worker和音频发送worker；返回0为初始化成功，失败返回 `-6105`，不阻止原业务启动 |
 | `demo_group_intercom_enter()` / `exit()` | UI 提交进入 / 退出意图；进入默认关麦，退出立即关闭本地收发准入，资源由 worker 异步释放；返回不等于媒体已经加入 / 释放 |
 | `demo_group_intercom_toggle_mic_for_generation()` | UI 用按键事件携带的有效 generation 切麦；同一有效会话且有收听准入时才返回 true，旧页面 / 旧连接按键不生效；无参数版本只是读取当前 generation 后转调 |
 | `demo_group_intercom_retry()` | `NO ROOM` / `ERROR` 时由确认键提交新意图、重新同步，默认关麦 |
@@ -700,7 +700,7 @@ GROUP 是独立业务，使用 `DEMO_TIRTC_OWNER_GROUP_ROOM` 和 `DEMO_AI_AUDIO_
 | `demo_group_intercom_is_enabled()` | 用户仍希望留在 GROUP；暂停、重连或暂无分配时也可能为 true，不等同于已加入 |
 | `reserve_call()` / `call_ready()` / `release_call()` / `has_call()` | 均带 `demo_group_intercom_` 前缀；供 WX/DEV 使用的来电预约和排空检查，见第 9A.5 节；不是 SDK API |
 
-`group_room` worker 负责状态、音频、命令解析和清理；`room_http` service worker 执行阻塞 HTTP 与 WHIP 提交。两者通过单个不可变 job / result mailbox 交接，回调只复制有界数据或登记事件。服务请求不阻塞媒体循环，UI 与 MQTT / TiRTC callback 不直接执行这些请求。
+`group_room` worker负责状态、音频、命令解析和清理；`room_http` service worker执行阻塞HTTP与WHIP提交，两者通过单个不可变job/result mailbox交接。独立 `room_tx` worker消费8槽音频发送队列，SDK音频发送等待不阻塞原媒体任务。回调只复制有界数据或登记事件，UI与MQTT/TiRTC callback不直接执行这些请求。
 
 ### 9A.2 服务器分配、正式 MQTT 与业务 HTTP
 
@@ -721,7 +721,7 @@ GROUP 是独立业务，使用 `DEMO_TIRTC_OWNER_GROUP_ROOM` 和 `DEMO_AI_AUDIO_
 
 `formal_mqtt.c` 对 `room_assignment_changed` 做局部兼容：若没有对象型 `payload`，把完整顶层 JSON 传给业务 handler；其他消息包装不变。`room_mqtt()` 仅受理 COMMAND 通道的该类型，检查 `assignment_version`，忽略可确认过期的 `expires_at` 及低于本地版本的提示，只增加同步序号并唤醒 worker。通知不会直接改 assignment、申请媒体或开始录音。
 
-进入页面、恢复在线 / 前台许可、有效 MQTT 提示会触发 assignment 同步；GROUP 启用时另有约 60 秒兜底同步。关闭页面时只合并待处理同步，且须无来电预约、runtime 无 owner / 在途连接后才提交，不周期抢占原业务。相同分配不重建连接，较旧 HTTP 分配不会覆盖新版本；房间、版本或加入意图确实变化时，先关闭旧会话，再按新分配处理。
+进入时可复用30秒内成功且无新变更提示的assignment，或同绑定身份的在途查询；缓存过期、恢复在线、已有会话恢复前台许可、有效MQTT提示及错误重试仍重新核对。GROUP启用时另有约60秒兜底同步。关闭页面时只合并待处理同步，且须无来电预约、runtime无owner/在途连接后才提交，不周期抢占原业务。相同分配不重建连接，较旧HTTP分配不会覆盖新版本；房间、版本或加入意图确实变化时，先关闭旧会话，再按新分配处理。
 
 ### 9A.3 WHIP、`join_room` 与命令时序
 
@@ -733,7 +733,7 @@ sequenceDiagram
     participant R as Runtime / TiRTC
     participant C as 多人房间服务
     U->>G: HOME 长按 KEY2，进入 GROUP，默认关麦
-    G->>H: GET assignment
+    G->>H: GET assignment（无有效缓存或在途查询时）
     H-->>G: 当前有效分配
     G->>R: claim GROUP_ROOM
     G->>G: 申请音频 lease，生成新的 session_id
@@ -773,14 +773,14 @@ sequenceDiagram
 
 GROUP 上下行均为 stream1 / `TIRTC_AUDIO_ALAW` / `TIRTC_AUDIOSAMPLE_8K16B1C`；该 flags 枚举值为 **0**，不要误写为数值 1（1 表示 16 kHz）。设备上行 16 kHz PCM 两点平均为 8 kHz，编码为 160 B / 20 ms；下行 A-law 解码后重复采样到本地 16 kHz 播放。
 
-每轮先处理下行，再检查本地麦克风门控；关麦停止业务取帧和发送，不退订、不关闭播放、不重建连接。`room_subscribe()` 接受匹配连接的 stream1 订阅，但不据此开启本机麦克风；本机开麦仍由当前有效按键控制。开麦时同时收听，音频随共享 AEC 开关选择后端。AEC 硬件流可持续运行，但关麦期间输入直接丢弃；重新开麦只取新帧，不补发关麦期间的语音。
+每轮先处理下行，再检查本地麦克风门控；关麦停止业务取帧和发送，不退订、不关闭播放、不重建连接。`room_subscribe()` 接受匹配连接的stream1订阅，但不据此开启本机麦克风；本机开麦仍由当前有效按键控制。开麦时同时收听，音频随共享AEC开关选择后端。默认AEC路径使用连续采集环，由房间任务取帧编码并投递独立发送任务；开关麦清空完整帧和半帧，未提交SDK的旧麦克风/会话代次帧被丢弃。下行累计约60ms音频或等待100ms后开始播放；仅在底层播放已耗尽时重新预缓冲。
 
 `set_mic_state` 发送返回负值时，只保留最新状态待补发，约每秒最多重试一次，不因这条通知失败而断开音频；发送期间再次切麦不会丢失最新变更。清理时取消旧重试，下一次成功加入仍默认关麦。这里使用当前 GROUP 的 `<0` 判断，不套用 AI 联系人回包的“长度加 4”转接门槛。
 
 | 有界处理 | 当前限制与行为 |
 | --- | --- |
-| 下行音频 | 8 个槽，每帧最多 640 B，排队合计最多 1280 B；超过 160 ms 的旧帧丢弃，格式不匹配不入队 |
-| 上行积压 | 发送缓冲大于 4096 B 或发送返回 `TIRTC_E_BUSY` 时丢本轮帧，增加 `tx_dropped`；其他负发送错误交会话恢复 |
+| 下行音频 | 16个槽，每帧最多640 B，排队合计最多2560 B（320ms）；超过400ms的旧帧丢弃，格式不匹配不入队 |
+| 上行积压 | 独立8槽发送队列，每帧20ms；超过200ms、麦克风/会话代次变化则丢弃。SDK发送缓冲大于4096 B或返回 `TIRTC_E_BUSY` 时丢本轮帧，增加 `tx_dropped`；其他负发送错误交会话恢复 |
 | 命令 | 2 个槽，每条最多 4096 B；超长消息略过并请求 assignment 同步，槽耗尽可能丢失关闭事件，因此主动重建已不确定的会话 |
 | 数据归属 | callback 校验句柄 / epoch、复制后入队；worker 清理先停准入并等 producer 退出，旧会话数据不能进入新会话 |
 

@@ -393,9 +393,11 @@ static void ui_sync_live_policy(void)
     demo_group_intercom_set_foreground_allowed(
         s_startup_state == UI_STARTUP_READY && group_page &&
         feature_audio_idle && !demo_group_intercom_has_call());
+    /* A HOME long press records intent, not media ownership. A background
+     * room GET or finishing audio must not erase a held key; entry below
+     * still waits for all real owners, and an incoming call cancels it. */
     home_hold_allowed = s_startup_state == UI_STARTUP_READY &&
         s_page == UI_PAGE_HOME && !s_entry_pending && !s_entry_failed &&
-        feature_audio_idle && group_idle &&
         !demo_group_intercom_is_enabled() && !demo_group_intercom_has_call();
     if (!home_hold_allowed && s_home_hold_allowed)
     {
@@ -564,11 +566,23 @@ static void ui_process_entry(void)
     s_entry_pending = false;
     s_entry_failed = false;
     ui_set_page(s_entry_page);
-    ui_sync_live_policy();
-    if (s_page != UI_PAGE_SETTINGS)
+#ifdef HWDEMO_GROUP_ROOM_EN
+    if (s_page == UI_PAGE_GROUP_ROOM)
     {
-        ui_notify_feature(
-            (demo_ui_feature_e)(s_page - UI_PAGE_AI_CHAT), true);
+        demo_group_intercom_set_audio_levels(s_speaker_level, s_mic_level);
+        /* Record new entry before foreground admission selects cache/resume. */
+        demo_group_intercom_enter();
+        ui_sync_live_policy();
+    }
+    else
+#endif
+    {
+        ui_sync_live_policy();
+        if (s_page != UI_PAGE_SETTINGS)
+        {
+            ui_notify_feature(
+                (demo_ui_feature_e)(s_page - UI_PAGE_AI_CHAT), true);
+        }
     }
     s_dirty = true;
     liot_trace("[UI] entry ready page=%d\r\n", (int)s_page);
@@ -863,14 +877,15 @@ static void ui_process_group(void)
             s_group_release_seen = false;
             s_group_exiting = false;
             s_group_return_after_call = false;
-            ui_set_page(UI_PAGE_GROUP_ROOM);
-            /* Close LIVE before publishing the new room-enter intent. */
-            ui_sync_live_policy();
-            demo_group_intercom_set_audio_levels(s_speaker_level, s_mic_level);
-            demo_group_intercom_enter();
+            s_entry_page = UI_PAGE_GROUP_ROOM;
+            s_entry_deadline = now + UI_ENTRY_TIMEOUT_MS;
+            s_entry_pending = true;
+            /* Yield background DEV work and stop LIVE, then use the same
+             * nonblocking owner handoff as ordinary menu entry. */
             ui_sync_live_policy();
             s_dirty = true;
-            liot_trace("[UI] GROUP long BACK enter\r\n");
+            liot_trace("[UI] GROUP long BACK pending timeout_ms=%u\r\n",
+                       (unsigned int)UI_ENTRY_TIMEOUT_MS);
         }
     }
     demo_group_intercom_get_snapshot(&group);
@@ -1165,6 +1180,18 @@ static void ui_handle_key(demo_ui_key_e key, uint32_t group_generation)
             /* Do not extend the deadline or enqueue duplicate starts. */
             return;
         }
+#ifdef HWDEMO_GROUP_ROOM_EN
+        if (s_entry_failed && s_entry_page == UI_PAGE_GROUP_ROOM &&
+            key == DEMO_UI_KEY_CONFIRM)
+        {
+            ui_cancel_entry();
+            s_entry_deadline = liot_rtos_get_running_time() +
+                               UI_ENTRY_TIMEOUT_MS;
+            s_entry_pending = true;
+            ui_sync_live_policy();
+            return;
+        }
+#endif
         ui_cancel_entry();
         if (key == DEMO_UI_KEY_NEXT)
         {
@@ -1901,8 +1928,11 @@ static void ui_render(void)
     {
         uint8_t index = (uint8_t)(s_entry_page - UI_PAGE_AI_CHAT);
 
-        demo_oled_draw_text_centered(8,
-            index < 3U ? s_feature_titles[index] : "SETTINGS", 2);
+        const char *title = index < 3U ? s_feature_titles[index] : "SETTINGS";
+#ifdef HWDEMO_GROUP_ROOM_EN
+        if (s_entry_page == UI_PAGE_GROUP_ROOM) title = "GROUP ROOM";
+#endif
+        demo_oled_draw_text_centered(8, title, 2);
         demo_oled_draw_text_centered(36,
             s_entry_failed ? "AUDIO BUSY" : "WAIT AUDIO", 1);
         demo_oled_draw_text_centered(50,
