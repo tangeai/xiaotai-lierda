@@ -147,14 +147,14 @@ restarts the stall budget. The disabled branch does not call the tail helper.
 
 `run_ai_remote_tail_command_test.py` extracts the production terminal-command
 reader and uses the real project JSON guard with upstream cJSON 1.7.16.
-Its 40 cases passed, including malformed/null/non-string/deep JSON, wrong
+Its 41 cases cover malformed/null/non-string/deep JSON, wrong
 command words, interrupt decoding, slot release and the eight-slot work bound
 under continuous arrival. New business actions are not dispatched. The command
 must now be complete JSON-RPC 2.0 and an actual notification before it can
 interrupt playback; a valid JSON prefix followed by garbage is rejected.
 
 `run_ai_command_protocol_test.py` uses the same real parser with the production
-dispatcher. Its 41 cases per AEC setting cover startup response matching and shape, compatible
+dispatcher. Its 41 AEC-disabled and 56 AEC-enabled cases cover startup response matching and shape, compatible
 omitted audio formats, invalid notifications, wire-length/NUL boundaries,
 and preserving the existing valid call/round/end/interrupt actions. Interrupt
 clears old audio before the blocking stop; a new reply injected during stop
@@ -189,7 +189,7 @@ with the actual AEC-dependent queue capacities (256 enabled, 16 disabled).
 They include 40-packet bursts, 100 packets arriving at twice real time with
 finite PCM backpressure, exact output ordering without duplication, all slots
 including 255, explicit overflow accounting, format/decode/queue errors,
-command-pool isolation and throttled retry logs. A callback injected after
+command-pool isolation, silent busy retries and one diagnostic per session for other submission errors. A callback injected after
 discard's final empty read retains its live slot; the frozen old discard
 function fails that ownership assertion in both configurations.
 

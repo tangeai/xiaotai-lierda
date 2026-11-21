@@ -1359,6 +1359,12 @@ static void ui_handle_key(demo_ui_key_e key, uint32_t group_generation)
             ui_sync_live_policy();
         }
     }
+#ifdef HWDEMO_AI_CHAT_EN
+    else if (s_page == UI_PAGE_AI_CHAT && key == DEMO_UI_KEY_CONFIRM)
+    {
+        demo_ai_chat_interrupt(s_ai_request_id);
+    }
+#endif
     else if (key == DEMO_UI_KEY_BACK)
     {
 #ifdef HWDEMO_AI_CHAT_EN

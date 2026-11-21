@@ -966,6 +966,13 @@ bool demo_ai_audio_play_done(const demo_ai_audio_lease_t *lease)
 #endif
 }
 
+#if DEMO_AI_AUDIO_AEC_ENABLE
+int demo_ai_audio_discard_playback(const demo_ai_audio_lease_t *lease)
+{
+    return aec_discard_playback(lease);
+}
+#endif
+
 int demo_ai_audio_stop(const demo_ai_audio_lease_t *lease)
 {
 #if DEMO_AI_AUDIO_AEC_ENABLE

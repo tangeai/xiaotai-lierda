@@ -589,6 +589,28 @@ static int aec_play(const demo_ai_audio_lease_t *lease, const int16_t *pcm, uint
     return 0;
 }
 
+static int aec_discard_playback(const demo_ai_audio_lease_t *lease)
+{
+    liot_rtos_enter_critical();
+    if (!demo_ai_audio_lease_valid_locked(lease) ||
+        lease->owner != DEMO_AI_AUDIO_OWNER_AI)
+    {
+        liot_rtos_exit_critical();
+        return DEMO_AI_AUDIO_ERR_INVALID_LEASE;
+    }
+    if (s_aec_fault || s_aec_retiring || s_aec_stopping || s_aec_stop_requested)
+    {
+        liot_rtos_exit_critical();
+        return AEC_ERR_BUSY;
+    }
+    s_aec_read = s_aec_count = 0U;
+    s_aec_partial_waiting = false;
+    /* A worker may already have a chunk in flight; preserve the drain
+     * estimate and avoid the vendor's destructive duplex stop. */
+    liot_rtos_exit_critical();
+    return 0;
+}
+
 static bool aec_play_done(void)
 {
     bool done;

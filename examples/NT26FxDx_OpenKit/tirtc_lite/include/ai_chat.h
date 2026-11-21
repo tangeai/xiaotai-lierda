@@ -58,6 +58,8 @@ void demo_ai_chat_prepare(void);
 /* Non-blocking start request.  The returned id identifies this session. */
 uint32_t demo_ai_chat_start(void);
 void demo_ai_chat_stop(void);
+/* UI posts intent for the current AI request; no audio or RTC I/O here. */
+void demo_ai_chat_interrupt(uint32_t request_id);
 /* True only after the worker has acknowledged stop and released audio. */
 bool demo_ai_chat_is_idle(void);
 void demo_ai_chat_get_snapshot(demo_ai_chat_snapshot_t *out);

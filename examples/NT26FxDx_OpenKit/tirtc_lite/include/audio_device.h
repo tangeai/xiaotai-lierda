@@ -137,6 +137,10 @@ int demo_ai_audio_group_capture_reset(const demo_ai_audio_lease_t *lease,
 int demo_ai_audio_play(const demo_ai_audio_lease_t *lease,
                        const int16_t *pcm, uint32_t samples);
 bool demo_ai_audio_play_done(const demo_ai_audio_lease_t *lease);
+#if DEMO_AI_AUDIO_AEC_ENABLE
+/* AI only: discard queued PCM, leaving the duplex stream and DMA tail alive. */
+int demo_ai_audio_discard_playback(const demo_ai_audio_lease_t *lease);
+#endif
 int demo_ai_audio_stop(const demo_ai_audio_lease_t *lease);
 
 /* Ten user-facing levels; out-of-range values are clamped to 1..10. */

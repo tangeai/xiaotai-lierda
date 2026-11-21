@@ -25,18 +25,25 @@ PREFIX = r'''
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#ifdef NDEBUG
+#error Playback regression requires assertions
+#endif
 #define DEMO_AI_OPUS_MAX_PACKET 1275U
 #define TIRTC_AUDIO_OPUS 1U
 #define TIRTC_AUDIOSAMPLE_16K16B1C 1U
 #define LIOT_NO_WAIT 0U
 #define LIOT_OSI_SUCCESS 0
 #define DEMO_AI_CHAT_SPEAKING 1
+#define DEMO_AI_AUDIO_ERR_PLAY_BUSY (-42)
 typedef void *tirtc_conn_t;
 typedef struct { uint32_t stream_id,length,media,flags,ts; } TIRTCFRAMEINFO;
 typedef struct {
     uint16_t length;
     uint8_t media,flags;
     uint32_t ts;
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    uint32_t playback_epoch;
+#endif
     uint8_t payload[DEMO_AI_OPUS_MAX_PACKET];
 } ai_audio_message_t;
 static ai_audio_message_t s_audio_pool[AI_AUDIO_QUEUE_DEPTH];
@@ -46,18 +53,27 @@ static uint32_t s_audio_pool_in_use,s_audio_pool_peak;
 static uint32_t s_audio_rx_received,s_audio_rx_pool_drop,s_audio_rx_queue_drop;
 static uint32_t s_audio_rx_format_drop,s_audio_rx_decode_drop;
 static uint32_t s_audio_last_rx_ts,s_audio_last_decoded_ts,s_audio_submitted_samples;
-static uint32_t s_audio_backpressure_count,s_audio_backpressure_logged_ms;
+static uint32_t s_audio_backpressure_count;
+static bool s_play_error_logged;
 static tirtc_conn_t s_conn=(void *)1;
 static void *s_audio_queue=(void *)2;
 static uint32_t s_callback_producers,s_rx_dropped,s_last_audio_ms;
 static uint32_t s_play_pending_samples,s_rx_frames;
 static bool s_server_speaking,s_first_play_reported;
+#if DEMO_AI_AUDIO_AEC_ENABLE
+static uint32_t s_playback_epoch,s_interrupted_rx_ms;
+static bool s_drop_interrupted_audio,s_reply_ended;
+static uint32_t s_play_retry_since_ms;
+static bool s_play_retry_waiting;
+static uint8_t s_play_submit_failures;
+#endif
 static int s_audio_lease;
 static int16_t s_decode_pcm[AI_DECODE_MAX_SAMPLES],s_play_pcm[AI_PLAY_BATCH_SAMPLES];
 static uint8_t queue_slots[AI_AUDIO_QUEUE_DEPTH];
 static int16_t output[320U*512U];
 static uint32_t now_ms,queued,qread,qwrite,capacity,buffered,submitted;
-static uint32_t play_calls,busy_calls,decode_calls,signals,backpressure_logs;
+static uint32_t play_calls,busy_calls,decode_calls,signals,backpressure_logs,play_error_logs;
+static int injected_play_error;
 static uint32_t critical_depth,cases;
 static bool force_queue_failure,inject_audio_after_empty;
 static void packet(unsigned id);
@@ -75,6 +91,7 @@ static void liot_rtos_enter_critical(void){ ++critical_depth; }
 static void liot_rtos_exit_critical(void){ assert(critical_depth); --critical_depth; }
 static void liot_trace(const char *format, ...){
     if(strstr(format,"playback backpressure")!=NULL) ++backpressure_logs;
+    if(strstr(format,"playback submit failed")!=NULL) ++play_error_logs;
 }
 static void ai_signal(void){ ++signals; }
 static void ai_set_state(int state,int error){ assert(state==DEMO_AI_CHAT_SPEAKING && error==0); }
@@ -120,7 +137,8 @@ static int demo_ai_opus_decode(const uint8_t *p,unsigned n,int16_t *pcm,unsigned
 static int demo_ai_audio_play(void *lease,const int16_t *pcm,unsigned count){
     assert(lease==&s_audio_lease && count>0U && critical_depth==0U);
     ++play_calls;
-    if(buffered+count>capacity){ ++busy_calls; return -42; }
+    if(injected_play_error) return injected_play_error;
+    if(buffered+count>capacity){ ++busy_calls; return DEMO_AI_AUDIO_ERR_PLAY_BUSY; }
     assert(submitted+count<=sizeof(output)/sizeof(output[0]));
     memcpy(output+submitted,pcm,count*sizeof(*pcm));
     submitted+=count;
@@ -149,12 +167,21 @@ static void reset(void){
     s_audio_pool_in_use=s_audio_pool_peak=s_audio_rx_received=0U;
     s_audio_rx_pool_drop=s_audio_rx_queue_drop=s_audio_rx_format_drop=s_audio_rx_decode_drop=0U;
     s_audio_last_rx_ts=s_audio_last_decoded_ts=s_audio_submitted_samples=0U;
-    s_audio_backpressure_count=s_audio_backpressure_logged_ms=0U;
+    s_audio_backpressure_count=0U;
+    s_play_error_logged=false;
     s_callback_producers=s_rx_dropped=s_last_audio_ms=s_play_pending_samples=s_rx_frames=0U;
     s_server_speaking=s_first_play_reported=false;
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    s_playback_epoch=s_interrupted_rx_ms=0U;
+    s_drop_interrupted_audio=s_reply_ended=false;
+    s_play_retry_since_ms=0U;
+    s_play_retry_waiting=false;
+    s_play_submit_failures=0U;
+#endif
     now_ms=1000U; queued=qread=qwrite=buffered=submitted=0U;
     capacity=4096U;
-    play_calls=busy_calls=decode_calls=signals=backpressure_logs=0U;
+    play_calls=busy_calls=decode_calls=signals=backpressure_logs=play_error_logs=0U;
+    injected_play_error=0;
     force_queue_failure=inject_audio_after_empty=false;
 }
 static void packet_type(unsigned id,unsigned ts,unsigned media,unsigned flags){
@@ -278,16 +305,28 @@ static void test_backpressure_and_log_budget(void){
     pending=s_play_pending_samples;
     assert(pending==960U && queued==0U && s_audio_pool_in_use==0U);
     memcpy(copy,s_play_pcm,pending*sizeof(*copy));
-    assert(backpressure_logs==1U);
+    assert(backpressure_logs==0U && play_error_logs==0U);
     for(i=1U;i<50U;i++){
         now_ms=1000U+i*20U;
         assert(ai_play_downlink()==0 && s_play_pending_samples==pending);
         assert(memcmp(copy,s_play_pcm,pending*sizeof(*copy))==0);
     }
     assert(busy_calls==50U && s_audio_backpressure_count==50U);
-    assert(backpressure_logs==1U && submitted==0U && s_audio_submitted_samples==0U);
+    assert(backpressure_logs==0U && submitted==0U && s_audio_submitted_samples==0U);
     now_ms=2000U; assert(ai_play_downlink()==0);
-    assert(backpressure_logs==2U && s_audio_backpressure_count==51U);
+    assert(backpressure_logs==0U && play_error_logs==0U && s_audio_backpressure_count==51U);
+    /* Busy attempts stay quiet. A later driver error still gets one diagnostic. */
+    injected_play_error=-7;
+    /* After a remote end, the existing terminal drain deadline owns failure;
+     * the ordinary non-AEC path likewise preserves its original retry policy. */
+    for(i=0U;i<4U;i++){
+        now_ms+=20U;
+        assert(ai_play_downlink()==0 && s_play_pending_samples==pending);
+        assert(memcmp(copy,s_play_pcm,pending*sizeof(*copy))==0);
+        assert(play_error_logs==1U && backpressure_logs==0U);
+    }
+    assert(s_audio_backpressure_count==55U);
+    injected_play_error=0;
     packet(4U); packet(5U);
     capacity=4096U; drain(); expect_frames(1U,5U);
     assert(s_rx_dropped==0U && decode_calls==5U && s_audio_rx_received==5U);
@@ -374,7 +413,7 @@ static int old_main(void){
     test_callback_rejection();
     test_invalid_slot_off_only();
     test_discard_callback_race();
-    printf("PASS AI downlink AEC=%d depth=%u: %u scenarios, burst/order/capacity/all slots, isolated pools, retained busy PCM, classified drops/throttled logs and discard-callback race\n",
+    printf("PASS AI downlink AEC=%d depth=%u: %u scenarios, burst/order/capacity/all slots, isolated pools, retained busy PCM, classified drops/quiet retries and first driver error and discard-callback race\n",
            DEMO_AI_AUDIO_AEC_ENABLE,(unsigned)AI_AUDIO_QUEUE_DEPTH,cases);
     return 0;
 }
@@ -457,8 +496,87 @@ static void test_backpressure_gate_once(void){
     for(unsigned i=0;i<4;i++){now_ms+=20;assert(ai_play_downlink()==0);}
     assert(s_prebuffer_starts==1 && s_prebuffer_ready==1 && s_prebuffer_timeouts==0);
     assert(!memcmp(copy,s_play_pcm,sizeof(copy)) && s_play_pending_samples==1280);
-    capacity=4096;assert(ai_play_downlink()==1);expect_frames(1,4);
+    capacity=4096;now_ms+=20U;assert(ai_play_downlink()==1);expect_frames(1,4);
     assert(s_rx_dropped==0);cases++;
+}
+static void test_busy_retry_cooldown(void){
+    for(unsigned wrap=0;wrap<2U;wrap++){
+        fresh();capacity=0U;
+        uint32_t start=wrap ? UINT32_MAX-9U : now_ms;
+        now_ms=start;
+        for(unsigned i=1;i<=4;i++)packet(i);
+        /* The very first valid submission never waits for the cadence. */
+        assert(ai_play_downlink()==0 && play_calls==1U && busy_calls==1U);
+        assert(s_play_pending_samples==1280U && decode_calls==4U);
+        int16_t copy[1280];
+        memcpy(copy,s_play_pcm,sizeof(copy));
+        packet(5);
+        for(unsigned t=0U;t<AI_PLAY_BUSY_RETRY_MS;t++){
+            now_ms=start+t;
+            /* Model repeated event wakes, including wakes in the same tick. */
+            for(unsigned i=0;i<4U;i++)assert(ai_play_downlink()==0);
+            assert(play_calls==1U && busy_calls==1U && decode_calls==4U && queued==1U);
+            assert(s_play_pending_samples==1280U && !memcmp(copy,s_play_pcm,sizeof(copy)));
+        }
+        now_ms=start+AI_PLAY_BUSY_RETRY_MS;
+        assert(ai_play_downlink()==0 && play_calls==2U && busy_calls==2U);
+        capacity=4096U;
+        now_ms=start+2U*AI_PLAY_BUSY_RETRY_MS-1U;
+        assert(ai_play_downlink()==0 && play_calls==2U && queued==1U);
+        ++now_ms;
+        assert(ai_play_downlink()==1 && play_calls==3U && queued==1U);
+        /* The next block is unrelated: immediate submit and no duplication. */
+        assert(ai_play_downlink()==1 && play_calls==4U && decode_calls==5U);
+        expect_frames(1,5);
+        assert(!s_rx_dropped && s_audio_backpressure_count==2U);
+        ++cases;
+    }
+}
+static void test_driver_error_budget(void){
+    /* One pending 20 ms block leaves room for more decoded audio. Keep that
+     * block intact and leave later packets queued when a real error retries. */
+    fresh();s_first_play_reported=true;done_at=now_ms+160U;
+    injected_play_error=-2;packet(1U);
+    assert(ai_play_downlink()==0 && play_calls==1U && s_play_pending_samples==320U);
+    packet(2U);
+    now_ms+=AI_PLAY_BUSY_RETRY_MS-1U;
+    assert(ai_play_downlink()==0 && play_calls==1U && decode_calls==1U);
+    ++now_ms;
+    assert(ai_play_downlink()==0 && play_calls==2U && queued==1U && decode_calls==1U);
+    injected_play_error=0;capacity=0;
+    now_ms+=AI_PLAY_BUSY_RETRY_MS;
+    assert(ai_play_downlink()==0 && busy_calls==1U);
+    /* The busy result breaks the consecutive non-busy error streak. */
+    injected_play_error=-2;now_ms+=AI_PLAY_BUSY_RETRY_MS;
+    assert(ai_play_downlink()==0);
+    capacity=4096;injected_play_error=0;now_ms+=AI_PLAY_BUSY_RETRY_MS;
+    assert(ai_play_downlink()==1);
+    drain();expect_frames(1U,2U);
+    assert(play_error_logs==1U && s_rx_dropped==0U);
+    ++cases;
+
+    fresh();s_first_play_reported=true;done_at=now_ms+160U;
+    injected_play_error=-2;packet(1U);
+    for(unsigned attempt=1;attempt<=AI_PLAY_SUBMIT_FAILURE_LIMIT;attempt++){
+        int ret=ai_play_downlink();
+        assert(ret==(attempt==AI_PLAY_SUBMIT_FAILURE_LIMIT ? AI_ERR_AUDIO_INIT : 0));
+        assert(play_calls==attempt && decode_calls==1U && s_play_pending_samples==320U);
+        now_ms+=AI_PLAY_BUSY_RETRY_MS;
+    }
+    assert(submitted==0U && play_error_logs==1U);
+    ++cases;
+}
+static void test_busy_then_interrupt(void){
+    fresh();capacity=0U;
+    for(unsigned i=1;i<=4;i++)packet(i);
+    assert(ai_play_downlink()==0 && s_play_pending_samples && play_calls==1U);
+    interrupt_now();
+    capacity=4096U;
+    /* No wait if the interrupted block no longer exists and new data is ready. */
+    for(unsigned i=5;i<=8;i++)packet(i);
+    assert(ai_play_downlink()==1 && play_calls==2U);
+    expect_frames(5,4);
+    ++cases;
 }
 static void test_rebuffer_and_remote_tail(void){
     fresh();for(unsigned i=1;i<=4;i++)packet(i);assert(ai_play_downlink()==1);
@@ -504,14 +622,46 @@ static void test_invalid_not_started(void){
     assert(!s_play_prebuffering && s_prebuffer_starts==0 && s_rx_dropped==1);
     now_ms+=1000;packet(1);assert(ai_play_downlink()==0 && s_prebuffer_start_ms==now_ms);cases++;
 }
+static void test_interrupted_packet_epoch(void){
+    int inflight;
+    uint8_t bytes[2]={2,0};
+    TIRTCFRAMEINFO frame={AI_STREAM_ID,2U,TIRTC_AUDIO_OPUS,TIRTC_AUDIOSAMPLE_16K16B1C,20U};
+
+    fresh();
+    inflight=ai_audio_slot_acquire(s_conn);
+    assert(inflight>=0);
+    ++s_playback_epoch;
+    s_drop_interrupted_audio=true;
+    now_ms+=20U; ai_on_audio(s_conn,&frame,bytes);
+    assert(!queued && s_audio_rx_received==1U && s_interrupted_rx_ms==now_ms);
+    assert(!s_audio_rx_pool_drop && !s_audio_rx_queue_drop && !s_rx_dropped);
+    s_drop_interrupted_audio=false;
+    /* The pre-cut callback can finish posting even after the gate opens. */
+    uint8_t slot=(uint8_t)inflight;
+    assert(liot_rtos_queue_release(s_audio_queue,sizeof(slot),&slot,LIOT_NO_WAIT)==0);
+    ai_callback_producer_done();
+    packet(3U);
+    s_remote_ended=true;
+    drain(); expect_frames(3U,1U);
+    assert(decode_calls==1U && !s_rx_dropped);
+    ++cases;
+}
+static void test_final_media_after_round_end(void){
+    fresh();s_reply_ended=true;
+    for(unsigned i=1;i<=4;i++)packet(i);
+    assert(ai_play_downlink()==1 && !s_server_speaking && s_reply_ended);
+    expect_frames(1,4);++cases;
+}
 #endif
 int main(void){
     old_main();
 #if DEMO_AI_AUDIO_AEC_ENABLE
     unsigned before=cases;
     test_regular_stream();test_fast_first_with_warmup();test_lengths_and_short_timeout();
-    test_timeout_clocks();test_backpressure_gate_once();test_rebuffer_and_remote_tail();
+    test_timeout_clocks();test_backpressure_gate_once();test_busy_retry_cooldown();
+    test_driver_error_budget();test_busy_then_interrupt();test_rebuffer_and_remote_tail();
     test_cancel_interrupt_reentry();test_invalid_not_started();test_cleanup_and_normal_batch();
+    test_interrupted_packet_epoch();test_final_media_after_round_end();
     printf("PASS actual AI prebuffer: %u scenarios; samples/time/long frames/retry/fast-warm-start/cancel/interrupt/reentry/tail/clock\n",cases-before);
 #endif
     return 0;
@@ -529,6 +679,7 @@ def main():
     # the first matching #define would silently give both builds 256 slots.
     definitions = source[source.index("#define AI_CMD_WORD"):
                          source.index("#define AI_ERR_CANCELLED")]
+    definitions += re.search(r"^#define\s+AI_ERR_AUDIO_INIT\s+[^\r\n]+", source, re.M).group() + "\n"
     packet_limit = re.search(r"^#define\s+DEMO_AI_OPUS_MAX_PACKET\s+(\d+U?)",
                              (app / "include/opus_codec.h").read_text(encoding="utf-8"), re.M)
     if packet_limit is None:
@@ -559,7 +710,7 @@ def main():
             c = Path(temp) / f"downlink-{enabled}.c"
             exe = c.with_suffix(".exe")
             c.write_text(body, encoding="utf-8")
-            subprocess.run(cc + ["-std=c99", "-O2", f"-DDEMO_AI_AUDIO_AEC_ENABLE={enabled}",
+            subprocess.run(cc + ["-std=c99", "-O2", "-UNDEBUG", f"-DDEMO_AI_AUDIO_AEC_ENABLE={enabled}",
                                  str(c), "-o", str(exe)], check=True)
             subprocess.run([str(exe)], check=True, timeout=10)
 

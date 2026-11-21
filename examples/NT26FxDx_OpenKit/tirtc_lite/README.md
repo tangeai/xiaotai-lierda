@@ -13,7 +13,7 @@
 | 功能 | 使用体验 | 操作视频 |
 | --- | --- | --- |
 | 联网与绑定 | 4G 联网后，点击[绑定设备](https://xiaotai.chat/devices)，登录后输入 OLED 六位绑定码，绑定成功后设备进入主页。 | [设备绑定](#video-binding) |
-| AI 语音对话 | 支持 AEC 回声消除和边播边听；AI 回复时可直接插话，由云端判断语音与打断。 | [AI 对讲](#video-ai-talk) |
+| AI 语音对话 | AI 播报时暂停上传麦克风声音，播完自动恢复收音。短按中间的 `KEY1` 可打断当前回复并继续提问。 | [AI 对讲](#video-ai-talk) |
 | AI 呼叫微信与设备 | 配好联系人和 AI 呼叫插件后，说“用微信呼叫妈妈”或“呼叫设备小钛”，自动转入 WX/DEV 呼叫流程。 | [AI 呼叫演示](#video-ai-call-contacts) |
 | WX 微信对讲 | 与微信小程序“探鸽小钛”双向呼叫、接听和语音对讲；设备主叫使用正式版小程序（`wx_version_type=0`）。 | [微信互叫](#video-wechat-call) |
 | DEV 设备互呼 | 从联系人列表选择已联网、绑定的设备，呼叫、接听、对讲和挂断。 | [设备互叫](#video-device-call) |
@@ -164,11 +164,11 @@ https://github.com/user-attachments/assets/c50d1b5e-5ee8-42e2-9fe3-c2f724e4d636
 
 当前使用官方 SDK 1.7.0 和 `F6D_D` 底包。Lite 与 Pro 共用公共 SDK，各自保留独立应用与构建配置；从旧 A 底包升级时须完整烧录配套底包与 APP。
 
-Lite 默认开启 `TIRTC_AUDIO_AEC_EN=y`，通过利尔达 3A 接口启用 AEC 和 ANS（`bypass=0, mode=1`，沿用原厂示例参数），AGC 保持旁路。AI 播放期间持续收音上传，配合云端语音检测支持插话打断；微信、设备互呼、LIVE 和 GROUP 使用同一音频适配和降噪配置，保留原有接听、开关麦和按键操作。AI 语音结束时保留告别语播放收尾。
+Lite 默认开启 `TIRTC_AUDIO_AEC_EN=y`，通过利尔达 3A 接口启用 AEC 和 ANS（`bypass=0, mode=1`，沿用原厂示例参数），AGC 保持旁路。AI 采用半双工。播放回复期间暂停麦克风上行，播放排空后只上传新采集的声音。会话进行中短按 `KEY1` 可提前结束当前回复。微信、设备互呼、LIVE 和 GROUP 使用同一音频适配和降噪配置，保留原有接听、开关麦和按键操作。AI 语音结束时保留告别语播放收尾。
 
 微信上行使用独立的 8 帧发送队列（每帧 20 ms，约 160 ms 容量），缓冲 SDK 短时发送阻塞；不等待队列填满，发送前丢弃已超过 300 ms 的旧帧。喇叭与麦克风默认均为 L8；麦克风 L1 保持原值，L10 降至原 L6 的增益，其他档位同步降低。设置和重启行为见 [音频设置](docs/当前设备操作.md#9-set-音频设置)。
 
-AEC 配置位于 `config/tirtc_config.mk`，默认 `TIRTC_AUDIO_AEC_DELAY=10`。详细音频调试日志默认关闭（`src/media/audio_device.c` 中的 `DEMO_AI_AUDIO_DEBUG=0`），保留初始化和错误日志。调试时可执行 `examples\NT26FxDx_OpenKit\tirtc_lite\build_app.bat TIRTC_AUDIO_AEC_EN=n` 关闭 AEC，恢复普通录放音和 AI 半双工；该入口仅更新 `gccout/tirtc_lite` 中的包。
+AEC 配置位于 `config/tirtc_config.mk`，默认 `TIRTC_AUDIO_AEC_DELAY=10`。详细音频调试日志默认关闭（`src/media/audio_device.c` 中的 `DEMO_AI_AUDIO_DEBUG=0`），保留初始化和错误日志。调试时可执行 `examples\NT26FxDx_OpenKit\tirtc_lite\build_app.bat TIRTC_AUDIO_AEC_EN=n` 关闭 AEC，切换为普通录放音。此配置也采用半双工，按键打断仅在默认 AEC 后端可用；该入口仅更新 `gccout/tirtc_lite` 中的包。
 
 本脚本选择 `APP_VARIANT=lite BUILD_MODE=demo DEMO_NAME=tirtc_app`，并使用独立输出目录；必须明确选择 `APP_VARIANT=lite`；不传 `APP_VARIANT` 时走原厂 app/demo 分支，不会自动选择 Lite。
 

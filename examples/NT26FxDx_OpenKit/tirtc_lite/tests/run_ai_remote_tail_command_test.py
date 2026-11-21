@@ -44,7 +44,7 @@ static struct { unsigned handled; } s_command_diag;
 static uint8_t queue_slots[AI_COMMAND_QUEUE_DEPTH];
 static bool used[AI_COMMAND_QUEUE_DEPTH];
 static unsigned qread, qcount, waits, releases, allocations, cases;
-static bool replenish;
+static bool replenish, s_key_interrupt_sent;
 static void *count_alloc(size_t size) {
     void *p = malloc(size);
     if (p != NULL) ++allocations;
@@ -105,6 +105,7 @@ static void reset(void) {
     s_command_queue = &queue_handle;
     s_command_diag.handled = qread = qcount = waits = releases = 0U;
     replenish = false;
+    s_key_interrupt_sent = false;
 }
 static void check_json(const char *json, bool expected) {
     reset();
@@ -120,6 +121,12 @@ int main(void) {
     cJSON_Hooks hooks = {count_alloc, count_free};
     cJSON_InitHooks(&hooks);
     check_json("{\"jsonrpc\":\"2.0\",\"method\":\"interrupt\"}", true);
+    reset();
+    s_key_interrupt_sent = true;
+    put(0U, AI_CMD_WORD, "{\"jsonrpc\":\"2.0\",\"method\":\"interrupt\"}");
+    put(1U, AI_CMD_WORD, "{\"jsonrpc\":\"2.0\",\"method\":\"interrupt\"}");
+    assert(!ai_remote_tail_interrupted());
+    assert(qcount == 0U && releases == 2U && allocations == 0U); ++cases;
     check_json(" \r\n{\"jsonrpc\":\"2.0\",\"method\":\"interru\\u0070t\",\"params\":{}}", true);
     check_json("{\"jsonrpc\":\"2.0\",\"method\":\"device_action\",\"params\":{\"action\":\"call\"}}", false);
     check_json("{\"jsonrpc\":\"2.0\",\"method\":\"round_end\"}", false);

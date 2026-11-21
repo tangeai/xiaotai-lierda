@@ -302,12 +302,12 @@ sequenceDiagram
     C-->>R: 0x2100，匹配 id 的协商响应
     R-->>A: ai_on_command → 队列 → ai_handle_command
     A->>R: subscribe_audio(1)
-    loop 对话（AEC 开启时全双工，关闭时半双工）
-        A->>R: 发送 stream1 Opus（关闭 AEC 时仅 LISTENING）
+    loop AI 半双工对话
+        A->>R: LISTENING 时发送 stream1 Opus
         R->>C: TiRtcSendAudioStream
         C-->>R: AI 回复音频及轮次事件
         R-->>A: on_audio / on_command
-        A->>A: AI SPEAK：解码播放（开启 AEC 时保持上行）
+        A->>A: AI SPEAK：解码播放，暂停麦克风上行
     end
 ```
 
@@ -325,6 +325,7 @@ AI access 的获取是业务 HTTP，不是 `TiRtcServiceRequest()`。进入会�
 | 订阅回复音频 | `ai_run_session` | `demo_tirtc_subscribe_audio(1)` → `TiRtcSubscribeAudio` |
 | 检查发送积压 | `ai_send_uplink_20ms` | `demo_tirtc_get_send_buffer_used` → `TiRtcGetSendBufferUsed` |
 | 发送麦克风音频 | `ai_send_uplink_20ms` | `demo_tirtc_send_audio` → `TiRtcSendAudioStream` |
+| 打断当前回复 | `demo_ai_chat_interrupt` → `ai_process_key_interrupt` | 清除待播回复；本轮未结束时经 `demo_tirtc_send_command` → `TiRtcSendCommand` 发送 `interrupt` |
 | 通知服务结束 | `ai_send_end_session` | 相同 `0x2100` 通道发送 `end_session` JSON |
 | 关闭连接 / 取消 pending | `ai_disconnect_and_wait`；`ai_session_cleanup` | `demo_tirtc_disconnect`，最终由 runtime 调 SDK Disconnect |
 | 归还 owner | `ai_release_tirtc_session` | `demo_tirtc_session_release` |
@@ -338,11 +339,11 @@ AI access 的获取是业务 HTTP，不是 `TiRtcServiceRequest()`。进入会�
 
 AI 发送和接收都使用**完整命令字 `0x2100`**，不是“低 16 位等于即可”；`ai_on_command()` 和 `ai_handle_command()` 都有完整值检查。应用请求/响应靠 JSON `id` 关联，没有使用 SDK 的 `atomic_get_cmd_sn()`。
 
-`round_start`、`round_end`、`interrupt`、`end_session` 是 JSON 内的业务方法，不是新的 TiRtc API。`round_end` 允许剩余音频播完，不能当作打断清空尾音。代码保留已有下行 `interrupt` 的兼容处理：先清旧队列和待播块，再 Stop 音频并重置编解码状态，保留 Stop 等待期间收到的新音频；这不表示每种云端智能体都会下发该通知。启用 AEC 后持续上行并依赖云端 VAD，实际打断及下一轮恢复需实测。
+`round_start`、`round_end`、`interrupt`、`end_session` 是 JSON 内的业务方法，不是新的 TiRtc API。`round_end` 允许剩余音频播完，不能当作打断清空尾音。默认 AEC 配置下，会话中短按 `KEY1` 后，AI worker 清除本地待播音频。回复仍在进行时，通过同一命令通道发送 `interrupt`。该命令成功提交后，本会话中迟到的无轮次标识下行 `interrupt` 会被忽略，以保护后续回复。
 
 ### 6.4 AEC 开关、上行调度和退出
 
-AI 上行是 20 ms / 320 个 16 kHz PCM sample，经 Opus 编码发送。当前 Lite 默认启用 AEC，播放回复、预缓冲和播放背压期间均保留上行机会；每轮至多取一帧，由新帧到达提供节拍。关闭 AEC 时，服务正在说话或本地播放尚未完成便不开始录音。发送缓存**大于** 12 KiB 时跳过本轮采集并等待 20 ms；发送返回 `TIRTC_E_BUSY` 时丢当前帧。AEC 路径在取帧后再次验证请求，取消或转呼后不发送旧帧。
+AI 上行是 20 ms / 320 个 16 kHz PCM sample，经 Opus 编码发送。当前 Lite 默认启用 AEC。轮次开始、存在待播音频或驱动仍在播放时暂停取麦克风帧。取帧后和发送前再次检查播放状态。播放排空且轮次结束后恢复上传新采集的声音。关闭 AEC 时，服务正在说话或本地播放尚未完成便不开始录音。发送缓存**大于** 12 KiB 时跳过本轮采集并等待 20 ms；发送返回 `TIRTC_E_BUSY` 时丢当前帧。AEC 路径在取帧后再次验证请求，取消或转呼后不发送旧帧。
 
 所有音频功能复用共享 HAL，编解码、stream ID、TiRTC owner/generation 以及接听、订阅、开关麦权限保持原约束。构建开关及测试方法见 [AEC 说明](../README.md#aec-debug)。
 
@@ -833,7 +834,7 @@ connect-token 返回的 heartbeat / lease 均须为正整数，heartbeat 不超�
 
 | 功能 | 建连方式 | 设备发送 | 设备接收 | 本地音频行为 |
 | --- | --- | --- | --- | --- |
-| AI | 主动 WHIP | stream1 / Opus / 16 kHz | stream1 / Opus / 16 kHz | AEC 开启时回复期间继续上行，关闭时半双工 |
+| AI | 主动 WHIP | stream1 / Opus / 16 kHz | stream1 / Opus / 16 kHz | 半双工，默认 AEC 后端支持按 `KEY1` 打断 |
 | WX | 主动 WHIP；主叫被叫均如此 | stream0 / A-law / 8 kHz | stream0 / A-law / 8或16 kHz | 同时收发，随共享 AEC 开关 |
 | DEV | 被叫主动 P2P、主叫接受入站 | stream10 / Opus / 16 kHz | stream10 / Opus / 16 kHz；兼容 A-law / 8或16 kHz | 同时收发，自适应预缓冲；随共享 AEC 开关 |
 | LIVE | 被动接收并 adopt | stream10 / A-law / 8 kHz | stream10或14 / A-law / 8或16 kHz | 同时收发，随共享 AEC 开关 |

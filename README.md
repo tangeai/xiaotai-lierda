@@ -70,7 +70,7 @@ SDK 自带 Windows 编译工具和 GCC 压缩包，首次编译自动解压到 `
 
 ## 从使用到开发
 
-两套产品共用公共 SDK 源码和工具链，应用代码、配置与编译输出各自独立。当前使用官方 SDK 1.7.0 和 `F6D_D` 底包，默认开启利尔达 AEC；AI 对话支持边播边听与插话打断。按产品入门页的“操作 → 架构 → TiRTC 接入 → AI 呼叫配置”继续阅读：[lite 代码架构](examples/NT26FxDx_OpenKit/tirtc_lite/docs/代码与流程详解.md) / [pro 代码架构](examples/NT26FxDx_OpenKit/tirtc_pro/docs/代码与流程详解.md)。
+两套产品共用公共 SDK 源码和工具链，应用代码、配置与编译输出各自独立。当前使用官方 SDK 1.7.0 和 `F6D_D` 底包，默认开启利尔达 AEC；Lite 的 AI 对话采用半双工，回复期间可短按 `KEY1` 打断。Pro 支持边播边听与语音打断。按产品入门页的“操作 → 架构 → TiRTC 接入 → AI 呼叫配置”继续阅读：[lite 代码架构](examples/NT26FxDx_OpenKit/tirtc_lite/docs/代码与流程详解.md) / [pro 代码架构](examples/NT26FxDx_OpenKit/tirtc_pro/docs/代码与流程详解.md)。
 
 ## 官方资料
 

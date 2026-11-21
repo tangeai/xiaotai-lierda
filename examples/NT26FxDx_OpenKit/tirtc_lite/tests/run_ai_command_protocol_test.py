@@ -26,6 +26,9 @@ PREFIX = r'''
 #include <stdlib.h>
 #include <string.h>
 #include "json_guard.h"
+#ifdef NDEBUG
+#error "Protocol regression requires assertions enabled"
+#endif
 #define liot_trace(...) ((void)0)
 #define AI_ERR_START_REJECTED (-20)
 #define AI_ERR_AUDIO_FORMAT (-21)
@@ -43,6 +46,45 @@ static bool s_play_prebuffering;
 static unsigned actions, stops, discards, resets, allocations, cases;
 static unsigned queued_audio, queued_at_stop;
 static bool reply_during_stop, s_capture_timeout_active;
+#if DEMO_AI_AUDIO_AEC_ENABLE
+static uint32_t s_interrupt_request_id, s_playback_epoch, s_interrupted_rx_ms;
+static uint32_t s_tx_frames;
+static bool s_drop_interrupted_audio, s_interrupted_round_ended, s_reply_ended, s_reply_announced;
+static uint32_t s_control_sequence, s_running_request_id, s_tirtc_session_generation;
+static bool s_want_active, s_key_interrupt_sent;
+static int command_result;
+static unsigned s_state, signals, cuts, commands, critical_depth;
+static uint32_t now_ms, preempt_rx_at;
+static bool preempt_rx_on_lock;
+#define DEMO_AI_CHAT_SPEAKING 6U
+#define DEMO_TIRTC_OWNER_AI 1U
+static void liot_rtos_enter_critical(void) {
+    /* Model an SDK receive callback winning immediately before the worker
+     * acquires the same lock, crossing a millisecond tick. */
+    if (!critical_depth && preempt_rx_on_lock) {
+        preempt_rx_on_lock = false;
+        now_ms = s_interrupted_rx_ms = preempt_rx_at;
+    }
+    ++critical_depth;
+}
+static void liot_rtos_exit_critical(void) { assert(critical_depth); --critical_depth; }
+static void ai_signal(void) { assert(!critical_depth); ++signals; }
+static int demo_ai_audio_discard_playback(void *lease) {
+    assert(lease == &s_audio_lease && !critical_depth);
+    ++cuts;
+    return 0;
+}
+static int demo_tirtc_send_command(unsigned owner, uint32_t generation,
+                                  uint32_t word, const char *json, uint32_t size) {
+    assert(owner == DEMO_TIRTC_OWNER_AI && generation == s_tirtc_session_generation);
+    assert(word == 0x2100U && !critical_depth);
+    assert(size == strlen(json));
+    assert(strcmp(json, "{\"jsonrpc\":\"2.0\",\"method\":\"interrupt\"}") == 0);
+    assert(cuts && !queued_audio && s_drop_interrupted_audio);
+    ++commands;
+    return command_result;
+}
+#endif
 static void *count_alloc(size_t size) {
     void *p = malloc(size);
     if (p != NULL) ++allocations;
@@ -55,7 +97,13 @@ static void ai_diag_command(const ai_command_message_t *m, const cJSON *r) {
     (void)m; (void)r;
 }
 static void ai_handle_device_action(const cJSON *r) { (void)r; ++actions; }
-static unsigned liot_rtos_get_running_time(void) { return 1234U; }
+static unsigned liot_rtos_get_running_time(void) {
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    return now_ms;
+#else
+    return 1234U;
+#endif
+}
 static int demo_ai_audio_stop(void *lease) {
     (void)lease; ++stops; queued_at_stop = queued_audio;
     /* Model a new reply arriving while the driver drains the old playback. */
@@ -77,6 +125,20 @@ static void reset(void) {
     s_last_audio_ms = actions = stops = discards = resets = 0U;
     queued_audio = 1U; queued_at_stop = 0U; reply_during_stop = false;
     s_capture_timeout_active = true;
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    now_ms = 1234U;
+    preempt_rx_at = 0U;
+    preempt_rx_on_lock = false;
+    s_want_active = true;
+    s_running_request_id = s_control_sequence = 7U;
+    s_tirtc_session_generation = 13U;
+    s_state = signals = cuts = commands = 0U;
+    s_key_interrupt_sent = false;
+    command_result = 42;
+    s_interrupt_request_id = s_playback_epoch = s_interrupted_rx_ms = 0U;
+    s_tx_frames = 0U;
+    s_drop_interrupted_audio = s_interrupted_round_ended = s_reply_ended = s_reply_announced = false;
+#endif
 }
 static void dispatch_bytes(const char *json, size_t length) {
     ai_command_message_t m;
@@ -99,6 +161,11 @@ int main(void) {
     cJSON_Hooks hooks = {count_alloc, count_free};
     const char *end = "{\"jsonrpc\":\"2.0\",\"method\":\"end_session\"}";
     const char *start = "{\"jsonrpc\":\"2.0\",\"id\":\"nt26-ai-7\",\"result\":{\"session_id\":\"s\"}}";
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    const char *round_start = "{\"jsonrpc\":\"2.0\",\"method\":\"round_start\"}";
+    const char *round_end = "{\"jsonrpc\":\"2.0\",\"method\":\"round_end\"}";
+    const char *interrupt = "{\"jsonrpc\":\"2.0\",\"method\":\"interrupt\"}";
+#endif
     char wire[512];
     cJSON_InitHooks(&hooks);
     reset(); dispatch(start); /* Old servers may omit negotiated formats. */
@@ -137,9 +204,115 @@ int main(void) {
     ignored("[]"); ignored("null"); ignored("{"); ignored("");
     reset(); dispatch("{\"jsonrpc\":\"2.0\",\"method\":\"round_start\"}");
     assert(s_server_speaking && s_last_audio_ms == 1234U); ++cases;
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    now_ms += 2000U;
+#endif
     dispatch("{\"jsonrpc\":\"2.0\",\"method\":\"round_end\"}");
     assert(!s_server_speaking && !stops); ++cases;
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    assert(s_reply_ended && s_last_audio_ms == now_ms);
+#endif
     ignored("{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"round_start\"}");
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    /* Idle, stale, or repeated keys cannot send a cancellation. Work belongs
+     * to the AI worker, and delayed control must not stop recording. */
+    reset(); demo_ai_chat_interrupt(7U); ai_process_key_interrupt();
+    assert(!signals && !cuts && !commands); ++cases;
+    s_state = DEMO_AI_CHAT_SPEAKING;
+    demo_ai_chat_interrupt(6U); ai_process_key_interrupt();
+    assert(!signals && !cuts && !commands); ++cases;
+    demo_ai_chat_interrupt(7U);
+    demo_ai_chat_interrupt(7U);
+    assert(signals == 1U && !cuts && !commands);
+    ai_process_key_interrupt();
+    assert(cuts == 1U && commands == 1U && discards == 1U && !stops);
+    assert(s_drop_interrupted_audio && s_playback_epoch == 1U &&
+           !s_play_pending_samples && !s_play_prebuffering && !s_server_speaking);
+    demo_ai_chat_interrupt(7U); ai_process_key_interrupt();
+    assert(cuts == 1U && commands == 1U); ++cases;
+    dispatch("{\"jsonrpc\":\"2.0\",\"method\":\"interrupt\"}");
+    assert(s_drop_interrupted_audio && !stops && !resets);
+    dispatch("{\"jsonrpc\":\"2.0\",\"method\":\"round_start\"}");
+    assert(!s_drop_interrupted_audio && s_server_speaking); ++cases;
+
+    reset(); s_state = DEMO_AI_CHAT_SPEAKING;
+    demo_ai_chat_interrupt(7U); ++s_control_sequence; ai_process_key_interrupt();
+    assert(!cuts && !commands && !s_drop_interrupted_audio); ++cases;
+
+    reset(); s_state = DEMO_AI_CHAT_SPEAKING;
+    demo_ai_chat_interrupt(7U); ai_process_key_interrupt();
+    s_interrupted_rx_ms = now_ms + 250U;
+    now_ms = s_interrupted_rx_ms + AI_SPEECH_IDLE_MS - 1U;
+    ai_resume_downlink(false); assert(s_drop_interrupted_audio);
+    ++now_ms; ai_resume_downlink(false); assert(!s_drop_interrupted_audio); ++cases;
+
+    reset(); s_state = DEMO_AI_CHAT_SPEAKING;
+    demo_ai_chat_interrupt(7U); ai_process_key_interrupt();
+    preempt_rx_at = now_ms + AI_SPEECH_IDLE_MS + 1U;
+    now_ms = preempt_rx_at - 1U;
+    preempt_rx_on_lock = true;
+    ai_resume_downlink(false);
+    assert(!preempt_rx_on_lock && s_interrupted_rx_ms == now_ms && s_drop_interrupted_audio); ++cases;
+
+    reset(); s_state = DEMO_AI_CHAT_SPEAKING;
+    now_ms = UINT32_MAX - 100U;
+    demo_ai_chat_interrupt(7U); ai_process_key_interrupt();
+    now_ms += AI_SPEECH_IDLE_MS - 1U;
+    ai_resume_downlink(false); assert(s_drop_interrupted_audio);
+    ++now_ms; ai_resume_downlink(false); assert(!s_drop_interrupted_audio); ++cases;
+
+    reset(); s_state = DEMO_AI_CHAT_SPEAKING;
+    dispatch(round_start);
+    demo_ai_chat_interrupt(7U); ai_process_key_interrupt();
+    assert(s_drop_interrupted_audio);
+    /* A real new-round notification is sufficient even when the preceding
+     * round_end never arrived and 800 ms has not elapsed. */
+    now_ms += 200U;
+    dispatch(round_start);
+    assert(!s_drop_interrupted_audio && s_server_speaking && s_last_audio_ms == now_ms); ++cases;
+
+    reset(); s_state = DEMO_AI_CHAT_SPEAKING;
+    s_tx_frames = 13U;
+    demo_ai_chat_interrupt(7U); ai_process_key_interrupt();
+    ++s_tx_frames; /* A silent mic frame does not identify a new reply. */
+    now_ms += 200U;
+    dispatch(round_start); /* Could be the original round's late marker. */
+    assert(s_drop_interrupted_audio && !s_server_speaking);
+    now_ms += 100U;
+    dispatch(round_start); /* A subsequent marker identifies a new round. */
+    assert(!s_drop_interrupted_audio && s_server_speaking); ++cases;
+
+    reset(); s_state = DEMO_AI_CHAT_SPEAKING;
+    demo_ai_chat_interrupt(7U); ai_process_key_interrupt();
+    dispatch(round_end);
+    now_ms += 200U;
+    dispatch(round_start);
+    assert(!s_drop_interrupted_audio && s_server_speaking); ++cases;
+    s_play_pending_samples = 640U;
+    queued_audio = 2U;
+    now_ms += 6000U;
+    dispatch(interrupt); dispatch(interrupt);
+    assert(s_server_speaking && !stops && !resets && discards == 1U);
+    assert(s_play_pending_samples == 640U && queued_audio == 2U); ++cases;
+    dispatch(round_end);
+    assert(!s_server_speaking && s_reply_ended && queued_audio == 2U);
+    dispatch(end); assert(s_remote_ended && s_play_pending_samples == 640U); ++cases;
+
+    reset(); s_state = DEMO_AI_CHAT_SPEAKING; command_result = -1;
+    demo_ai_chat_interrupt(7U); ai_process_key_interrupt();
+    assert(cuts == 1U && commands == 1U && !s_key_interrupt_sent);
+    dispatch(round_end);
+    dispatch(round_start);
+    dispatch(interrupt);
+    assert(!s_drop_interrupted_audio && stops == 1U && resets == 1U); ++cases;
+
+    reset(); s_state = DEMO_AI_CHAT_SPEAKING;
+    dispatch(round_end); /* Local PCM remains, but the server already finished. */
+    demo_ai_chat_interrupt(7U); ai_process_key_interrupt();
+    assert(cuts == 1U && discards == 1U && !commands && !stops && !s_key_interrupt_sent);
+    dispatch(round_start);
+    assert(!s_drop_interrupted_audio && s_server_speaking); ++cases;
+#endif
     reset(); dispatch("{\"jsonrpc\":\"2.0\",\"method\":\"interrupt\"}");
     assert(stops == 1U && discards == 1U && resets == 1U);
 #if DEMO_AI_AUDIO_AEC_ENABLE
@@ -177,28 +350,36 @@ def main():
     parser.add_argument("--cc", default=os.environ.get("CC", "cc"))
     parser.add_argument("--cjson", type=Path, required=True)
     parser.add_argument("--source", type=Path, help="Optional baseline ai_chat.c for negative regression")
+    parser.add_argument("--sdk-root", type=Path, help="SDK root for an isolated application checkout")
     args = parser.parse_args()
     cc = compiler_command(args.cc, parser)
     if hashlib.sha256(args.cjson.read_bytes()).hexdigest() != CJSON_SHA256:
         parser.error("Expected unmodified upstream cJSON v1.7.16 cJSON.c")
     app = Path(__file__).resolve().parents[1]
-    root = app.parents[2]
+    root = args.sdk_root or app.parents[2]
     source = (args.source or app / "src/features/ai_chat.c").read_text(encoding="utf-8")
     constants = []
-    for name in ("AI_CMD_WORD", "AI_COMMAND_MAX_BYTES"):
+    for name in ("AI_CMD_WORD", "AI_COMMAND_MAX_BYTES", "AI_SPEECH_IDLE_MS"):
         constants.append(re.search(r"^#define\s+" + name + r"\s+[^\r\n]+", source, re.M).group())
     names = ["ai_json_audio_validate_optional", "ai_call_json_is_complete"]
     for name in ("ai_command_json_parse", "ai_command_is_notification"):
         if re.search(r"static\s+[^;{}]+\b" + name + r"\s*\(", source):
             names.append(name)
-    names.append("ai_handle_command")
-    body = "\n".join(constants) + PREFIX + "\n".join(function(source, n) for n in names) + SUFFIX
+    helpers = "\n".join(function(source, n) for n in names)
+    interrupt_names = ["ai_resume_downlink", "ai_process_key_interrupt"]
+    if re.search(r"static\s+uint32_t\s+ai_take_key_interrupt\s*\(", source):
+        interrupt_names.insert(1, "ai_take_key_interrupt")
+        interrupt_names.insert(1, "ai_request_is_active")
+    interrupt = "#if DEMO_AI_AUDIO_AEC_ENABLE\n" + "".join(function(source, name)
+        for name in interrupt_names) + "#endif\n"
+    body = "\n".join(constants) + PREFIX + helpers + interrupt + \
+           function(source, "ai_handle_command") + function(source, "demo_ai_chat_interrupt") + SUFFIX
     with tempfile.TemporaryDirectory(prefix="lite-ai-command-protocol-") as temp:
         c = Path(temp) / "ai-command-protocol.c"
         exe = c.with_suffix(".exe")
         c.write_text(body, encoding="utf-8")
         for enabled in (0, 1):
-            subprocess.run(cc + ["-std=c99", "-O2", "-DCJSON_HIDE_SYMBOLS",
+            subprocess.run(cc + ["-std=c99", "-O2", "-UNDEBUG", "-DCJSON_HIDE_SYMBOLS",
                                 f"-DDEMO_AI_AUDIO_AEC_ENABLE={enabled}",
                                 "-I", str(app / "include"),
                                 "-I", str(root / "components/thirdparty/CJSON"),

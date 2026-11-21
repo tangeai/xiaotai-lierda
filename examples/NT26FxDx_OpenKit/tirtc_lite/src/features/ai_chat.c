@@ -10,9 +10,7 @@
  * packet represents one 20 ms PCM frame.  SDK callbacks only copy into small
  * bounded queues; HTTP, JSON, codec and audio-driver work stays in this task.
  *
- * With DEMO_AI_AUDIO_AEC_ENABLE, upload echo-cancelled microphone frames while
- * playing AI audio; the existing cloud VAD handles speech/turn detection.  The
- * fallback without AEC retains half duplex to avoid speaker feedback into ASR.
+ * Keep AI half duplex to avoid feeding speaker output into cloud ASR.
  */
 
 #include "ai_chat.h"
@@ -85,6 +83,8 @@
 #if DEMO_AI_AUDIO_AEC_ENABLE
 #define AI_PLAY_BATCH_SAMPLES          3200U
 #define AI_PLAY_PREBUFFER_SAMPLES      1280U /* 80 ms at 16 kHz. */
+#define AI_PLAY_BUSY_RETRY_MS          20U
+#define AI_PLAY_SUBMIT_FAILURE_LIMIT   3U
 #define AI_PLAY_PREBUFFER_TIMEOUT_MS   120U
 #else
 #define AI_PLAY_BATCH_SAMPLES          2560U
@@ -112,6 +112,9 @@ typedef struct
     uint8_t media;
     uint8_t flags;
     uint32_t ts;
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    uint32_t playback_epoch;
+#endif
     uint8_t payload[DEMO_AI_OPUS_MAX_PACKET];
 } ai_audio_message_t;
 
@@ -172,7 +175,8 @@ static volatile uint32_t s_audio_rx_pool_drop, s_audio_rx_queue_drop;
 static uint32_t s_audio_rx_format_drop, s_audio_rx_decode_drop;
 static volatile uint32_t s_audio_last_rx_ts;
 static uint32_t s_audio_last_decoded_ts, s_audio_submitted_samples;
-static uint32_t s_audio_backpressure_count, s_audio_backpressure_logged_ms;
+static uint32_t s_audio_backpressure_count;
+static bool s_play_error_logged;
 static ai_command_message_t s_command_pool[AI_COMMAND_QUEUE_DEPTH];
 static bool s_command_pool_used[AI_COMMAND_QUEUE_DEPTH];
 static volatile uint32_t s_callback_producers;
@@ -253,12 +257,21 @@ static bool s_start_submitted;
 static bool s_start_response_done;
 static int s_start_response_error;
 static bool s_server_speaking;
+#if DEMO_AI_AUDIO_AEC_ENABLE
+static uint32_t s_interrupt_request_id, s_playback_epoch, s_interrupted_rx_ms;
+static bool s_drop_interrupted_audio, s_interrupted_round_ended, s_reply_ended;
+static bool s_reply_announced;
+static bool s_key_interrupt_sent;
+#endif
 static bool s_remote_ended;
 static volatile uint32_t s_last_audio_ms;
 static uint32_t s_play_pending_samples;
 static uint32_t s_prebuffer_start_ms;
 #if DEMO_AI_AUDIO_AEC_ENABLE
 static bool s_play_prebuffering;
+static bool s_play_retry_waiting;
+static uint8_t s_play_submit_failures;
+static uint32_t s_play_retry_since_ms;
 static uint32_t s_prebuffer_starts, s_prebuffer_ready, s_prebuffer_timeouts;
 static uint32_t s_prebuffer_tail_flushes, s_prebuffer_wait_ms, s_prebuffer_max_ms;
 #endif
@@ -567,6 +580,14 @@ static int ai_audio_slot_acquire(tirtc_conn_t hconn)
     int slot = -1;
 
     liot_rtos_enter_critical();
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    if (hconn == (tirtc_conn_t)s_conn && s_drop_interrupted_audio)
+    {
+        s_interrupted_rx_ms = liot_rtos_get_running_time();
+        liot_rtos_exit_critical();
+        return -2; /* Intentional suppression, not a pool overflow. */
+    }
+#endif
     for (i = 0U; hconn == (tirtc_conn_t)s_conn &&
                   i < AI_AUDIO_QUEUE_DEPTH; i++)
     {
@@ -579,6 +600,9 @@ static int ai_audio_slot_acquire(tirtc_conn_t hconn)
                 s_audio_pool_peak = s_audio_pool_in_use;
             }
             ++s_callback_producers;
+#if DEMO_AI_AUDIO_AEC_ENABLE
+            s_audio_pool[i].playback_epoch = s_playback_epoch;
+#endif
             slot = (int)i;
             break;
         }
@@ -962,6 +986,12 @@ static void ai_on_audio(tirtc_conn_t hconn,
     ++s_audio_rx_received;
     s_audio_last_rx_ts = frame->ts;
     acquired = ai_audio_slot_acquire(hconn);
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    if (acquired == -2)
+    {
+        return;
+    }
+#endif
     if (acquired < 0)
     {
         ++s_audio_rx_pool_drop;
@@ -1827,6 +1857,30 @@ static bool ai_command_is_notification(const cJSON *root)
            cJSON_GetObjectItemCaseSensitive(root, "error") == NULL;
 }
 
+#if DEMO_AI_AUDIO_AEC_ENABLE
+static void ai_resume_downlink(bool next_round)
+{
+    liot_rtos_enter_critical();
+    if (s_drop_interrupted_audio)
+    {
+        uint32_t now = liot_rtos_get_running_time();
+
+        /* A delayed old start can arrive after K1, even after the mic has
+         * resumed sending silence. Only a reply boundary or idle gap is evidence. */
+        if ((next_round && (s_reply_announced || s_interrupted_round_ended)) ||
+            (int32_t)(now - s_interrupted_rx_ms) >= (int32_t)AI_SPEECH_IDLE_MS)
+        {
+            s_drop_interrupted_audio = false;
+        }
+        else if (next_round)
+        {
+            s_reply_announced = true;
+        }
+    }
+    liot_rtos_exit_critical();
+}
+#endif
+
 static void ai_handle_command(const ai_command_message_t *message)
 {
     cJSON *root;
@@ -1933,16 +1987,48 @@ static void ai_handle_command(const ai_command_message_t *message)
         }
         else if (strcmp(method_text, "round_start") == 0)
         {
+#if DEMO_AI_AUDIO_AEC_ENABLE
+            ai_resume_downlink(true);
+            if (!s_drop_interrupted_audio)
+            {
+                s_reply_ended = false;
+                s_reply_announced = true;
+#endif
             s_server_speaking = true;
             s_last_audio_ms = liot_rtos_get_running_time();
+#if DEMO_AI_AUDIO_AEC_ENABLE
+            }
+#endif
         }
         else if (strcmp(method_text, "round_end") == 0)
         {
             /* Playback completion/idle timeout remains the final authority. */
             s_server_speaking = false;
+#if DEMO_AI_AUDIO_AEC_ENABLE
+            s_last_audio_ms = liot_rtos_get_running_time();
+            s_reply_ended = true;
+            s_interrupted_round_ended = true;
+#endif
         }
         else if (strcmp(method_text, "interrupt") == 0)
         {
+#if DEMO_AI_AUDIO_AEC_ENABLE
+            if (s_drop_interrupted_audio)
+            {
+                /* A cloud reply to a local cut must not restart capture. */
+                s_interrupted_round_ended = true;
+                s_server_speaking = false;
+                cJSON_Delete(root);
+                return;
+            }
+            /* The platform closes a cut reply with round_end. An untagged
+             * legacy interrupt after our K1 cannot identify a new reply. */
+            if (s_key_interrupt_sent)
+            {
+                cJSON_Delete(root);
+                return;
+            }
+#endif
             /* Stop can block while the next reply arrives. Drop only the
              * old queued audio before that wait, retaining new reply packets. */
             ai_discard_audio_queue();
@@ -2117,7 +2203,17 @@ static int ai_play_downlink(void)
     bool start_prebuffer = sample_count == 0U && !s_remote_ended &&
         (!s_first_play_reported || demo_ai_audio_play_done(&s_audio_lease));
     if (!ai_request_is_active()) return 0;
+    /* RX wakes the AI task even when the playback ring has not drained.
+     * Limit retries of retained PCM without delaying fresh audio or keys. */
+    if (sample_count != 0U && s_play_retry_waiting &&
+        (uint32_t)(liot_rtos_get_running_time() - s_play_retry_since_ms) <
+            AI_PLAY_BUSY_RETRY_MS)
+        return 0;
+    s_play_retry_waiting = false;
+    if (sample_count == 0U) s_play_submit_failures = 0U;
     if (start_prebuffer || s_play_prebuffering) batch_samples = AI_PLAY_BATCH_SAMPLES;
+    /* Retry a failed hardware submit with exactly the same PCM. */
+    if (s_play_submit_failures != 0U) batch_samples = sample_count;
 #endif
     int decoded;
     int ret;
@@ -2143,6 +2239,13 @@ static int ai_play_downlink(void)
             continue;
         }
         message = &s_audio_pool[slot];
+#if DEMO_AI_AUDIO_AEC_ENABLE
+        if (message->playback_epoch != s_playback_epoch)
+        {
+            ai_audio_slot_release(slot);
+            continue;
+        }
+#endif
         if (message->media != TIRTC_AUDIO_OPUS ||
             message->flags != TIRTC_AUDIOSAMPLE_16K16B1C)
         {
@@ -2207,23 +2310,35 @@ static int ai_play_downlink(void)
     ret = demo_ai_audio_play(&s_audio_lease, s_play_pcm, sample_count);
     if (ret != 0)
     {
-        uint32_t now = liot_rtos_get_running_time();
         ++s_audio_backpressure_count;
-        /* Retries retain PCM; logging every 10/20 ms adds serial/scheduler
-         * load precisely when playback needs time to drain. */
-        if (s_audio_backpressure_count == 1U ||
-            (uint32_t)(now - s_audio_backpressure_logged_ms) >= 1000U)
+        /* The session summary counts retries; report the first other error. */
+        if (ret != DEMO_AI_AUDIO_ERR_PLAY_BUSY && !s_play_error_logged)
         {
-            s_audio_backpressure_logged_ms = now;
-            liot_trace("[AI] playback backpressure ret=%d samples=%u retries=%u\r\n",
-                       ret, (unsigned int)sample_count,
-                       (unsigned int)s_audio_backpressure_count);
+            s_play_error_logged = true;
+            liot_trace("[AI] playback submit failed ret=%d samples=%u\r\n",
+                       ret, (unsigned int)sample_count);
         }
+#if DEMO_AI_AUDIO_AEC_ENABLE
+        s_play_retry_waiting = true;
+        s_play_retry_since_ms = liot_rtos_get_running_time();
+        /* The active half-duplex loop cannot detect codec errors via capture
+         * while playback is pending. Terminal audio has its own stall guard. */
+        if (ret == DEMO_AI_AUDIO_ERR_PLAY_BUSY || s_remote_ended)
+            s_play_submit_failures = 0U;
+        else if (++s_play_submit_failures >= AI_PLAY_SUBMIT_FAILURE_LIMIT)
+            return AI_ERR_AUDIO_INIT;
+#endif
         return 0;
     }
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    s_play_submit_failures = 0U;
+#endif
     s_audio_submitted_samples += sample_count;
     s_play_pending_samples = 0U;
     s_last_audio_ms = liot_rtos_get_running_time();
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    if (!s_reply_ended)
+#endif
     s_server_speaking = true;
     ai_set_state(DEMO_AI_CHAT_SPEAKING, 0);
     if (!s_first_play_reported)
@@ -2236,6 +2351,23 @@ static int ai_play_downlink(void)
 }
 
 #if DEMO_AI_AUDIO_AEC_ENABLE
+static uint32_t ai_take_key_interrupt(void)
+{
+    uint32_t request;
+
+    liot_rtos_enter_critical();
+    request = s_interrupt_request_id;
+    s_interrupt_request_id = 0U;
+    if (!s_want_active || request != s_control_sequence ||
+        request != s_running_request_id || s_state != DEMO_AI_CHAT_SPEAKING ||
+        s_drop_interrupted_audio)
+    {
+        request = 0U;
+    }
+    liot_rtos_exit_critical();
+    return request;
+}
+
 /* The session is terminal: only an explicit interruption can override its
  * remaining audio. Do not dispatch new device actions or rounds here. */
 static bool ai_remote_tail_interrupted(void)
@@ -2265,7 +2397,8 @@ static bool ai_remote_tail_interrupted(void)
             s_command_diag.handled++;
             root = ai_command_json_parse(message);
             method = cJSON_GetObjectItemCaseSensitive(root, "method");
-            interrupted = root != NULL && ai_command_is_notification(root) &&
+            interrupted = !s_key_interrupt_sent && root != NULL &&
+                ai_command_is_notification(root) &&
                 cJSON_IsString(method) &&
                 method->valuestring != NULL &&
                 strcmp(method->valuestring, "interrupt") == 0;
@@ -2402,6 +2535,61 @@ static int ai_resolve_uplink_result(int result)
     return ai_normalize_session_result(result);
 }
 
+#if DEMO_AI_AUDIO_AEC_ENABLE
+static bool ai_uplink_blocked(void)
+{
+    uint32_t queued = 0U;
+
+    if (s_server_speaking || s_play_pending_samples != 0U ||
+        !demo_ai_audio_play_done(&s_audio_lease))
+        return true;
+    (void)liot_rtos_queue_get_cnt(s_audio_queue, &queued);
+    return queued != 0U;
+}
+
+static void ai_process_key_interrupt(void)
+{
+    static const char interrupt_json[] =
+        "{\"jsonrpc\":\"2.0\",\"method\":\"interrupt\"}";
+    uint32_t request = ai_take_key_interrupt();
+    bool notify_cloud = !s_reply_ended;
+    int play_ret, signal_ret = 0;
+
+    if (request == 0U)
+        return;
+    liot_rtos_enter_critical();
+    if (!s_want_active || request != s_control_sequence)
+    {
+        liot_rtos_exit_critical();
+        return;
+    }
+    s_drop_interrupted_audio = true;
+    s_interrupted_round_ended = s_reply_ended;
+    s_interrupted_rx_ms = liot_rtos_get_running_time();
+    ++s_playback_epoch;
+    liot_rtos_exit_critical();
+
+    ai_discard_audio_queue();
+    s_play_pending_samples = 0U;
+    s_prebuffer_start_ms = 0U;
+    s_play_prebuffering = false;
+    s_capture_timeout_active = false;
+    s_server_speaking = false;
+    play_ret = demo_ai_audio_discard_playback(&s_audio_lease);
+    notify_cloud = notify_cloud && ai_request_is_active();
+    if (notify_cloud)
+    {
+        signal_ret = demo_tirtc_send_command(DEMO_TIRTC_OWNER_AI,
+            s_tirtc_session_generation, AI_CMD_WORD, interrupt_json,
+            sizeof(interrupt_json) - 1U);
+        if (signal_ret > 0)
+            s_key_interrupt_sent = true;
+    }
+    liot_trace("[AI] KEY1 interrupt request=%u local=%d notify=%u signal=%d\r\n",
+               (unsigned int)request, play_ret, notify_cloud ? 1U : 0U, signal_ret);
+}
+#endif
+
 static int ai_send_uplink_20ms(void)
 {
     TIRTCFRAMEINFO frame;
@@ -2419,6 +2607,15 @@ static int ai_send_uplink_20ms(void)
     {
         s_capture_timeout_active = false;
         s_capture_timeout_request_id = s_running_request_id;
+    }
+    if (ai_uplink_blocked())
+    {
+        /* Capture is paused here and cannot report a latched playback fault. */
+        if (!demo_ai_audio_is_ready(&s_audio_lease))
+            return AI_ERR_AUDIO_INIT;
+        s_capture_timeout_active = false;
+        (void)liot_rtos_semaphore_wait(s_event_sem, AI_ACTIVE_POLL_MS);
+        return 0;
     }
 #else
     /* Half duplex on this board: never start an I2S capture transaction while
@@ -2484,6 +2681,10 @@ static int ai_send_uplink_20ms(void)
         liot_trace("[AI] capture failed ret=%d\r\n", ret);
         return ret;
     }
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    if (ai_uplink_blocked())
+        return 0;
+#endif
     encoded = demo_ai_opus_encode_20ms(s_capture_pcm, s_uplink_opus,
                                        sizeof(s_uplink_opus));
     if (encoded <= 0)
@@ -2508,6 +2709,8 @@ static int ai_send_uplink_20ms(void)
         memset(s_uplink_opus, 0, sizeof(s_uplink_opus));
         return AI_ERR_CANCELLED;
     }
+    if (ai_uplink_blocked())
+        return 0;
 #endif
     ret = demo_tirtc_send_audio(DEMO_TIRTC_OWNER_AI,
                                 s_tirtc_session_generation,
@@ -2558,6 +2761,10 @@ static int ai_active_loop(void)
                        s_conn_error, s_disconnected_pending ? 1 : 0);
             return ai_connection_end_result();
         }
+#if DEMO_AI_AUDIO_AEC_ENABLE
+        ai_process_key_interrupt();
+        ai_resume_downlink(false);
+#endif
         ai_poll_call_lookup();
         if (s_levels_dirty)
         {
@@ -2573,7 +2780,8 @@ static int ai_active_loop(void)
         now = liot_rtos_get_running_time();
         if (s_play_pending_samples > 0U)
         {
-            (void)ai_play_downlink();
+            ret = ai_play_downlink();
+            if (ret < 0) return ret;
 #if DEMO_AI_AUDIO_AEC_ENABLE
             goto uplink_tick;
 #else
@@ -2610,7 +2818,8 @@ static int ai_active_loop(void)
             }
             s_prebuffer_start_ms = 0U;
 #endif
-            (void)ai_play_downlink();
+            ret = ai_play_downlink();
+            if (ret < 0) return ret;
 #if DEMO_AI_AUDIO_AEC_ENABLE
             goto uplink_tick;
 #else
@@ -2627,6 +2836,9 @@ static int ai_active_loop(void)
                 (int32_t)AI_SPEECH_IDLE_MS)
             {
                 s_server_speaking = false;
+#if DEMO_AI_AUDIO_AEC_ENABLE
+                s_reply_announced = false;
+#endif
                 ai_set_state(DEMO_AI_CHAT_LISTENING, 0);
             }
 #if !DEMO_AI_AUDIO_AEC_ENABLE
@@ -2641,17 +2853,20 @@ static int ai_active_loop(void)
 #if DEMO_AI_AUDIO_AEC_ENABLE
         else
         {
-            /* round_end can arrive before the driver's last PCM drains.
-             * Once both are idle, restore LISTENING without cutting tail audio. */
+            /* Control may arrive before the last media packet. Listen now,
+             * but keep late tail PCM from rearming the 800 ms speech hold. */
+            if (s_reply_ended && (int32_t)(now - s_last_audio_ms) >=
+                                 (int32_t)AI_SPEECH_IDLE_MS)
+                s_reply_ended = false;
+            if (!s_drop_interrupted_audio)
+                s_reply_announced = false;
             ai_set_state(DEMO_AI_CHAT_LISTENING, 0);
         }
 #endif
 
 #if DEMO_AI_AUDIO_AEC_ENABLE
 uplink_tick:
-        /* All playback/prebuffer/backpressure paths get one uplink turn.
-         * Fresh-frame capture supplies the pacing; the network high-water
-         * branch sleeps instead.  Do not add another polling delay here. */
+        /* Each path checks the same half-duplex gate before sending mic PCM. */
 #endif
         ret = ai_send_uplink_20ms();
         if (ret < 0)
@@ -2878,6 +3093,14 @@ static int ai_run_session(void)
         return AI_ERR_CANCELLED;
     }
     liot_rtos_enter_critical();
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    s_interrupt_request_id = 0U;
+    s_drop_interrupted_audio = false;
+    s_interrupted_round_ended = false;
+    s_reply_ended = false;
+    s_reply_announced = false;
+    s_key_interrupt_sent = false;
+#endif
     s_generation++;
     if (s_generation == 0U)
     {
@@ -2891,7 +3114,8 @@ static int ai_run_session(void)
     s_audio_rx_format_drop = s_audio_rx_decode_drop = 0U;
     s_audio_last_rx_ts = s_audio_last_decoded_ts = 0U;
     s_audio_submitted_samples = 0U;
-    s_audio_backpressure_count = s_audio_backpressure_logged_ms = 0U;
+    s_audio_backpressure_count = 0U;
+    s_play_error_logged = false;
     s_tx_dropped = 0U;
     s_rx_frames = 0U;
     s_tx_frames = 0U;
@@ -3155,6 +3379,27 @@ void demo_ai_chat_stop(void)
     ai_signal();
 }
 
+void demo_ai_chat_interrupt(uint32_t request_id)
+{
+#if DEMO_AI_AUDIO_AEC_ENABLE
+    bool posted = false;
+
+    liot_rtos_enter_critical();
+    if (request_id != 0U && s_want_active && request_id == s_control_sequence &&
+        request_id == s_running_request_id && s_state == DEMO_AI_CHAT_SPEAKING &&
+        !s_drop_interrupted_audio && s_interrupt_request_id == 0U)
+    {
+        s_interrupt_request_id = request_id;
+        posted = true;
+    }
+    liot_rtos_exit_critical();
+    if (posted)
+        ai_signal();
+#else
+    (void)request_id;
+#endif
+}
+
 bool demo_ai_chat_take_call_request(uint32_t request_id,
                                     demo_ai_call_request_t *out)
 {
@@ -3271,7 +3516,7 @@ void demo_ai_chat_task(void *argv)
     demo_tirtc_set_listener(&s_tirtc_listener);
     liot_trace("[AI] manager ready: shared device TiRTC runtime; "
 #if DEMO_AI_AUDIO_AEC_ENABLE
-               "PCM S16LE/16k/mono -> Opus 20ms/24kbps (AEC full duplex) "
+               "PCM S16LE/16k/mono -> Opus 20ms/24kbps (AEC, half duplex) "
 #else
                "PCM S16LE/16k/mono -> Opus 20ms/24kbps (half duplex) "
 #endif

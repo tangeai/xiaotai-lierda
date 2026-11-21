@@ -57,10 +57,13 @@ static uint32_t s_capture_timeout_started_ms,s_capture_timeout_request_id;
 static int s_audio_lease,s_speaker_level,s_mic_level,s_audio_queue,s_event_sem;
 static int16_t s_capture_pcm[320];
 static unsigned char s_uplink_opus[512];
-static bool active,done,cancel_capture,cancel_encode,stop_on_play,tail_round;
+static bool active,done,audio_ready,cancel_capture,cancel_encode,stop_on_play,tail_round;
+static bool s_reply_ended,s_reply_announced,s_drop_interrupted_audio;
+static bool audio_on_capture,audio_on_encode,drain_while_playing,late_tail_after_end;
 static unsigned captures,sends,encodes,sleeps,waits,plays,clock_ms,queued,target_sends;
+static unsigned first_capture_at;
 static unsigned capture_cost_ms,capture_timeouts_left;
-static int capture_error,state;
+static int capture_error,play_error,state;
 static int s_conn_error,close_stage,close_error,sdk_error;
 static bool close_disconnected;
 static unsigned close_delay_ms,close_publish_at;
@@ -74,7 +77,11 @@ static void inject_close(int stage){
     if(close_disconnected)s_disconnected_pending=true;
 }
 static bool ai_request_is_active(void){return active;}
-static bool demo_ai_audio_play_done(void *lease){(void)lease;return tail_round ? captures>=2 : done;}
+static bool demo_ai_audio_is_ready(void *lease){assert(lease==&s_audio_lease);return audio_ready;}
+static bool demo_ai_audio_play_done(void *lease){
+    (void)lease;
+    return tail_round || (late_tail_after_end && plays) ? clock_ms>=1060U : done;
+}
 static void liot_rtos_task_sleep_ms(unsigned ms){
     assert(ms==20 || ms==1);sleeps++;clock_ms+=ms;
     if(ms==20)s_remote_ended=true;
@@ -89,10 +96,13 @@ static int demo_tirtc_get_send_buffer_used(int o,unsigned g,size_t *b){
     return close_stage==CLOSE_BUFFER ? sdk_error : 0;
 }
 static int demo_ai_audio_record_20ms(void *l,int16_t *pcm){
-    unsigned i;int result=capture_error;(void)l;captures++;clock_ms+=capture_cost_ms;
+    unsigned i;int result=capture_error;(void)l;
+    if(captures++==0)first_capture_at=clock_ms;
+    clock_ms+=capture_cost_ms;
     if(capture_timeouts_left){capture_timeouts_left--;result=DEMO_AI_AUDIO_ERR_CAPTURE_TIMEOUT;}
     if(result==0)for(i=0;i<320;i++)pcm[i]=123;
     if(cancel_capture)active=false;
+    if(audio_on_capture)queued=1;
     inject_close(CLOSE_CAPTURE);
     return result;
 }
@@ -100,6 +110,7 @@ static int demo_ai_opus_encode_20ms(const int16_t *p,unsigned char *o,size_t n){
     unsigned i;assert(n>=3);for(i=0;i<320;i++)assert(p[i]==123);
     memset(o,0x71,n);encodes++;
     if(cancel_encode)active=false;
+    if(audio_on_encode)queued=1;
     inject_close(CLOSE_ENCODE);
     return 3;
 }
@@ -108,34 +119,50 @@ static int demo_tirtc_send_audio(int o,unsigned g,const TIRTCFRAMEINFO *f,void *
     (void)o;(void)g;(void)p;
     assert(f->stream_id==AI_STREAM_ID && f->media==TIRTC_AUDIO_OPUS && f->flags==TIRTC_AUDIOSAMPLE_16K16B1C && f->length==3);
     sends++;inject_close(CLOSE_SEND);
+    if(late_tail_after_end && sends==1U)queued=1U;
     if(close_stage>=CLOSE_CAPTURE)return sdk_error;
     if(sends>=target_sends)s_remote_ended=true;return 0;
 }
 static void ai_set_state(int s,int e){state=s;(void)e;}
 static void ai_refresh_call_contacts(void){}
 static void ai_process_commands(void){
-    /* Model a normal round_end arriving while the last driver block still
-     * plays; the next capture advances beyond the tail completion time. */
-    if(tail_round && captures==1)s_server_speaking=false;
+    /* round_end is handled 10 ms after playback starts; driver tail finishes
+     * at 1060 ms. Capture cannot be used to advance time while muted. */
+    if(tail_round && clock_ms>=1010U){s_server_speaking=false;s_reply_ended=true;}
 }
+static void ai_process_key_interrupt(void){}
+static void ai_resume_downlink(bool next_round){(void)next_round;}
 static void ai_disconnect_deferred(void){}
 static void ai_poll_call_lookup(void){}
 static int demo_ai_audio_set_levels(void *l,int s,int m){(void)l;(void)s;(void)m;return 0;}
-static int liot_rtos_queue_get_cnt(int q,uint32_t *n){(void)q;*n=tail_round ? (captures==0 ? 3 : 0) : queued;return 0;}
+static int liot_rtos_queue_get_cnt(int q,uint32_t *n){(void)q;*n=queued;return 0;}
 static int ai_play_downlink(void){
-    plays++;s_server_speaking=true;ai_set_state(DEMO_AI_CHAT_SPEAKING,0);
+    plays++;
+    if(play_error)return play_error;
+    if(!s_reply_ended)s_server_speaking=true;
+    ai_set_state(DEMO_AI_CHAT_SPEAKING,0);
+    s_last_audio_ms=clock_ms;
+    if(drain_while_playing && queued>0)queued--;
     if(stop_on_play)s_remote_ended=true;
     return 0;
 }
-static int liot_rtos_semaphore_wait(int s,unsigned ms){(void)s;(void)ms;waits++;s_remote_ended=true;return 0;}
+static int liot_rtos_semaphore_wait(int s,unsigned ms){
+    (void)s;assert(ms==AI_ACTIVE_POLL_MS);waits++;clock_ms+=ms;
+    if(!tail_round && !drain_while_playing)s_remote_ended=true;
+    assert(waits<500);
+    return 0;
+}
 '''
 
 SUFFIX = r'''
 static void reset(void){
     s_server_speaking=s_remote_ended=s_conn_error_pending=s_disconnected_pending=s_levels_dirty=false;
     s_tx_dropped=s_tx_frames=s_play_pending_samples=s_prebuffer_start_ms=s_last_audio_ms=0;
-    active=done=true;cancel_capture=cancel_encode=tail_round=false;stop_on_play=true;
-    captures=sends=encodes=sleeps=waits=plays=queued=0;clock_ms=1000;target_sends=1;capture_error=0;buffered=0;state=0;
+    active=done=audio_ready=true;cancel_capture=cancel_encode=tail_round=false;stop_on_play=true;
+    s_reply_ended=s_reply_announced=s_drop_interrupted_audio=false;
+    audio_on_capture=audio_on_encode=drain_while_playing=late_tail_after_end=false;
+    first_capture_at=0;
+    captures=sends=encodes=sleeps=waits=plays=queued=0;clock_ms=1000;target_sends=1;capture_error=play_error=0;buffered=0;state=0;
     capture_cost_ms=20U;capture_timeouts_left=0U;s_running_request_id=1U;
 #if DEMO_AI_AUDIO_AEC_ENABLE
     s_capture_timeout_active=false;s_capture_timeout_started_ms=s_capture_timeout_request_id=0U;
@@ -147,14 +174,14 @@ static void reset(void){
 static void test_capture_timeout_budget(void){
 #if DEMO_AI_AUDIO_AEC_ENABLE
     unsigned i,start;
-    /* Playback keeps running through missing capture frames; no failed
-     * capture is encoded or submitted, and a successful frame recovers. */
-    reset();queued=3;stop_on_play=false;capture_timeouts_left=3;capture_cost_ms=120;
+    /* While listening no failed capture is encoded or submitted, and a
+     * successful frame recovers without interrupting the session. */
+    reset();capture_timeouts_left=3;capture_cost_ms=120;
     assert(ai_active_loop()==0);
-    assert(captures==4 && plays==4 && sends==1 && encodes==1 && !s_capture_timeout_active);
-    reset();queued=3;stop_on_play=false;capture_error=DEMO_AI_AUDIO_ERR_CAPTURE_TIMEOUT;capture_cost_ms=120;
+    assert(captures==4 && plays==0 && sends==1 && encodes==1 && !s_capture_timeout_active);
+    reset();capture_error=DEMO_AI_AUDIO_ERR_CAPTURE_TIMEOUT;capture_cost_ms=120;
     assert(ai_active_loop()==DEMO_AI_AUDIO_ERR_CAPTURE_TIMEOUT);
-    assert(captures==18 && plays==18 && sends==0 && encodes==0 && clock_ms==3160);
+    assert(captures==18 && plays==0 && sends==0 && encodes==0 && clock_ms==3160);
     /* A zero-valued start and a 32-bit wrap both retain the exact 2 s bound. */
     for(i=0;i<2;i++){
         reset();capture_error=DEMO_AI_AUDIO_ERR_CAPTURE_TIMEOUT;capture_cost_ms=0;
@@ -192,7 +219,7 @@ static void test_capture_timeout_budget(void){
     buffered=0;clock_ms+=5000U;assert(ai_send_uplink_20ms()==0);
     reset();capture_error=DEMO_AI_AUDIO_ERR_CAPTURE_TIMEOUT;
     assert(ai_send_uplink_20ms()==0);clock_ms+=5000U;s_levels_dirty=true;
-    queued=3;stop_on_play=false;capture_error=0;capture_timeouts_left=1;
+    capture_error=0;capture_timeouts_left=1;
     assert(ai_active_loop()==0 && captures==3 && sends==1 && encodes==1);
     assert(!s_capture_timeout_active && !s_levels_dirty);
 #else
@@ -257,12 +284,8 @@ int main(void){
         if(scenario==4){s_server_speaking=true;s_last_audio_ms=1000;}
         if(scenario==5){s_server_speaking=true;s_last_audio_ms=100;}
         r=ai_active_loop();assert(r==0);
-#if DEMO_AI_AUDIO_AEC_ENABLE
-        assert(captures==1 && sends==1 && encodes==1 && waits==0 && sleeps==0);
-#else
         if(scenario==0 || scenario==5)assert(captures==1 && sends==1);
         else assert(captures==0 && sends==0);
-#endif
     }
     reset();buffered=AI_SEND_HIGH_WATER_BYTES+1;assert(ai_active_loop()==0);
     assert(captures==0 && sends==0 && sleeps==1 && clock_ms==1020);
@@ -276,18 +299,49 @@ int main(void){
     reset();cancel_capture=true;assert(ai_active_loop()==AI_ERR_CANCELLED);
     assert(captures==1 && sends==0 && encodes==0);
     for(i=0;i<320;i++)assert(s_capture_pcm[i]==0);
-    reset();queued=3;target_sends=50;stop_on_play=false;assert(ai_active_loop()==0);
-    assert(sends==50 && captures==50 && plays==50 && clock_ms==2000 && waits==0 && sleeps==0);
-    reset();tail_round=true;stop_on_play=false;target_sends=4;assert(ai_active_loop()==0);
-    assert(sends==4 && plays==1 && !s_server_speaking && demo_ai_audio_play_done(0));
+    /* If the playback worker latched a fault with PCM pending, the muted mic
+     * cannot discover it through record_20ms. Let the session clean up. */
+    reset();audio_ready=false;s_play_pending_samples=320U;stop_on_play=false;
+    assert(ai_active_loop()==AI_ERR_AUDIO_INIT);
+    assert(plays==1U && captures==0U && sends==0U && waits==0U);
+    /* Fatal submit failures propagate from either the pending-block branch
+     * or the dequeued-media branch, without bypassing the mute. */
+    for(unsigned pending=0;pending<2;pending++){
+        reset();stop_on_play=false;play_error=AI_ERR_AUDIO_INIT;
+        if(pending)s_play_pending_samples=320U;else queued=1U;
+        assert(ai_active_loop()==AI_ERR_AUDIO_INIT);
+        assert(plays==1 && captures==0 && sends==0 && waits==0);
+    }
+    /* New playback can arrive after capture or while encode yields. Neither
+     * race may publish the now-stale microphone audio. */
+    reset();audio_on_capture=true;assert(ai_send_uplink_20ms()==0);
+    assert(captures==1 && encodes==0 && sends==0 && queued==1);
+    reset();audio_on_encode=true;assert(ai_send_uplink_20ms()==0);
+    assert(captures==1 && encodes==1 && sends==0 && queued==1);
+    /* A long queued reply should keep draining; missing round_end still
+     * releases mic after the actual final playback + idle fallback. */
+    reset();queued=50;drain_while_playing=true;stop_on_play=false;assert(ai_active_loop()==0);
+    assert(sends==1 && captures==1 && plays==50 && queued==0 && waits>50 && sleeps==0);
+    assert(first_capture_at==s_last_audio_ms+AI_SPEECH_IDLE_MS);
+    reset();queued=1;tail_round=true;drain_while_playing=true;stop_on_play=false;
+    assert(ai_active_loop()==0);
+    assert(sends==1 && plays==1 && captures==1 && !s_server_speaking && demo_ai_audio_play_done(0));
+    assert(first_capture_at==1060U);
     assert(state==DEMO_AI_CHAT_LISTENING);
+    /* round_end arrives with empty media queues. Listen immediately, then gate
+     * a single late media block only until its actual playback completes. */
+    reset();s_reply_ended=true;s_last_audio_ms=clock_ms;target_sends=2;
+    late_tail_after_end=drain_while_playing=true;stop_on_play=false;
+    assert(ai_active_loop()==0);
+    assert(plays==1 && captures==2 && sends==2 && first_capture_at==1000U);
+    assert(clock_ms==1060U+capture_cost_ms && state==DEMO_AI_CHAT_LISTENING);
 #else
     /* Retain the exact legacy behavior when the AEC branch is disabled. */
     assert(ai_active_loop()==0);assert(captures==1 && sends==1 && encodes==1);(void)i;
 #endif
     test_connection_close_races();
     test_capture_timeout_budget();
-    printf("PASS AI AEC=%d: playback/prebuffer/backpressure fairness, high-water, capture failure, conditional cancellation/tail completion\n",DEMO_AI_AUDIO_AEC_ENABLE);
+    printf("PASS AI AEC=%d: half duplex, capture/encode exclusion, normal tail and lost round_end, high-water and capture failure\n",DEMO_AI_AUDIO_AEC_ENABLE);
     printf("PASS AI AEC=%d: 24 immediate + 24 delayed close races, 2 loop-entry cases, 20ms deadline; unknown handle and genuine errors preserved\n",DEMO_AI_AUDIO_AEC_ENABLE);
     printf("PASS AI AEC=%d: transient capture recovery, bounded persistent failure, clock wrap, cancel/pause/level/new-session resets, no stale PCM; legacy errors preserved\n",DEMO_AI_AUDIO_AEC_ENABLE);
     return 0;
@@ -307,11 +361,13 @@ def main():
     header = (app / "include/audio_device.h").read_text(encoding="utf-8")
     constants = "\n".join(re.search(r"^#define\s+" + name + r"\s+[^\r\n]+", text, re.M).group()
                           for name, text in (("AI_CAPTURE_TIMEOUT_RETRY_MS", current_source),
+                                             ("AI_ERR_AUDIO_INIT", current_source),
                                              ("DEMO_AI_AUDIO_ERR_CAPTURE_TIMEOUT", header)))
     body = (constants + "\n" + PREFIX + function(source, "ai_deadline_pending") +
             function(source, "ai_normalize_session_result") +
             function(source, "ai_connection_end_result") +
             function(source, "ai_resolve_uplink_result") +
+            "#if DEMO_AI_AUDIO_AEC_ENABLE\n" + function(source, "ai_uplink_blocked") + "#endif\n" +
             function(source, "ai_send_uplink_20ms") + function(source, "ai_active_loop") + SUFFIX)
     with tempfile.TemporaryDirectory(prefix="lite-ai-aec-loop-") as temp:
         for enabled in (0, 1):
