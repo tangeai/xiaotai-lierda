@@ -1,8 +1,17 @@
 CUSTOM_DIR := examples/$(PROJECT)
 
-# Product integration is kept in the two product directories. With no
+# Product integration is kept in the individual product directories. With no
 # APP_VARIANT, the rest of this file remains the upstream OpenKit build.
 ifneq ($(strip $(APP_VARIANT)),)
+ifeq ($(BOARD_PROFILE),nt26f9d0_prodisplay)
+ifneq ($(APP_VARIANT):$(MODEM):$(MODEMPKG),pro:NT26F9D0:F9D_D)
+$(error EC718HM Pro requires APP_VARIANT=pro MODEM=NT26F9D0 MODEMPKG=F9D_D)
+endif
+TIRTC_DIR := $(CUSTOM_DIR)/TiRTC-EC718HM-Pro
+CFLAGS_INC += -I $(TOP)/$(CUSTOM_DIR)/inc
+include $(TOP)/$(TIRTC_DIR)/config
+include $(TOP)/$(TIRTC_DIR)/tirtc_app.mk
+else
 ifeq ($(filter $(APP_VARIANT),lite pro),)
 $(error Unsupported APP_VARIANT "$(APP_VARIANT)"; use lite or pro)
 endif
@@ -11,14 +20,15 @@ $(error TiRTC products require MODEMPKG=F6D_D)
 endif
 CFLAGS_INC += -I $(TOP)/$(CUSTOM_DIR)/inc
 ifeq ($(APP_VARIANT),pro)
-TIRTC_DIR := $(CUSTOM_DIR)/tirtc_pro
+TIRTC_DIR := $(CUSTOM_DIR)/TiRTC-EC718PM-Pro
 IOINI := $(TOP)/$(CUSTOM_DIR)/iodriver.ini
 include $(TOP)/$(TIRTC_DIR)/config
 include $(TOP)/$(TIRTC_DIR)/tirtc_app.mk
 else
-include $(TOP)/$(CUSTOM_DIR)/tirtc_lite/config/tirtc_config.mk
-include $(TOP)/$(CUSTOM_DIR)/tirtc_lite/tirtc_app.mk
+include $(TOP)/$(CUSTOM_DIR)/TiRTC-EC718PM-Lite/config/tirtc_config.mk
+include $(TOP)/$(CUSTOM_DIR)/TiRTC-EC718PM-Lite/tirtc_app.mk
 endif
+endif # BOARD_PROFILE
 else
 
 IOINI  := $(TOP)/$(CUSTOM_DIR)/iodriver.ini

@@ -1,0 +1,63 @@
+{
+  "text": "我在",
+  "purpose": "Local entry acknowledgement; not the cloud AI voice",
+  "format": {
+    "sample_rate": 16000,
+    "channels": 1,
+    "sample_bits": 16,
+    "encoding": "signed little-endian PCM",
+    "frame_samples": 320
+  },
+  "source": "Synthesized locally with installed Microsoft Windows SAPI voices; no speech-engine binaries are redistributed",
+  "processing": {
+    "silence_threshold_abs": 16,
+    "retained_leading_ms": 40,
+    "retained_trailing_ms": 100,
+    "padding": "zero to a complete 20ms frame",
+    "amplitude_scaling": "none"
+  },
+  "generators": {
+    "generate_local_ack.py": "0627b6babc1d75ad409911a32a8b8a4ecd1a30f7fab025333f780bf1efd7982f",
+    "synthesize_local_ack.ps1": "efa7c3c488ef83fca940cedc60a24b20c3880f736770e7527ffa0b8c352e699b"
+  },
+  "voices": [
+    {
+      "gender": "Female",
+      "volume": 100,
+      "key": "female",
+      "engine_id": "TTS_MS_ZH-CN_HUIHUI_11.0",
+      "rate": 0,
+      "name": "Microsoft Huihui Desktop",
+      "culture": "zh-CN",
+      "samples": 9920,
+      "pcm_bytes": 19840,
+      "duration_ms": 620,
+      "sha256": "0220a7ec14a6ac8153b632539624f9e23e812cd280f9436b9b4cd493f2a2b4b6",
+      "source_wav_sha256": "ceb31bf03f9bccc969a4944af9d15baab309ba3cd4c0fc9a27af2756ebbb2468",
+      "original_samples": 20960,
+      "retained_range": [
+        1050,
+        10747
+      ]
+    },
+    {
+      "gender": "Male",
+      "volume": 100,
+      "key": "male",
+      "engine_id": "MSTTS_V110_zhCN_KangkangM",
+      "rate": 0,
+      "name": "Microsoft Kangkang",
+      "culture": "zh-CN",
+      "samples": 12480,
+      "pcm_bytes": 24960,
+      "duration_ms": 780,
+      "sha256": "f90ad7379c28230f772d59e2685dd5ab76a099a6856da5a2220cd9962f7fa3c5",
+      "source_wav_sha256": "d33935ef0cfa237c8c648dc476dc843da7ef0bb0888b7d18d4738dac661fc42c",
+      "original_samples": 20310,
+      "retained_range": [
+        858,
+        13057
+      ]
+    }
+  ]
+}

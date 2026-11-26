@@ -1,0 +1,17 @@
+# Generated files; rebuild with this product's build.bat.
+__pycache__/
+*.py[cod]
+/firmware/
+/sdk/include/tirtc/
+/sdk/lib/libTiRTC.a
+
+# Local build and test output. Published packages live in ../firmware/hm-pro/.
+*.log
+*.tmp
+*.bak
+*.o
+*.elf
+*.map
+*.exe
+*.pdb
+*.binpkg

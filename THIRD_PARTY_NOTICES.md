@@ -1,11 +1,12 @@
 # 许可与第三方说明
 
-本仓库是基于利尔达 OpenKit SDK 的 TiRTC 双产品示例。探鸽自有的应用代码、构建适配和文档采用各产品目录中的 **MIT** 许可；根目录 [LICENSE](LICENSE) 保留利尔达 SDK 的 **Apache-2.0** 原文。应用 MIT 不改变原厂 SDK、派生代码、第三方组件、字体或预编译库的授权。
+本仓库是基于利尔达 OpenKit SDK 的 TiRTC 产品示例。探鸽自有的应用代码、构建适配和文档采用各产品目录中的 **MIT** 许可。根目录 [LICENSE](LICENSE) 保留利尔达 SDK 的 **Apache-2.0** 原文。第三方依赖和原厂派生代码适用各自的许可。
 
 ## 应用许可
 
-- [lite 应用](examples/NT26FxDx_OpenKit/tirtc_lite/LICENSE)：探鸽独立实现及探鸽公开 MIT 参考代码的本地修改统一采用 MIT；利尔达派生文件除外。
-- [pro 应用](examples/NT26FxDx_OpenKit/tirtc_pro/LICENSE)：探鸽自有的触屏、AI、通话、实时查看及媒体业务采用 MIT；下表中的依赖和派生文件除外。
+- [lite 应用](examples/NT26FxDx_OpenKit/TiRTC-EC718PM-Lite/LICENSE)：探鸽独立实现及探鸽公开 MIT 参考代码的本地修改统一采用 MIT；利尔达派生文件除外。
+- [pro 应用](examples/NT26FxDx_OpenKit/TiRTC-EC718PM-Pro/LICENSE)：探鸽自有的触屏、AI、通话、实时查看及媒体业务采用 MIT；下表中的依赖和派生文件除外。
+- [HM Pro 应用](examples/NT26FxDx_OpenKit/TiRTC-EC718HM-Pro/LICENSE)：探鸽自有代码采用 MIT。 [HM Pro 依赖与许可](examples/NT26FxDx_OpenKit/TiRTC-EC718HM-Pro/THIRD_PARTY_NOTICES.md)
 - 文件中的第三方版权、来源和单独许可证优先适用；不得删除这些通知，也不得将“可随工程分发”解释为所有代码和二进制都受 MIT 许可。
 
 ## 保留的上游许可
@@ -13,12 +14,12 @@
 | 范围 | 许可与阅读入口 |
 | --- | --- |
 | 外部利尔达 SDK、原厂 Demo 与工具链（由准备命令从官方仓库下载） | 利尔达原有开源代码继续适用 Apache-2.0；其中第三方库、工具及供应二进制按自身条款。根目录 [利尔达 Apache-2.0 许可](LICENSE) 保留原文，包括原版权归属。当前官方 SDK 1.7.0 的 [英文说明](https://github.com/lierda-iot/CAT1.bis_OpenCPU/blob/59f1250c4b8caad4bbf4f74167b7b39c79097f8c/README.md) / [中文说明](https://github.com/lierda-iot/CAT1.bis_OpenCPU/blob/59f1250c4b8caad4bbf4f74167b7b39c79097f8c/README_ZH.md) 由官方仓库提供，本仓库不重复保存。 |
-| lite 的利尔达派生文件 | `src/app/app_entry.c`、`src/ui/key_input.c`、`include/key_input.h`、`src/ui/ssd1306_display.c`、`include/ssd1306_display.h`、`board/iodriver.ini` 保持 Apache-2.0，见 [来源记录](examples/NT26FxDx_OpenKit/tirtc_lite/SOURCE_PROVENANCE.md)。 |
-| pro 板级依赖及原厂显示适配 | `board_compat/` 中的原厂文件保留各自许可；`port/tirtc_port.c` 源自利尔达 Demo，继续适用 Apache-2.0。见 [板级依赖](examples/NT26FxDx_OpenKit/tirtc_pro/board_compat/README.md)。 |
-| 两套 TiRTC SDK 头文件和 `.a` 库 | 仍按独立 TiRTC SDK 协议使用和分发，不属于应用 MIT 范围。见 [lite SDK](examples/NT26FxDx_OpenKit/tirtc_lite/sdk/README.md) / [pro SDK](examples/NT26FxDx_OpenKit/tirtc_pro/sdk/README.md)。 |
-| lite 的 cJSON、Opus、Mbed TLS 等依赖 | 保留 MIT、BSD、Apache 等各自条款，见 [lite 第三方清单](examples/NT26FxDx_OpenKit/tirtc_lite/THIRD_PARTY_NOTICES.md)。 |
-| pro littlefs、UI 参考代码及公共 SDK 内的 LVGL、二维码等组件 | 保留各自版权和许可证。见 [littlefs BSD-3-Clause](examples/NT26FxDx_OpenKit/tirtc_pro/storage/littlefs/LICENSE.md)、[UI 上游 MIT](examples/NT26FxDx_OpenKit/tirtc_pro/ui/LICENSE)；公共组件以组件目录和文件头为准。 |
-| 字体及由其生成的字库 | 软件 MIT 许可不替代字体许可；原字体和生成资源保留来源及授权边界，见 [字体来源说明](examples/NT26FxDx_OpenKit/tirtc_pro/ui/tools/font-sources/SOURCE.md)。 |
+| lite 的利尔达派生文件 | `src/app/app_entry.c`、`src/ui/key_input.c`、`include/key_input.h`、`src/ui/ssd1306_display.c`、`include/ssd1306_display.h`、`board/iodriver.ini` 保持 Apache-2.0，见 [来源记录](examples/NT26FxDx_OpenKit/TiRTC-EC718PM-Lite/SOURCE_PROVENANCE.md)。 |
+| pro 板级依赖及原厂显示适配 | `board_compat/` 中的原厂文件保留各自许可；`port/tirtc_port.c` 源自利尔达 Demo，继续适用 Apache-2.0。见 [板级依赖](examples/NT26FxDx_OpenKit/TiRTC-EC718PM-Pro/board_compat/README.md)。 |
+| TiRTC SDK 头文件和 `.a` 库 | 按独立 TiRTC SDK 协议使用和分发。 [PM Lite SDK](examples/NT26FxDx_OpenKit/TiRTC-EC718PM-Lite/sdk/README.md) · [PM Pro SDK](examples/NT26FxDx_OpenKit/TiRTC-EC718PM-Pro/sdk/README.md) · [HM Pro 外部 SDK](examples/NT26FxDx_OpenKit/TiRTC-EC718HM-Pro/sdk/README.md) |
+| lite 的 cJSON、Opus、Mbed TLS 等依赖 | 保留 MIT、BSD、Apache 等各自条款，见 [lite 第三方清单](examples/NT26FxDx_OpenKit/TiRTC-EC718PM-Lite/THIRD_PARTY_NOTICES.md)。 |
+| pro littlefs、UI 参考代码及公共 SDK 内的 LVGL、二维码等组件 | 保留各自版权和许可证。见 [littlefs BSD-3-Clause](examples/NT26FxDx_OpenKit/TiRTC-EC718PM-Pro/storage/littlefs/LICENSE.md)、[UI 上游 MIT](examples/NT26FxDx_OpenKit/TiRTC-EC718PM-Pro/ui/LICENSE)；公共组件以组件目录和文件头为准。 |
+| 字体及由其生成的字库 | 软件 MIT 许可不替代字体许可；原字体和生成资源保留来源及授权边界，见 [字体来源说明](examples/NT26FxDx_OpenKit/TiRTC-EC718PM-Pro/ui/tools/font-sources/SOURCE.md)。 |
 | 上游许可副本、历史通知、名称与标志 | 产品目录中的 `LICENSES/`、`UPSTREAM_LICENSE`、`UPSTREAM_THIRD_PARTY_NOTICES.md` 保留上游原文；历史通知中的 Apache 声明对应其记录的旧版本。名称、标志与商标归各自权利人。 |
 
 ## 本次变更记录

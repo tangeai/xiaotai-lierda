@@ -75,5 +75,5 @@ TiRtcStart(identity->device_id, &s_callbacks);
 
 | 产品 | 设备绑定与凭据 | SDK 配置与启动 |
 | --- | --- | --- |
-| Lite | [src/services/device_binding.c](../tirtc_lite/src/services/device_binding.c) | [src/core/tirtc_runtime.c](../tirtc_lite/src/core/tirtc_runtime.c) |
-| Pro | [platform/device_binding.c](../tirtc_pro/platform/device_binding.c) | [runtime/tirtc_runtime.c](../tirtc_pro/runtime/tirtc_runtime.c) |
+| Lite | [src/services/device_binding.c](../TiRTC-EC718PM-Lite/src/services/device_binding.c) | [src/core/tirtc_runtime.c](../TiRTC-EC718PM-Lite/src/core/tirtc_runtime.c) |
+| Pro | [platform/device_binding.c](../TiRTC-EC718PM-Pro/platform/device_binding.c) | [runtime/tirtc_runtime.c](../TiRTC-EC718PM-Pro/runtime/tirtc_runtime.c) |

@@ -1,0 +1,8 @@
+# The repository preserves source bytes. Treat CRLF as a line ending on Windows.
+* whitespace=trailing-space,space-before-tab,cr-at-eol
+
+# Keep the imported littlefs snapshot, license and context patch byte-for-byte.
+storage/littlefs/lfs.c -whitespace
+storage/littlefs/lfs.h -whitespace
+storage/littlefs/LICENSE.md -whitespace
+storage/littlefs/legacy-geometry-readonly.patch -whitespace

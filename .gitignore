@@ -3,3 +3,6 @@ gccout
 __pycache__/
 /examples/NT26FxDx_OpenKit/firmware/*/*.tmp
 examples/NT26FxDx_OpenKit/demo/src/demo_zhongyi_ai/inc/ai_app_private_config.h
+/examples/NT26FxDx_OpenKit/TiRTC-*/tests/
+*.log
+.pytest_cache/
